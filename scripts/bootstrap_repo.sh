@@ -15,7 +15,8 @@ git config user.email >/dev/null 2>&1 || git config user.email "Phat1911@users.n
 git add -A
 git commit -m "chore: bootstrap Tributary — SPEC v0.3 + lifecycle docs (AGENTS/PLAN/AUDIT)" || echo "(nothing to commit)"
 
-# 4. remote + push
+# 4. normalize branch name (git may default to master) + remote + push
+git branch -M main
 git remote add origin https://github.com/Phat1911/Tributary.git 2>/dev/null \
   || git remote set-url origin https://github.com/Phat1911/Tributary.git
 git push -u origin main && echo "✅ pushed to github.com/Phat1911/Tributary" \
