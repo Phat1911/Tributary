@@ -1,0 +1,6 @@
+{
+  "name": "tributary",
+  "private": true,
+  "packageManager": "pnpm@10.15.1",
+  "license": "FSL-1.1-Apache-2.0"
+}
