@@ -1,0 +1,9 @@
+[package]
+name = "tributary-crypto"
+description = "Envelope encryption, key vault (libsodium/RustCrypto)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
