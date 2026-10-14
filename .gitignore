@@ -1,3 +1,14 @@
+# Environment / secrets — never commit
+.env
+.env.*
+
+# Node / pnpm
+node_modules/
+.next/
+out/
+*.tsbuildinfo
+.pnpm-store/
+
 # Rust build artifacts
 /target
 
