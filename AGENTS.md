@@ -60,6 +60,7 @@ this file (how we work), **PLAN.md** (status & log), **AUDIT.md** (security find
 8. Report changed files, test results, and known limitations. End every milestone report with a **fast jump** list — exact paths touched this milestone.
 9. *(Added)* New spec ambiguity discovered mid-work: record it in `AUDIT.md`; continue only if non-blocking, otherwise stop and ask.
 10. *(Added)* Any new/changed dependency must be justified in the `PLAN.md` entry (supply-chain discipline; `cargo-deny` runs in CI).
+11. *(Added)* **Parallelism policy:** sub-agents only for tasks that are large, have disjoint write-scopes, and share an interface that is fully agreed *before* the split. Scaffold/shared-config work and interface definition stay sequential. The milestone kickoff prompt names where parallelism is allowed.
 
 ## Session protocol (director–worker model)
 
