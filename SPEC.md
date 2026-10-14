@@ -346,7 +346,7 @@ for any hosted demo (Hetzner-class, student budget); English docs first.
 
 *Agents: tick the box on completion and append `— implemented at <commit-shorthand> <paths>, <date>`.*
 
-- [ ] **M0** — monorepo scaffold + CI skeleton
+- [x] **M0** — monorepo scaffold + CI skeleton — implemented at b000c42 `Cargo.toml` `crates/` `pnpm-workspace.yaml` `apps/dashboard/` `.github/workflows/ci.yml` `deny.toml` `LICENSE` `README.md` `.gitignore`, 2026-10-14
 - [ ] **M1** — gateway core: proxy, pool keys, streaming, metering
 - [ ] **M2** — orgs, pools, provider keys (encrypted), quota/rate engine
 - [ ] **M3** — dashboards + audit log
