@@ -60,3 +60,11 @@ this file (how we work), **PLAN.md** (status & log), **AUDIT.md** (security find
 8. Report changed files, test results, and known limitations. End every milestone report with a **fast jump** list — exact paths touched this milestone.
 9. *(Added)* New spec ambiguity discovered mid-work: record it in `AUDIT.md`; continue only if non-blocking, otherwise stop and ask.
 10. *(Added)* Any new/changed dependency must be justified in the `PLAN.md` entry (supply-chain discipline; `cargo-deny` runs in CI).
+
+## Session protocol (director–worker model)
+
+- Milestones execute in **dedicated worker sessions** (fresh context, workspace rooted at the repo). A long-lived **director session** (holds design memory) orchestrates across milestones.
+- Before each milestone the director scans state (SPEC tracker, PLAN, AUDIT, git), recommends *new session vs. continue*, and issues a **kickoff prompt** the user pastes into the worker session.
+- Worker sessions follow the Default workflow. Spec-change requests and rule questions route back through the user to the director.
+- On completion the worker updates PLAN/AUDIT/SPEC; the user returns to the director, which **verifies** the files and runs a short retro before issuing the next kickoff.
+- There is no cross-session telepathy: **the files are the only interface.** If it isn't in the files, it didn't happen.
