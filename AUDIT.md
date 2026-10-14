@@ -11,7 +11,9 @@ Severities:
 
 ## Open findings
 
-*(none)*
+| id | date | milestone | severity | finding | status | evidence/fix |
+|---|---|---|---|---|---|---|
+| A-001 | 2026-10-14 | M0 | low | SPEC refers to the license informally as "FSL-1.1-Apache-2.0"; the official SPDX id and license abbreviation is **FSL-1.1-ALv2** (Functional Source License 1.1, ALv2 Future License) | accepted | Repo metadata (`Cargo.toml`, `package.json`) and `LICENSE` use the official SPDX id `FSL-1.1-ALv2` with the verbatim fsl.software template; SPEC header/§13 wording left untouched for the director to align (non-blocking naming ambiguity, AGENTS workflow step 9) |
 
 ## Closed findings
 
