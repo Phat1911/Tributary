@@ -1,0 +1,9 @@
+[package]
+name = "tributary-gateway"
+description = "Data plane: axum OpenAI-compatible proxy, metering."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
