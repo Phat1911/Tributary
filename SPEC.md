@@ -372,7 +372,7 @@ for any hosted demo (Hetzner-class, student budget); English docs first.
 | **M3** | Dashboards (host + org admin + member usage), audit log | Org admin creates member + key + budget without CLI |
 | **M4** | Leak prevention free tier: IP allowlist, expiry/rotation, per-user caps, impossible-travel flag, basic canaries (honey keys + aliases + email alert) | Shared-key demo detected + capped in audit log |
 | **M5** | Packaging: one-command compose + single-container SQLite image, GHCR releases, docs site, landing page | Stranger deploys in <10 min from README |
-| **M6** | Pilot org onboarded (manual invoice); paid tier: mTLS, anomaly detection, canary response automation (tarpit, auto-revoke, attribution), SSO | First real org daily-driving it; ≥1 pays |
+| **M6** | Pilot org onboarded (manual invoice); pricing finalized (D27: from real delivery cost + pilot WTP + competitor scan); paid tier: mTLS, anomaly detection, canary response automation (tarpit, auto-revoke, attribution), SSO | First real org daily-driving it; ≥1 pays |
 
 ### V2 — Root Pool (settlement layer)
 
@@ -426,7 +426,7 @@ for any hosted demo (Hetzner-class, student budget); English docs first.
 |---|---|---|
 | 1 | Name/branding | **Tributary** (D19) — GitHub repo claimed (`Phat1911/Tributary`); still to claim before M5: crates.io crate name, `tributary.dev`/`.ai` |
 | 2 | First pilot orgs | Multi-track (D20): university club = free pilot target for M6; 1 VN startup from founder's network = first *paying* pilot (manual invoice, ~50% year-1 discount); 2–3 more orgs approached after M5 demo instance is live. Founder drafts outreach (AI-assisted) at M5. |
-| 3 | Pricing | D21: pilots via manual invoice; public paid tier (self-serve) = **Pro self-host license $39/org/month** (annual $390), includes mTLS + anomaly detection + canary response automation + SSO-later; root-pool operator fee target **8%** (inside the 5–10% band, §11). Revisit with pilot feedback at M6. |
+| 3 | Pricing | **PROVISIONAL (D27)** — pilots via manual invoice; placeholder public tier: Pro self-host license $39/org/month (annual $390), includes mTLS + anomaly detection + canary response automation + SSO-later; root-pool operator fee target **8%** (inside the 5–10% band, §11). **Final pricing is decided at M6 implementation time** from actual delivery cost per org + pilot willingness-to-pay + competitor scan; entry tier (~$19) or regional pricing may be considered. |
 | 4 | Provider priority | D22: OpenAI (M1) → Anthropic → Gemini native adapters; **OpenRouter-as-upstream immediately after** (one OpenAI-dialect adapter → 100+ models); vLLM/Ollama self-host upstreams arrive free via the same dialect. |
 | 5 | Model price table | D23: import script against LiteLLM's community-maintained `model_prices_and_context_window.json` + repo-owned `price_overrides.json` for corrections; refreshed per release; the price used is snapshotted into `usage_events` for auditability. |
 | 6 | Individual renter identity | D24: custodial prepaid only, **hard balance cap $50** initially + manual AML red-flag review; KYC-lite deferred to V2 public-launch legal review; caps raised case-by-case. |
@@ -464,3 +464,4 @@ for any hosted demo (Hetzner-class, student budget); English docs first.
 | D24 | Renter identity (2026-10-14) | Custodial prepaid, $50 hard cap, manual AML red flags; KYC-lite deferred to V2 legal review |
 | D25 | Hosted demo (2026-10-14) | Hetzner CX22 at M5; seeded SQLite, nightly reset; demo-only |
 | D26 | Dev lifecycle (2026-10-14) | AGENTS.md (conventions/rules/workflow), PLAN.md (status + milestone log + fast-jump), AUDIT.md (security findings); SPEC §14 milestone checkboxes ticked with implementation location |
+| D27 | Pricing provisional (2026-10-14, founder) | $39/org/mo and 8% fee are placeholders, not commitments; final pricing set at M6 implementation from actual delivery-cost data + pilot willingness-to-pay + competitor scan; entry tier (~$19) / regional pricing open options |
