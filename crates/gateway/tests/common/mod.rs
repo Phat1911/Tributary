@@ -32,9 +32,7 @@ pub async fn test_dbs() -> Vec<TestDb> {
     match std::env::var("TRIBUTARY_TEST_DATABASE_URL") {
         Ok(url) => match db::Db::connect(&url).await {
             Ok(db) => {
-                db::run_migrations(&db)
-                    .await
-                    .expect("postgres migrations");
+                db::run_migrations(&db).await.expect("postgres migrations");
                 dbs.push(TestDb {
                     name: "postgres",
                     pool: db,
