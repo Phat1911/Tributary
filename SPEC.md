@@ -6,7 +6,7 @@
 | **Version** | 0.3 — open questions resolved (D20–D26); lifecycle docs added |
 | **Date** | 2026-10-14 (v0.1: 2026-10-13) |
 | **Author** | Tran Dinh Hong Phat — Project founder (solo, CS student, Vietnam) + AI co-designer |
-| **License** | FSL-1.1-Apache-2.0 (converts to Apache-2.0 after 2 years) |
+| **License** | FSL-1.1-ALv2 (SPDX; Future License: Apache-2.0 after 2 years) |
 | **Status** | Decisions D1–D26 locked (Appendix A). Dev lifecycle: AGENTS.md (workflow), PLAN.md (status/log), AUDIT.md (security findings) |
 | **One-liner** | Self-hostable AI token pools — govern your org's AI usage with per-member keys, quotas, and leak detection; or deposit surplus credits into a Solana-settled marketplace. |
 
@@ -254,6 +254,8 @@ Honest scope: a determined insider can always proxy their own traffic. Goal =
 - Key expiry & rotation; instant revocation
 - Concurrent-connection limits; impossible-travel IP checks (simple)
 - **Basic canaries:** honey keys planted in platform-generated exports + per-member canary model aliases; email alert on activation; manual revoke
+- **Purpose-alignment signals (BYOK classifier, D28):** org pastes a third-party classifier API key (e.g., Jev) in settings — **no key configured ⇒ feature stays dormant**; the settings page probes the API at save-time (validates key, shows served model — model id lives in org config, never code); **member disclosure banner mandatory** (covert scoring banned); scores feed the admin review queue; classifier key stored under existing envelope encryption; setup guide in docs
+- **Purpose-alignment enforcement modes (D28, free tier):** *Alert* (default) — org-tunable threshold (recommended: flag below **0.5** alignment); admin reviews flags and manually blocks/unblocks/bans. *Auto-block* (explicit opt-in + warning) — recommended conservative threshold **0.15** alignment; **shadow mode first** (1–2 weeks showing "would have blocked N requests from M members" before going live); auto-block **only suspends the member's pool key pending review** (one-click unblock, full audit trail) — **never auto-bans people**; disclosure banner strengthens to "off-purpose requests may be blocked" when active
 
 **Paid tier (M6+):**
 - mTLS client certificates / device binding
@@ -330,7 +332,7 @@ The chain cannot see off-chain routing; hence staged trust:
 | Metering store | `usage_events` in main DB + rollups; ClickHouse only if needed | |
 | Observability | Baked-in minimal: Prometheus `/metrics`, health, JSON logs (tracing) | Grafana optional in compose |
 | CI/CD | GitHub Actions: fmt/clippy/test (SQLite+PG via testcontainers)/pnpm build/cargo-deny; tag → multi-arch image → GHCR | Free on public repo |
-| License | **FSL-1.1-Apache-2.0** | Internal use free; no competing service; → Apache-2.0 in 2y |
+| License | **FSL-1.1-ALv2** (SPDX; was informally "FSL-1.1-Apache-2.0" — corrected per AUDIT A-001) | Internal use free; no competing service; → Apache-2.0 in 2y |
 | Payments | **Manual invoices (pilots) → Polar** (~4–5%, VN-verified MoR) | Stripe N/A for VN sellers |
 | Monetization | Open-core: self-host free; paid = mTLS, anomaly, canary response automation, SSO, support | Hosted SaaS deferred |
 | On-chain (V2) | Anchor on Solana; upgrade authority → Squads multisig → optional freeze | |
@@ -350,7 +352,7 @@ for any hosted demo (Hetzner-class, student budget); English docs first.
 - [ ] **M1** — gateway core: proxy, pool keys, streaming, metering
 - [ ] **M2** — orgs, pools, provider keys (encrypted), quota/rate engine
 - [ ] **M3** — dashboards + audit log
-- [ ] **M4** — leak prevention free tier (+ basic canaries)
+- [ ] **M4** — leak prevention free tier (+ basic canaries, BYOK purpose classifier + auto-block)
 - [ ] **M5** — packaging, docs, landing page, hosted demo (D25)
 - [ ] **M6** — pilot orgs (D20) + paid tier
 - [ ] **M7** — `LedgerTrait` + double-entry ledger
@@ -370,9 +372,9 @@ for any hosted demo (Hetzner-class, student budget); English docs first.
 | **M1** | Gateway core: proxy 1 provider (OpenAI), pool keys, streaming passthrough, token counting, `usage_events` | `curl` chat via `sk-pool-…` key; usage row written; both DBs pass |
 | **M2** | Orgs, members, pools, provider keys (encrypted), quota/rate engine, key health | Two pools isolated: one's quota never affects the other |
 | **M3** | Dashboards (host + org admin + member usage), audit log | Org admin creates member + key + budget without CLI |
-| **M4** | Leak prevention free tier: IP allowlist, expiry/rotation, per-user caps, impossible-travel flag, basic canaries (honey keys + aliases + email alert) | Shared-key demo detected + capped in audit log |
+| **M4** | Leak prevention free tier: IP allowlist, expiry/rotation, per-user caps, impossible-travel flag, basic canaries (honey keys + aliases + email alert), purpose-alignment BYOK classifier (dormant without org key, member disclosure, Alert + Auto-block modes per D28) | Shared-key demo detected + capped in audit log; purpose-drift flag visible in admin queue when a classifier key is configured |
 | **M5** | Packaging: one-command compose + single-container SQLite image, GHCR releases, docs site, landing page | Stranger deploys in <10 min from README |
-| **M6** | Pilot org onboarded (manual invoice); pricing finalized (D27: from real delivery cost + pilot WTP + competitor scan); paid tier: mTLS, anomaly detection, canary response automation (tarpit, auto-revoke, attribution), SSO | First real org daily-driving it; ≥1 pays |
+| **M6** | Pilot org onboarded (manual invoice); pricing + paid-tier structure finalized (D27: real delivery cost + pilot WTP + competitor scan; under D29 cost-mirror — binary features default free; tier candidates re-derived: support, costed integrations; mTLS/anomaly/canary automation/SSO only if they carry real cost) | First real org daily-driving it; ≥1 pays |
 
 ### V2 — Root Pool (settlement layer)
 
@@ -405,6 +407,7 @@ for any hosted demo (Hetzner-class, student budget); English docs first.
 - Backups: single SQLite file copy path documented; PG: standard dump jobs.
 - Both DBs bit-identical behavior covered by one test suite (testcontainers).
 - Docs: README quickstart ≤ 10 minutes to first proxied request.
+- **Extensibility (feature growth, D29 companion principle):** the project will grow many features beyond today's set — new capabilities attach via trait seams + config (e.g., `LedgerTrait`, `ClassifierProvider`), never core surgery; migrations stay additive; provider/model identities live in config/DB, never code.
 
 ---
 
@@ -448,7 +451,7 @@ for any hosted demo (Hetzner-class, student budget); English docs first.
 | D8 | Auth | Built-in lightweight |
 | D9 | Rate-limit hot path | Postgres + in-process cache |
 | D10 | Payments | Manual invoices → Polar (Vietnam-verified) |
-| D11 | License | FSL-1.1-Apache-2.0 |
+| D11 | License | FSL-1.1-ALv2 (SPDX id corrected per AUDIT A-001; informally "FSL-1.1-Apache-2.0") |
 | D12 | Observability | Baked-in minimal |
 | D13 | Program upgrades | Solana upgrade authority → multisig → optional freeze (no EVM proxies) |
 | D14 | CI/CD | GitHub Actions from M0; GHCR releases from M5 |
@@ -465,3 +468,5 @@ for any hosted demo (Hetzner-class, student budget); English docs first.
 | D25 | Hosted demo (2026-10-14) | Hetzner CX22 at M5; seeded SQLite, nightly reset; demo-only |
 | D26 | Dev lifecycle (2026-10-14) | AGENTS.md (conventions/rules/workflow), PLAN.md (status + milestone log + fast-jump), AUDIT.md (security findings); SPEC §14 milestone checkboxes ticked with implementation location |
 | D27 | Pricing provisional (2026-10-14, founder) | $39/org/mo and 8% fee are placeholders, not commitments; final pricing set at M6 implementation from actual delivery-cost data + pilot willingness-to-pay + competitor scan; entry tier (~$19) / regional pricing open options |
+| D28 | Purpose-alignment signals (2026-10-15, founder-directed; amended same day) | **Free tier (M4), BYOK-only:** org supplies third-party classifier API key (e.g., Jev) via settings; no key ⇒ feature dormant; member disclosure banner mandatory; key under envelope encryption; `ClassifierProvider` adapter with churn defenses — raw HTTP version-pinned (no vendor SDKs), save-time key+model probe (model id in org config, never code), fixture contract tests, weekly live smoke job in CI, tolerant parsing, fail-open auxiliary path. **Enforcement modes (free per D29 cost-mirror rule):** Alert (default, threshold rec. 0.5 alignment, manual block/ban/unblock) and Auto-block (opt-in + warning, threshold rec. 0.15, shadow mode 1–2 weeks first, suspends pool key pending review only — never auto-bans; stronger member disclosure when active) |
+| D29 | Paywall mirrors cost (2026-10-15, founder principle) | Gate a feature behind the paid tier ONLY when it carries real per-org cost to us — hosted/managed infra, third-party licenses we must buy, heavy support load. Code shipping in the self-hosted binary defaults to **free** (runs on the org's machine, $0 marginal cost). Existing tier assignments (D17 canary response automation; D21 mTLS/anomaly/SSO) re-derived at M6 alongside D27; SSO stays paid only if we license a vendor component. Durable paid anchors now: support + genuinely costed integrations; **hosted/managed stays deferred** (original trigger: ≥3 pilot orgs asking). Goal: minimize client price — adoption first. If the project wins strong adoption/attention, the founder may explicitly revisit tiering to advance revenue (monetize at scale); until then this rule governs. |

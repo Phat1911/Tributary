@@ -32,7 +32,7 @@ this file (how we work), **PLAN.md** (status & log), **AUDIT.md** (security find
 - **TypeScript:** pnpm; `next lint`; `tsc --noEmit`; no committed `any`.
 - **Commits:** conventional (`feat:`, `fix:`, `chore:`), one logical change each.
 
-## Rules — security & economic constraints (from SPEC; non-negotiable)
+## Rules — security & economic constraints (from SPEC; non-negotiable — cite as "rule N")
 
 **Security**
 1. Path B only — deposits are API credits/keys; NEVER subscription logins or browser automation of consumer plans (SPEC §4.1).
@@ -48,7 +48,7 @@ this file (how we work), **PLAN.md** (status & log), **AUDIT.md** (security find
 9. No token sale/ICO — shares are ledger claims only (§4.4).
 10. Chain-optional UX: members/renters never need a wallet; chain settlement is back-end only (§4.5).
 
-## Default workflow
+## Default workflow (cite items as "workflow step N", never "rule N")
 
 1. Read `AGENTS.md`, `SPEC.md`, `PLAN.md`, and the current worktree before changing code.
 2. Select only the next incomplete milestone; restate its scope and required verification (the SPEC "done when").
