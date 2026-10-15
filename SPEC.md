@@ -373,7 +373,7 @@ for any hosted demo (Hetzner-class, student budget); English docs first.
 | **M2** | Orgs, members, pools, provider keys (encrypted), quota/rate engine, key health | Two pools isolated: one's quota never affects the other |
 | **M3** | Dashboards (host + org admin + member usage), audit log | Org admin creates member + key + budget without CLI |
 | **M4** | Leak prevention free tier: IP allowlist, expiry/rotation, per-user caps, impossible-travel flag, basic canaries (honey keys + aliases + email alert), purpose-alignment BYOK classifier (dormant without org key, member disclosure, Alert + Auto-block modes per D28) | Shared-key demo detected + capped in audit log; purpose-drift flag visible in admin queue when a classifier key is configured |
-| **M5** | Packaging: one-command compose + single-container SQLite image, GHCR releases, docs site, landing page | Stranger deploys in <10 min from README |
+| **M5** | Packaging: one-command compose + single-container SQLite image, GHCR releases, docs site, landing page, **OpenAI-SDK contract tests in CI (official Python + JS SDKs — activated here per director ruling 2026-10-15, deferred from M1)** | Stranger deploys in <10 min from README |
 | **M6** | Pilot org onboarded (manual invoice); pricing + paid-tier structure finalized (D27: real delivery cost + pilot WTP + competitor scan; under D29 cost-mirror — binary features default free; tier candidates re-derived: support, costed integrations; mTLS/anomaly/canary automation/SSO only if they carry real cost) | First real org daily-driving it; ≥1 pays |
 
 ### V2 — Root Pool (settlement layer)
