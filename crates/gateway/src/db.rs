@@ -25,16 +25,42 @@ pub struct Db {
 
 impl Db {
     /// Connect using a URL (`sqlite://…` or `postgres://…`).
+    ///
+    /// SQLite connections pin `PRAGMA journal_mode=WAL` and
+    /// `PRAGMA busy_timeout=5000` on every pooled connection so concurrent
+    /// metering writers queue briefly instead of failing `SQLITE_BUSY` —
+    /// a failed insert would be a silently unmetered request (director
+    /// ruling 2026-10-16). sqlx 0.9's Any driver is URL-opaque (typed
+    /// `SqliteConnectOptions` and pragma URL params cannot cross it), so
+    /// the pragmas run in `after_connect`, once per new connection.
+    /// WAL persists in the database file; busy_timeout is per-connection
+    /// and therefore genuinely needs the hook.
     pub async fn connect(url: &str) -> anyhow::Result<Self> {
         install_default_drivers();
-        let pool = AnyPoolOptions::new()
-            .max_connections(5)
-            .connect(url)
-            .await?;
-        Ok(Self {
-            pool,
-            postgres: url.starts_with("postgres"),
-        })
+        let postgres = url.starts_with("postgres");
+        let pool = if postgres {
+            AnyPoolOptions::new()
+                .max_connections(5)
+                .connect(url)
+                .await?
+        } else {
+            AnyPoolOptions::new()
+                .max_connections(5)
+                .after_connect(|conn, _| {
+                    Box::pin(async move {
+                        sqlx::query("PRAGMA journal_mode=WAL")
+                            .fetch_all(&mut *conn)
+                            .await?;
+                        sqlx::query("PRAGMA busy_timeout=5000")
+                            .fetch_all(&mut *conn)
+                            .await?;
+                        Ok(())
+                    })
+                })
+                .connect(url)
+                .await?
+        };
+        Ok(Self { pool, postgres })
     }
 
     /// The underlying pool (for migrations and test assertions).
