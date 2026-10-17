@@ -1,11 +1,11 @@
 //! `POST /v1/chat/completions` — OpenAI-compatible proxy with metering.
 //!
-//! Full SPEC §5 lifecycle as of M2:
-//! 1. auth (pool-scoped key) → 2. pool house rules (status + model
-//! allowlist) → 3. **quota/rate check BEFORE any upstream work (rule 4)** →
-//! 4. provider-key selection (first-available) + per-use decrypt →
-//! 5. forward/stream with token extraction → 6. append `usage_events`
-//! (now attributing pool + provider key) → 7. health signals (M4+).
+//! Full SPEC §5 lifecycle as of M2: (1) auth (pool-scoped key); (2) pool
+//! house rules (status + model allowlist); (3) quota/rate check BEFORE any
+//! upstream work (rule 4); (4) provider-key selection (first-available) +
+//! per-use decrypt; (5) forward/stream with token extraction; (6) append
+//! `usage_events` (now attributing pool + provider key); (7) health signals
+//! (M4+).
 
 use std::convert::Infallible;
 use std::time::{Duration, Instant};

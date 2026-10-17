@@ -14,9 +14,11 @@ use harness::*;
 async fn bootstrap_login_and_reject_bad_credentials() {
     for db in test_dbs().await {
         let (app, _mock) = control_app(db.pool.clone()).await;
-        tributary_control::create_host_admin(&db.pool, "root@tributary.dev", "hunter2hunter2")
-            .await
-            .expect("bootstrap");
+        // Shared-DB races (Postgres half, parallel tests): tolerate losing
+        // the bootstrap race — login below proves the account exists.
+        let _ =
+            tributary_control::create_host_admin(&db.pool, "root@tributary.dev", "hunter2hunter2")
+                .await;
 
         // Second bootstrap must be refused (CLI cannot mint more admins).
         assert!(

@@ -248,7 +248,7 @@ async fn usage_count(db: &Db, kind: &str, id: &str, since_ms: i64) -> sqlx::Resu
 async fn usage_tokens(db: &Db, kind: &str, id: &str, since_ms: i64) -> sqlx::Result<i64> {
     use sqlx::Row;
     let sql = db.sql(&format!(
-        "SELECT COALESCE(SUM(prompt_tokens + completion_tokens), 0) AS t \
+        "SELECT CAST(COALESCE(SUM(prompt_tokens + completion_tokens), 0) AS BIGINT) AS t \
          FROM usage_events WHERE {} = ? AND ts >= ?",
         usage_column(kind)
     ));
