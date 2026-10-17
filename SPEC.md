@@ -353,7 +353,7 @@ for any hosted demo (Hetzner-class, student budget); English docs first.
 - [x] **M0** — monorepo scaffold + CI skeleton — implemented at b000c42 `Cargo.toml` `crates/` `pnpm-workspace.yaml` `apps/dashboard/` `.github/workflows/ci.yml` `deny.toml` `LICENSE` `README.md` `.gitignore`, 2026-10-14
 - [x] **M1** — gateway core: proxy, pool keys, streaming, metering — implemented at 2e9359e `migrations/` `crates/gateway/` `.github/workflows/ci.yml` `scripts/mock_openai.py`, 2026-10-15
 - [x] **M2** — orgs, pools, provider keys (encrypted), quota/rate engine — implemented at cd5f97e (feat chain 8207e38→2fead3d) `migrations/` `crates/{common,crypto,control,gateway}/` `AGENTS.md`, 2026-10-17
-- [ ] **M3** — dashboards + audit log
+- [x] **M3** — dashboards + audit log — implemented at 9d2ec2f→ba9ca28 `migrations/0006_audit_log_login_throttle.sql` `crates/{control,gateway}/` `apps/dashboard/` `.github/workflows/ci.yml`, 2026-10-17
 - [ ] **M4** — leak prevention free tier (+ basic canaries, BYOK purpose classifier + auto-block)
 - [ ] **M5** — packaging, docs, landing page, hosted demo (D25)
 - [ ] **M6** — pilot orgs (D20) + paid tier
