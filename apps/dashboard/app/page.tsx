@@ -1,29 +1,39 @@
-const styles = {
-  main: {
-    minHeight: "100dvh",
-    display: "flex",
-    flexDirection: "column" as const,
-    alignItems: "center",
-    justifyContent: "center",
-    gap: "0.75rem",
-    padding: "2rem",
-    textAlign: "center" as const,
-  },
-  tagline: {
-    opacity: 0.7,
-  },
-  note: {
-    fontSize: "0.875rem",
-    opacity: 0.5,
-  },
+// Landing = router by role. The control API is the authority (cookie auth);
+// the page is a thin client that redirects to the right home.
+"use client";
+
+import { useRouter } from "next/navigation";
+import { useEffect, useState } from "react";
+import { api, type PublicUser } from "@/lib/api";
+
+const HOME_BY_ROLE: Record<string, string> = {
+  host_admin: "/host",
+  org_admin: "/org",
+  member: "/me",
 };
 
 export default function Home() {
+  const router = useRouter();
+  const [failed, setFailed] = useState(false);
+
+  useEffect(() => {
+    api
+      .get<PublicUser>("/auth/me")
+      .then((user) => router.replace(HOME_BY_ROLE[user.role] ?? "/me"))
+      .catch(() => router.replace("/login"));
+    // A stuck fetch should still show something (very slow networks).
+    const timer = setTimeout(() => setFailed(true), 8000);
+    return () => clearTimeout(timer);
+  }, [router]);
+
   return (
-    <main style={styles.main}>
-      <h1>Tributary</h1>
-      <p style={styles.tagline}>Small streams. Pooled power.</p>
-      <p style={styles.note}>Dashboard placeholder — the real UI arrives in M3.</p>
+    <main className="flex min-h-dvh flex-col items-center justify-center gap-3">
+      <h1 className="font-display text-2xl font-semibold tracking-tight">
+        Tributary
+      </h1>
+      <p className="text-sm text-muted-foreground">
+        {failed ? "Could not reach the control plane — is `serve` running?" : "…"}
+      </p>
     </main>
   );
 }
