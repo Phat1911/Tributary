@@ -1,9 +1,15 @@
 [package]
 name = "tributary-crypto"
-description = "Envelope encryption, key vault (libsodium/RustCrypto)."
+description = "Envelope encryption, key vault (XChaCha20-Poly1305, RustCrypto — D30)."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
 [dependencies]
+anyhow = "1"
+base64 = "0.22"
+chacha20poly1305 = "0.10"
+hex = "0.4"
+rand = "0.9"
+zeroize = "1"
