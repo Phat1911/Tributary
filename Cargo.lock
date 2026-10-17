@@ -1951,6 +1951,14 @@ dependencies = [
 [[package]]
 name = "tributary-common"
 version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "hex",
+ "rand 0.9.5",
+ "sha2 0.10.9",
+ "sqlx",
+ "subtle",
+]
 
 [[package]]
 name = "tributary-control"
@@ -1967,21 +1975,18 @@ dependencies = [
  "anyhow",
  "axum",
  "futures-util",
- "hex",
  "http-body-util",
- "rand 0.9.5",
  "reqwest",
  "serde",
  "serde_json",
- "sha2 0.10.9",
  "sqlx",
- "subtle",
  "tempfile",
  "thiserror",
  "tokio",
  "tower",
  "tracing",
  "tracing-subscriber",
+ "tributary-common",
 ]
 
 [[package]]

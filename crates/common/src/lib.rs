@@ -1,17 +1,10 @@
-//! Shared types, errors, config.
-//! Placeholder crate — grows as the other crates extract common code.
+//! Shared foundation used by every Tributary crate.
+//!
+//! - [`db`]: the portable sqlx-`Any` adapter (one query path for SQLite AND
+//!   PostgreSQL — AGENTS.md DB convention). All DB-specific SQL lives there.
+//! - [`keys`]: pool-key material handling (generation + hashing).
+//! - [`time`]: UTC period math for the quota engine and RFC 3339 formatting.
 
-/// Returns the crate name, proving the workspace member builds and its tests run.
-pub fn crate_name() -> &'static str {
-    "tributary-common"
-}
-
-#[cfg(test)]
-mod tests {
-    use super::crate_name;
-
-    #[test]
-    fn hello_world() {
-        assert_eq!(crate_name(), "tributary-common");
-    }
-}
+pub mod db;
+pub mod keys;
+pub mod time;
