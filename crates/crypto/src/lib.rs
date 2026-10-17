@@ -300,11 +300,11 @@ mod tests {
         assert!(!format!("{master:?}").contains("sk-provider"));
         assert!(!format!("{sealed:?}").contains("sk-provider"));
         assert!(!format!("{opened:?}").contains(&master_hex));
-        // The plaintext container's Debug DOES expose the bytes — as a byte
-        // array ([115, 107, …] = 's','k'). This documents the boundary:
-        // callers must never Debug-print the opened value; only the wrapped
-        // key types above are redacted by construction.
-        assert!(format!("{opened:?}").starts_with("[115, 107, 45")); // 's','k','-'
+        // zeroize 1.9 redacts Zeroizing's own Debug ("Zeroizing { .. }"), so
+        // even the opened plaintext container cannot leak via a stray
+        // Debug-print. Asserted, not assumed:
+        assert_eq!(format!("{opened:?}"), "Zeroizing { .. }");
+        assert!(!format!("{opened:?}").contains("115"));
     }
 
     #[test]
