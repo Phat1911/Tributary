@@ -16,10 +16,10 @@ async fn auth_rejects_missing_unknown_revoked_expired_keys() {
     for db in test_dbs().await {
         let mock = spawn_mock(MockMode::NonStream).await;
         let app = test_app(db.pool.clone(), &mock).await;
-        let (_raw, id) = seed_key(&db.pool, "active", None, None).await;
-        let (revoked_raw, _revoked_id) = seed_key(&db.pool, "revoked", None, None).await;
+        let (_raw, id) = seed_key(&db.pool, None, "active", None, None).await;
+        let (revoked_raw, _revoked_id) = seed_key(&db.pool, None, "revoked", None, None).await;
         let (expired_raw, _expired_id) =
-            seed_key(&db.pool, "active", Some(db::now_ms() - 1_000), None).await;
+            seed_key(&db.pool, None, "active", Some(db::now_ms() - 1_000), None).await;
 
         let cases = [
             (None, "missing header"),
@@ -71,7 +71,8 @@ async fn non_streaming_proxies_and_meters() {
     for db in test_dbs().await {
         let mock = spawn_mock(MockMode::NonStream).await;
         let app = test_app(db.pool.clone(), &mock).await;
-        let (raw, id) = seed_key(&db.pool, "active", None, Some("user-1")).await;
+        let setup = setup_working(&db.pool, &mock).await;
+        let (raw, id) = (setup.key_raw.clone(), setup.key_id.clone());
 
         let response = app
             .oneshot(chat_request(Some(&raw), &chat_body()))
@@ -113,8 +114,13 @@ async fn non_streaming_proxies_and_meters() {
         assert_eq!(row.model, "m-test");
         assert_eq!(row.prompt_tokens, 11);
         assert_eq!(row.completion_tokens, 7);
-        assert_eq!(row.cost_micros, 0, "cost stays 0 until pricing (M2+)");
+        assert_eq!(row.cost_micros, 0, "cost stays 0 until pricing (D23)");
         assert_eq!(row.status, "200");
+        assert_eq!(row.pool_id.as_deref(), Some(setup.pool_id.as_str()));
+        assert_eq!(
+            row.provider_key_id.as_deref(),
+            Some(setup.provider_key_id.as_str())
+        );
     }
 }
 
@@ -123,7 +129,8 @@ async fn malformed_body_is_rejected_openai_style() {
     for db in test_dbs().await {
         let mock = spawn_mock(MockMode::NonStream).await;
         let app = test_app(db.pool.clone(), &mock).await;
-        let (raw, _id) = seed_key(&db.pool, "active", None, None).await;
+        let setup = setup_working(&db.pool, &mock).await;
+        let raw = setup.key_raw.clone();
 
         let request = Request::builder()
             .method("POST")
@@ -146,7 +153,8 @@ async fn upstream_error_passes_through_and_is_metered() {
     for db in test_dbs().await {
         let mock = spawn_mock(MockMode::Error(500)).await;
         let app = test_app(db.pool.clone(), &mock).await;
-        let (raw, id) = seed_key(&db.pool, "active", None, None).await;
+        let setup = setup_working(&db.pool, &mock).await;
+        let (raw, id) = (setup.key_raw.clone(), setup.key_id.clone());
 
         let response = app
             .oneshot(chat_request(Some(&raw), &chat_body()))
@@ -169,7 +177,8 @@ async fn models_lists_config_and_requires_auth() {
     for db in test_dbs().await {
         let mock = spawn_mock(MockMode::NonStream).await;
         let app = test_app(db.pool.clone(), &mock).await;
-        let (raw, _id) = seed_key(&db.pool, "active", None, None).await;
+        let setup = setup_working(&db.pool, &mock).await;
+        let raw = setup.key_raw.clone();
 
         let unauth = Request::builder()
             .uri("/v1/models")
@@ -201,7 +210,7 @@ async fn models_lists_config_and_requires_auth() {
 #[tokio::test]
 async fn raw_key_material_never_lands_in_storage() {
     for db in test_dbs().await {
-        let (raw, _id) = seed_key(&db.pool, "active", None, None).await;
+        let (raw, _id) = seed_key(&db.pool, None, "active", None, None).await;
         let hash = keys::hash_token(&raw);
         let row = db::lookup_pool_key(&db.pool, &hash).await.unwrap().unwrap();
         // No stored field contains the raw key or its random body.

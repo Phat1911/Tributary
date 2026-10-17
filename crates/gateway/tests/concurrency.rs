@@ -19,7 +19,7 @@ use tributary_gateway::db;
 async fn concurrent_metering_inserts_never_fail_busy() {
     for test_db in test_dbs().await {
         let pool = test_db.pool.clone();
-        let (_, key_id) = seed_key(&pool, "active", None, Some("concurrency-test")).await;
+        let (_, key_id) = seed_key(&pool, None, "active", None, Some("concurrency-test")).await;
 
         const WRITERS: usize = 8;
         const ROWS_EACH: usize = 5;
@@ -35,6 +35,8 @@ async fn concurrent_metering_inserts_never_fail_busy() {
                         ts: db::now_ms(),
                         pool_key_id: key_id.clone(),
                         user_id: Some(format!("writer-{writer}")),
+                        pool_id: None,
+                        provider_key_id: None,
                         model: format!("m-{writer}-{row}"),
                         prompt_tokens: 1,
                         completion_tokens: 1,

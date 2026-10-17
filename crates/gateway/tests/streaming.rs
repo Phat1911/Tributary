@@ -19,7 +19,8 @@ async fn gateway_injected_usage_is_stripped_downstream_but_metered() {
     for db in test_dbs().await {
         let mock = spawn_mock(MockMode::Stream { with_usage: true }).await;
         let app = test_app(db.pool.clone(), &mock).await;
-        let (raw, id) = seed_key(&db.pool, "active", None, None).await;
+        let setup = setup_working(&db.pool, &mock).await;
+        let (raw, id) = (setup.key_raw.clone(), setup.key_id.clone());
 
         // Client did NOT set include_usage — gateway injects it upstream.
         let response = app
@@ -72,7 +73,8 @@ async fn client_requested_usage_chunk_is_forwarded_untouched() {
     for db in test_dbs().await {
         let mock = spawn_mock(MockMode::Stream { with_usage: true }).await;
         let app = test_app(db.pool.clone(), &mock).await;
-        let (raw, id) = seed_key(&db.pool, "active", None, None).await;
+        let setup = setup_working(&db.pool, &mock).await;
+        let (raw, id) = (setup.key_raw.clone(), setup.key_id.clone());
 
         // Client asks for usage itself — every byte must be forwarded.
         let mut body = stream_body();
@@ -102,7 +104,8 @@ async fn fallback_counts_chunks_when_upstream_sends_no_usage() {
     for db in test_dbs().await {
         let mock = spawn_mock(MockMode::Stream { with_usage: false }).await;
         let app = test_app(db.pool.clone(), &mock).await;
-        let (raw, id) = seed_key(&db.pool, "active", None, None).await;
+        let setup = setup_working(&db.pool, &mock).await;
+        let (raw, id) = (setup.key_raw.clone(), setup.key_id.clone());
 
         let response = app
             .oneshot(chat_request(Some(&raw), &stream_body()))

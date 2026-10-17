@@ -2,7 +2,7 @@
 //!
 //! Key generation/hashing moved to `tributary_common::keys` in M2 (the
 //! control plane issues the same keys); this module keeps the HTTP-facing
-//! pieces: bearer parsing and the `AuthedKey` extractor.
+//! pieces: bearer parsing and the `AuthedKey` extractor, now pool-scoped.
 
 use axum::extract::FromRequestParts;
 use axum::http::request::Parts;
@@ -29,11 +29,14 @@ pub fn bearer_token(headers: &axum::http::HeaderMap) -> Option<&str> {
 }
 
 /// An authenticated pool key, extracted and validated per request
-/// (SPEC §5 lifecycle step 2 — M1 subset: valid, active, unexpired).
+/// (SPEC §5 lifecycle step 2): valid, active, unexpired, AND bound to a
+/// pool — poolless keys are M1 relics with nothing to route to.
 #[derive(Debug, Clone)]
 pub struct AuthedKey {
     pub id: String,
     pub user_id: Option<String>,
+    /// The pool this key unlocks (never NULL post-auth).
+    pub pool_id: String,
 }
 
 impl FromRequestParts<AppState> for AuthedKey {
@@ -42,7 +45,7 @@ impl FromRequestParts<AppState> for AuthedKey {
     type Rejection = ApiError;
 
     /// Runs before the handler: parse the bearer token, hash it, look it up,
-    /// and enforce status/expiry. Any failure rejects the request.
+    /// and enforce status/expiry/pool-binding. Any failure rejects.
     async fn from_request_parts(
         parts: &mut Parts,
         state: &AppState,
@@ -67,9 +70,14 @@ impl FromRequestParts<AppState> for AuthedKey {
         {
             return Err(ApiError::Unauthorized);
         }
+        let pool_id = row.pool_id.filter(|p| !p.is_empty()).ok_or_else(|| {
+            // Keys predating M2 have no pool; they cannot route anywhere.
+            ApiError::Unauthorized
+        })?;
         Ok(AuthedKey {
             id: row.id,
             user_id: row.user_id,
+            pool_id,
         })
     }
 }
