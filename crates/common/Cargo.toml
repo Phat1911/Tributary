@@ -1,9 +1,15 @@
 [package]
 name = "tributary-common"
-description = "Shared types, errors, config."
+description = "Shared types, portable DB adapter, key/time helpers."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
 [dependencies]
+anyhow = "1"
+hex = "0.4"
+rand = "0.9"
+sha2 = "0.10"
+sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "any", "sqlite", "postgres", "migrate", "macros"] }
+subtle = "2"

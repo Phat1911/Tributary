@@ -1,138 +1,17 @@
-//! Database access (sqlx `Any` — one portable code path for SQLite and PostgreSQL).
+//! Gateway-owned queries over the shared portable adapter.
 //!
-//! Every statement here is deliberately dialect-free (TEXT/BIGINT). sqlx's
-//! Any driver does not unify placeholder syntax (`?` vs `$n`), so `Db`
-//! remembers the URL scheme and `Db::sql` mechanically rewrites `?` to
-//! `$1..$n` for Postgres. All SQL still lives in this one module — no
-//! DB-specific SQL anywhere else (AGENTS.md convention).
+//! The adapter itself (sqlx `Any`, placeholder rewrite, WAL/busy_timeout
+//! pins, migrations) lives in `tributary_common::db` — moved there in M2
+//! when the control plane began sharing it (M1 PLAN note). This module
+//! keeps only data-plane queries: pool-key lookup and usage metering.
 
-use rand::RngCore;
-use sqlx::AnyPool;
 use sqlx::Row;
-use sqlx::any::{AnyPoolOptions, install_default_drivers};
-use sqlx::migrate::Migrator;
-use std::time::{SystemTime, UNIX_EPOCH};
 
-/// Embedded migrations from the repo-root `migrations/` directory.
-pub static MIGRATIONS: Migrator = sqlx::migrate!("../../migrations");
-
-/// A connected database (SQLite or PostgreSQL) behind one portable API.
-#[derive(Clone)]
-pub struct Db {
-    pool: AnyPool,
-    postgres: bool,
-}
-
-impl Db {
-    /// Connect using a URL (`sqlite://…` or `postgres://…`).
-    ///
-    /// SQLite connections pin `PRAGMA journal_mode=WAL` and
-    /// `PRAGMA busy_timeout=5000` on every pooled connection so concurrent
-    /// metering writers queue briefly instead of failing `SQLITE_BUSY` —
-    /// a failed insert would be a silently unmetered request (director
-    /// ruling 2026-10-16). sqlx 0.9's Any driver is URL-opaque (typed
-    /// `SqliteConnectOptions` and pragma URL params cannot cross it), so
-    /// the pragmas run in `after_connect`, once per new connection.
-    /// WAL persists in the database file; busy_timeout is per-connection
-    /// and therefore genuinely needs the hook.
-    pub async fn connect(url: &str) -> anyhow::Result<Self> {
-        install_default_drivers();
-        let postgres = url.starts_with("postgres");
-        let pool = if postgres {
-            AnyPoolOptions::new()
-                .max_connections(5)
-                .connect(url)
-                .await?
-        } else {
-            AnyPoolOptions::new()
-                .max_connections(5)
-                .after_connect(|conn, _| {
-                    Box::pin(async move {
-                        sqlx::query("PRAGMA journal_mode=WAL")
-                            .fetch_all(&mut *conn)
-                            .await?;
-                        sqlx::query("PRAGMA busy_timeout=5000")
-                            .fetch_all(&mut *conn)
-                            .await?;
-                        Ok(())
-                    })
-                })
-                .connect(url)
-                .await?
-        };
-        Ok(Self { pool, postgres })
-    }
-
-    /// The underlying pool (for migrations and test assertions).
-    pub fn pool(&self) -> &AnyPool {
-        &self.pool
-    }
-
-    /// Placeholder translation: SQL is written with `?`; Postgres needs `$n`.
-    fn sql(&self, sql: &str) -> String {
-        rewrite_placeholders(sql, self.postgres)
-    }
-}
-
-/// Mechanical `?` → `$1..$n` rewrite for Postgres (sqlx's Any driver does
-/// not unify placeholder syntax). Only ever applied to module-owned literal
-/// SQL — never to user input.
-fn rewrite_placeholders(sql: &str, postgres: bool) -> String {
-    if !postgres {
-        return sql.to_string();
-    }
-    let mut out = String::with_capacity(sql.len() + 8);
-    let mut n = 0;
-    for ch in sql.chars() {
-        if ch == '?' {
-            n += 1;
-            out.push_str(&format!("${n}"));
-        } else {
-            out.push(ch);
-        }
-    }
-    out
-}
-
-/// Single-connection in-memory SQLite pool. Used only by tests on Windows
-/// (cargo-interop) where absolute paths cannot be expressed through the Any
-/// driver's URL form; Linux/CI tests use real tempfiles. One connection
-/// means one shared in-memory database, so idle/lifetime eviction is
-/// disabled to keep the schema alive for the whole test.
-pub async fn connect_sqlite_memory() -> anyhow::Result<Db> {
-    install_default_drivers();
-    let pool = AnyPoolOptions::new()
-        .max_connections(1)
-        .idle_timeout(None)
-        .max_lifetime(None)
-        .connect("sqlite::memory:")
-        .await?;
-    Ok(Db {
-        pool,
-        postgres: false,
-    })
-}
-
-/// Run embedded migrations (idempotent — safe on every start).
-pub async fn run_migrations(db: &Db) -> anyhow::Result<()> {
-    MIGRATIONS.run(db.pool()).await?;
-    Ok(())
-}
-
-/// Current time as unix epoch milliseconds.
-pub fn now_ms() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0)
-}
-
-/// Random 128-bit id, hex-encoded (portable TEXT primary key).
-pub fn new_id() -> String {
-    let mut bytes = [0u8; 16];
-    rand::rng().fill_bytes(&mut bytes);
-    hex::encode(bytes)
-}
+// Re-exported so existing `tributary_gateway::db::*` call sites (tests,
+// binary subcommands) keep working unchanged after the M2 move to common.
+pub use tributary_common::db::{
+    Db, MIGRATIONS, connect_sqlite_memory, new_id, now_ms, run_migrations,
+};
 
 /// A `pool_keys` row (subset per SPEC §6 / M1 kickoff).
 #[derive(Debug, Clone)]
@@ -146,6 +25,7 @@ pub struct PoolKeyRow {
     pub user_id: Option<String>,
 }
 
+/// Fetch a pool key by its storage hash (constant-time verify after fetch).
 pub async fn lookup_pool_key(db: &Db, key_hash: &str) -> sqlx::Result<Option<PoolKeyRow>> {
     let sql = db.sql(
         "SELECT id, key_hash, key_prefix, kind, status, expires_at, user_id \
@@ -180,6 +60,7 @@ pub struct NewPoolKey {
     pub created_at: i64,
 }
 
+/// Persist a new pool key row.
 pub async fn insert_pool_key(db: &Db, key: &NewPoolKey) -> sqlx::Result<()> {
     let sql = db.sql(
         "INSERT INTO pool_keys \
@@ -200,7 +81,7 @@ pub async fn insert_pool_key(db: &Db, key: &NewPoolKey) -> sqlx::Result<()> {
     Ok(())
 }
 
-/// A metered request (subset of SPEC §6 `usage_events`; cost stays 0 until M2+).
+/// A metered request (subset of SPEC §6 `usage_events`; cost stays 0 until D23).
 #[derive(Debug, Clone)]
 pub struct UsageEvent {
     pub id: String,
@@ -215,6 +96,7 @@ pub struct UsageEvent {
     pub status: String,
 }
 
+/// Append one usage event (the metering truth quota checks aggregate over).
 pub async fn insert_usage_event(db: &Db, event: &UsageEvent) -> sqlx::Result<()> {
     let sql = db.sql(
         "INSERT INTO usage_events \
@@ -253,6 +135,7 @@ pub struct UsageEventRow {
     pub status: String,
 }
 
+/// All usage events for one pool key, oldest first.
 pub async fn usage_events_for_key(db: &Db, pool_key_id: &str) -> sqlx::Result<Vec<UsageEventRow>> {
     let sql = db.sql(
         "SELECT id, ts, pool_key_id, user_id, model, prompt_tokens, completion_tokens, \
@@ -278,28 +161,4 @@ pub async fn usage_events_for_key(db: &Db, pool_key_id: &str) -> sqlx::Result<Ve
         })
         .collect();
     Ok(rows)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn ids_are_32_hex_chars_and_unique() {
-        let a = new_id();
-        let b = new_id();
-        assert_eq!(a.len(), 32);
-        assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
-        assert_ne!(a, b);
-    }
-
-    #[test]
-    fn placeholder_rewrite_only_for_postgres() {
-        let sql = "INSERT INTO t (a, b) VALUES (?, ?)";
-        assert_eq!(rewrite_placeholders(sql, false), sql);
-        assert_eq!(
-            rewrite_placeholders(sql, true),
-            "INSERT INTO t (a, b) VALUES ($1, $2)"
-        );
-    }
 }
