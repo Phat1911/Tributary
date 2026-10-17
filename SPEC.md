@@ -7,7 +7,7 @@
 | **Date** | 2026-10-14 (v0.1: 2026-10-13) |
 | **Author** | Tran Dinh Hong Phat — Project founder (solo, CS student, Vietnam) + AI co-designer |
 | **License** | FSL-1.1-ALv2 (SPDX; Future License: Apache-2.0 after 2 years) |
-| **Status** | Decisions D1–D26 locked (Appendix A). Dev lifecycle: AGENTS.md (workflow), PLAN.md (status/log), AUDIT.md (security findings) |
+| **Status** | Decisions D1–D30 locked (Appendix A). Dev lifecycle: AGENTS.md (workflow), PLAN.md (status/log), AUDIT.md (security findings) |
 | **One-liner** | Self-hostable AI token pools — govern your org's AI usage with per-member keys, quotas, and leak detection; or deposit surplus credits into a Solana-settled marketplace. |
 
 ---
@@ -192,9 +192,9 @@ excluding provider time; streaming first-byte overhead < 20 ms.
 | `organizations` | id, name, slug, settings(json), created_at |
 | `users` | id, email, password_hash(argon2), role (host_admin / org_admin / member), org_id? |
 | `pools` | id, org_id, name, kind (`org` \| `root`), model_allowlist(json), status, currency |
-| `provider_keys` | id, pool_id, provider, ciphertext, key_prefix(**** last4), weight, health, status |
+| `provider_keys` | id, pool_id, provider, base_url, ciphertext, key_prefix(**** last4), weight, health, status |
 | `pool_keys` | id, pool_id, user_id, kind (`live` \| `canary`), key_hash, key_prefix, scopes, limits(json), expires_at, last_used_at, status — canary rows: owner=none, quota 0, alert metadata |
-| `quota_rules` | id, subject (user/pool), period (minute/hour/day/month), limit_tokens, limit_cost |
+| `quota_rules` | id, subject (pool_key/user/pool), period (minute/hour/day/month), limit_tokens, limit_requests, limit_cost |
 | `usage_events` | id, ts, pool_id, pool_key_id, user_id, provider_key_id, model, prompt_tokens, completion_tokens, cost_micros, latency_ms, status |
 | `usage_rollups` | period, pool_id, user_id, model → totals (hourly/daily) |
 | `chart_of_accounts` | code (enum), account_type (asset/liability/equity/revenue/expense), definition, allowed counterparties — normative seed, versioned in repo; books kept from platform-operator perspective |
@@ -229,7 +229,9 @@ Price table: `model_prices` (model, provider, in_per_1k, out_per_1k, refreshed).
 ## 8. Security & key custody
 
 - **Envelope encryption:** master key from env/KMS (32 bytes); per-provider-key
-  random data key; XChaCha20-Poly1305 (libsodium). Master key never in DB.
+  random data key; XChaCha20-Poly1305 (libsodium or audited pure-Rust
+  equivalent — implementation: RustCrypto `chacha20poly1305`, D30). Master key
+  never in DB.
 - **At rest:** SQLite file or PG volume is not enough to steal keys.
 - **In transit:** TLS terminates at the deployment edge (reverse proxy in
   compose).
@@ -328,7 +330,7 @@ The chain cannot see off-chain routing; hence staged trust:
 | Auth | Built-in: argon2, session cookies, scoped API keys | SSO/SAML = paid tier |
 | Frontend | **Next.js (App Router) + TS + Tailwind + shadcn/ui** | pnpm workspace |
 | Repo | Monorepo: cargo workspace + pnpm workspace; GitHub Actions | |
-| Key vault | App-level envelope encryption, libsodium XChaCha20-Poly1305 | No Vault dependency |
+| Key vault | App-level envelope encryption, XChaCha20-Poly1305 (RustCrypto, D30) | No Vault dependency |
 | Metering store | `usage_events` in main DB + rollups; ClickHouse only if needed | |
 | Observability | Baked-in minimal: Prometheus `/metrics`, health, JSON logs (tracing) | Grafana optional in compose |
 | CI/CD | GitHub Actions: fmt/clippy/test (SQLite+PG via testcontainers)/pnpm build/cargo-deny; tag → multi-arch image → GHCR | Free on public repo |
@@ -470,3 +472,4 @@ for any hosted demo (Hetzner-class, student budget); English docs first.
 | D27 | Pricing provisional (2026-10-14, founder) | pricing and fee figures are placeholders, not commitments; final pricing set at M6 implementation from actual delivery-cost data + pilot willingness-to-pay + competitor scan; entry tier (entry tier [redacted]) / regional pricing open options |
 | D28 | Purpose-alignment signals (2026-10-15, founder-directed; amended same day) | **Free tier (M4), BYOK-only:** org supplies third-party classifier API key (e.g., Jev) via settings; no key ⇒ feature dormant; member disclosure banner mandatory; key under envelope encryption; `ClassifierProvider` adapter with churn defenses — raw HTTP version-pinned (no vendor SDKs), save-time key+model probe (model id in org config, never code), fixture contract tests, weekly live smoke job in CI, tolerant parsing, fail-open auxiliary path. **Enforcement modes (free per D29 cost-mirror rule):** Alert (default, threshold rec. 0.5 alignment, manual block/ban/unblock) and Auto-block (opt-in + warning, threshold rec. 0.15, shadow mode 1–2 weeks first, suspends pool key pending review only — never auto-bans; stronger member disclosure when active) |
 | D29 | Paywall mirrors cost (2026-10-15, founder principle) | Gate a feature behind the paid tier ONLY when it carries real per-org cost to us — hosted/managed infra, third-party licenses we must buy, heavy support load. Code shipping in the self-hosted binary defaults to **free** (runs on the org's machine, $0 marginal cost). Existing tier assignments (D17 canary response automation; D21 mTLS/anomaly/SSO) re-derived at M6 alongside D27; SSO stays paid only if we license a vendor component. Durable paid anchors now: support + genuinely costed integrations; **hosted/managed stays deferred** (original trigger: ≥3 pilot orgs asking). Goal: minimize client price — adoption first. until then this rule governs. |
+| D30 | Crypto implementation (2026-10-17, director ruling at M2) | Envelope encryption uses RustCrypto `chacha20poly1305` (XChaCha20Poly1305, pure Rust) instead of libsodium bindings — no C toolchain in CI/Docker/multi-arch cross-compiles (D14), audited, zeroize-first-class. The spec invariant is the algorithm + envelope format + AD binding (table:id), not the library; crypto crate remains the seam (§15). |

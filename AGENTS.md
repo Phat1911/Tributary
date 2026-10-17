@@ -10,7 +10,7 @@ this file (how we work), **PLAN.md** (status & log), **AUDIT.md** (security find
 │   ├── gateway/        # data plane: axum OpenAI-compatible proxy, metering
 │   ├── control/        # control plane: REST admin API, auth, sessions
 │   ├── ledger/         # LedgerTrait, DB ledger, chart of accounts (M7+)
-│   ├── crypto/         # envelope encryption, key vault (libsodium/RustCrypto)
+│   ├── crypto/         # envelope encryption, key vault (XChaCha20-Poly1305, RustCrypto — D30)
 │   └── common/         # shared types, errors, config
 ├── apps/dashboard/     # Next.js + Tailwind + shadcn/ui (pnpm workspace)
 ├── programs/pool/      # Solana Anchor program (empty until M8)
