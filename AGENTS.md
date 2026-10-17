@@ -23,6 +23,7 @@ this file (how we work), **PLAN.md** (status & log), **AUDIT.md** (security find
 ## Coding & testing conventions
 
 - **Rust:** `cargo fmt` clean; `clippy -D warnings`; no `unsafe` without an AUDIT.md entry.
+- **Teaching comments (founder is learning Rust — applies to all new code from M2 on):** every non-trivial function carries a `///` doc comment (purpose + why, 1–3 lines); every attribute/derive macro gets a brief `//` explanation on its first use per file (what it does + why it's needed — e.g. `#[derive(Deserialize)] // serde: JSON → this struct, for request parsing`); macros new to the repo get a fuller explanation. Trivial repeats in the same file (e.g. `#[derive(Debug)]` on test structs) are exempt.
 - **DB:** sqlx only; every query works on **both SQLite and Postgres**; migrations run against both in CI; no DB-specific SQL outside `common` adapters.
 - **Money:** integer micro-units (micro-USD) ONLY. A float used for money is a security finding.
 - **Secrets:** never log/trace/print key material; display prefix + last-4 only; decrypt per-use via `crypto` crate wrapped in `Zeroizing`; never cache plaintext keys.
