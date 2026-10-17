@@ -336,10 +336,12 @@ async fn model_outside_allowlist_is_rejected_locally() {
 // --- helpers ----
 
 /// Bootstraps the host admin and logs in through the real HTTP surface.
+///
+/// On the shared Postgres database, concurrent tests race the bootstrap:
+/// losers of the unique-email race just log in with the shared credentials.
 async fn bootstrap_admin_and_login(pool: &db::Db, app: &axum::Router) -> String {
-    tributary_control::create_host_admin(pool, "root@tributary.dev", "hunter2hunter2")
-        .await
-        .expect("bootstrap");
+    let _ =
+        tributary_control::create_host_admin(pool, "root@tributary.dev", "hunter2hunter2").await;
     let (_, body) = call(
         app,
         Request::builder()

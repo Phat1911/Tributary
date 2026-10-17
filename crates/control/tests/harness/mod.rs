@@ -139,10 +139,14 @@ pub async fn control_app(db: Db) -> (Router, MockUpstream) {
 }
 
 /// Bootstrap + login → session token.
+///
+/// The Postgres half of the dual-DB suite shares one database between
+/// concurrently-running tests: the first test creates the shared admin,
+/// every other test loses the race (refusal or unique violation) and
+/// simply logs in with the same credentials. SQLite keeps one DB per
+/// test, so the create always succeeds there.
 pub async fn bootstrap_and_login(db: &Db, app: &Router) -> String {
-    tributary_control::create_host_admin(db, "root@tributary.dev", "hunter2hunter2")
-        .await
-        .expect("bootstrap admin");
+    let _ = tributary_control::create_host_admin(db, "root@tributary.dev", "hunter2hunter2").await;
     let (_, body) = send(
         app,
         post_json(
