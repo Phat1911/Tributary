@@ -4,9 +4,9 @@
 
 ## Current state
 
-- **Date:** 2026-10-15 · **Spec:** v0.3 (decisions D1–D29)
-- **Next milestone:** M2 — orgs, pools, provider keys (encrypted), quota/rate engine
-- **Code:** M1 complete — gateway proxies OpenAI (stream + non-stream) with hashed pool-key auth, SSE-usage metering, dual-DB (SQLite+Postgres) via sqlx Any; CI green on `main`
+- **Date:** 2026-10-17 · **Spec:** v0.3 (decisions D1–D30)
+- **Next milestone:** M3 — member self-service basics + dashboard shell
+- **Code:** M2 complete — control plane (argon2 sessions, orgs/members/pools/keys/quota REST), envelope-encrypted provider keys, rule-4 quota gate, pool-scoped routing; dual-DB green locally and ready for CI
 
 ## Milestone status
 
@@ -14,7 +14,8 @@
 |---|---|---|
 | M0 | **done** (2026-10-14) | CI green: [run 38572086285](https://github.com/Phat1911/Tributary/actions/runs/38572086285) |
 | M1 | **done** (2026-10-15) | CI green incl. dual-DB tests: [run 38682358525](https://github.com/Phat1911/Tributary/actions/runs/38682358525); local end-to-end smoke vs mock upstream ✓; real-OpenAI curl demo pending user key |
-| M2–M6 | pending | V1 — Gateway + Org Pools |
+| M2 | **done** (2026-10-17) | dual-DB 59/59 locally (SQLite in-memory + Docker Postgres 16 on :5433); done-when `m2_isolation.rs` green; CI run pending push |
+| M3–M6 | pending | V1 — Gateway + Org Pools |
 | M7–M11 | pending | V2 — Root Pool |
 | M12–M14 | pending | V3 — Operator network |
 
@@ -29,6 +30,13 @@ Template:
 - evidence: <SPEC "done when" check>
 - limitations/notes: <known gaps>
 ```
+
+### M2 — orgs, pools, provider keys (encrypted), quota/rate engine (2026-10-17)
+- **changed:** `migrations/{0003_orgs_users_sessions.sql,0004_pools_provider_keys_quota.sql,0005_usage_events_pool.sql}` · `crates/common/` (src/db.rs moved from gateway + keys.rs + time.rs, Cargo.toml) · `crates/crypto/` (full crate: MasterKey/seal/open) · `crates/control/` (full crate: Cargo.toml, src/{lib.rs,error.rs,auth.rs,db.rs,api.rs}, tests/{harness/mod.rs,api.rs}) · `crates/gateway/` (src/{main.rs,lib.rs,config.rs,state.rs,error.rs,keys.rs,db.rs,quota.rs,routing.rs,chat.rs,models_api.rs}, tests/{common/mod.rs,api.rs,streaming.rs,concurrency.rs,m2_isolation.rs}) · `AGENTS.md` (teaching-comments convention) · `SPEC.md` (D30 adoption sweep) · `Cargo.lock`
+- **tests:** local (Windows-cargo WSL interop) — `cargo fmt --all` ✓, `clippy --workspace --all-targets -- -D warnings` ✓, `cargo test --workspace` **59/59 ✓** on the full dual-DB matrix: SQLite (in-memory, A-002 branch) **and** Postgres 16 (throwaway Docker container `tributary-pg-m2` on :5433, `TRIBUTARY_TEST_DATABASE_URL`, removed after) — 4 crypto lib · 13 common lib · 4 control lib · 7 control api · 12 gateway lib · 6 gateway api · 1 concurrency · 3 m2_isolation · 3 streaming. CI run expected on push (same workflow as M1: postgres:16 service, no CI changes needed).
+- **evidence:** SPEC §14 M2 "done when" = *Two pools isolated: one's quota never affects the other* — `crates/gateway/tests/m2_isolation.rs::two_pools_isolated_token_quota_exhaustion_never_blocks_the_other`: pools A/B provisioned entirely through the control API (org → pool → provider key → member → issued `sk-pool-…` key); day-token quota 18 on A's member; A#1 serves (18 tokens metered), A#2 → **429** with `Retry-After` + "18 tokens per day … Resets at …" message and **zero upstream calls** (rule 4); B serves 3/3 with its own usage rows attributed (pool_id + provider_key_id); A's rows stay at 1. Companion tests: `request_rate_limit_fires_before_upstream_and_is_pool_scoped` (minute limit_requests on pool C: C#2 denied pre-upstream, D unaffected), `model_outside_allowlist_is_rejected_locally` (400, no upstream).
+- **dependencies (AGENTS workflow step 10):** new this milestone — `chacha20poly1305` 0.10 (RustCrypto XChaCha20-Poly1305, **D30 director ruling**: pure Rust, no C toolchain in CI/Docker/multi-arch, zeroize-first-class) + `aead` (its trait); `argon2` 0.5 + `password-hash` (Argon2id PHC, D8); `zeroize` 1 (Zeroizing secret boundary, AGENTS secrets convention; Debug redacted by design). Promoted from gateway to common (no new externals): hex/rand/sha2/subtle/anyhow. Reused: axum/sqlx/reqwest(rustls)/serde/tracing/thiserror/tempfile/tower/http-body-util — all already justified in M0/M1. No deny.toml changes needed (all MIT/Apache-2.0/ISC, within allow-list). No CLI framework still (create-admin hand-parsed like serve/migrate).
+- **limitations/notes:** sessions are **Bearer tokens** (24 h, stored SHA-256-hashed); cookies for the browser dashboard deferred to M3; **login has no brute-force throttling** — AUDIT A-004 (low, M3/M4); token quotas are consumption-based pre-checks (no prompt-size estimation) — a single call may overshoot its budget by one request (documented semantics: `limit ≤ used` denies BEFORE upstream; usage rows exist only for served requests, so denials never consume quota); provider-key selection is first-available (active + health≠invalid, by created_at) — health/weight-aware failover is M4+; key "health" is a single probe on save + manual revalidate (M2 LIGHT); pre-M1…M1 pool keys without `pool_id` are rejected at auth (documented pre-release behavior change; `seed-key` CLI removed, replaced by `create-admin` + API issuance); in-proc minute counters make rate limits process-local (single-binary SPEC §13 deployment) with DB counts as the authoritative backstop (D9); `COALESCE(SUM(...))` must be CAST to BIGINT for the sqlx Any driver (PG promotes to NUMERIC — fixed in cd5f97e, pattern to remember for future aggregates); shared-PG test DB bootstrap races tolerated in harnesses (loser logs in with shared creds); WSLENV for multi-var interop needs `:` separators (`WSLENV="CARGO_INCREMENTAL:TRIBUTARY_TEST_DATABASE_URL"`).
 
 ### M1 — gateway core: proxy, pool keys, streaming, metering (2026-10-15)
 - **changed:** `migrations/{0001_pool_keys.sql,0002_usage_events.sql}` · `crates/gateway/` (Cargo.toml, src/{main.rs,lib.rs,config.rs,state.rs,error.rs,keys.rs,db.rs,sse.rs,chat.rs,models_api.rs}, tests/{common/mod.rs,api.rs,streaming.rs}) · `.github/workflows/ci.yml` (postgres service) · `scripts/mock_openai.py` · `Cargo.lock`
@@ -45,6 +53,15 @@ Template:
 - **limitations/notes:** crates are placeholder libs (`crate_name()` + one unit test each); crate names carry the `tributary-` prefix ahead of crates.io reservation (D19); dashboard is a TS-only placeholder page; `next build` auto-adjusted `tsconfig.json` (`jsx: react-jsx`, `.next/dev/types` include) — kept; local Rust builds on this machine run via Windows-cargo WSL interop (needs `WSLENV=CARGO_INCREMENTAL CARGO_INCREMENTAL=0`), or just use CI.
 
 ## Fast jump — most recent milestone → changed files
+
+**M2 (2026-10-17):**
+
+- Migrations: `migrations/0003_orgs_users_sessions.sql` · `migrations/0004_pools_provider_keys_quota.sql` · `migrations/0005_usage_events_pool.sql`
+- Common (new home of shared adapter): `crates/common/Cargo.toml` · `crates/common/src/{lib.rs,db.rs,keys.rs,time.rs}`
+- Crypto (new): `crates/crypto/Cargo.toml` · `crates/crypto/src/lib.rs`
+- Control (new): `crates/control/Cargo.toml` · `crates/control/src/{lib.rs,error.rs,auth.rs,db.rs,api.rs}` · `crates/control/tests/{harness/mod.rs,api.rs}`
+- Gateway (M2 rewrite): `crates/gateway/Cargo.toml` · `crates/gateway/src/{main.rs,lib.rs,config.rs,state.rs,error.rs,keys.rs,db.rs,quota.rs,routing.rs,chat.rs,models_api.rs}` (sse.rs unchanged) · `crates/gateway/tests/{common/mod.rs,api.rs,streaming.rs,concurrency.rs,m2_isolation.rs}`
+- Docs/conventions: `AGENTS.md` · `SPEC.md` (§8 crypto seam + D30) · `Cargo.lock`
 
 **M1 (2026-10-15):**
 
