@@ -1,9 +1,11 @@
 //! `POST /v1/chat/completions` — OpenAI-compatible proxy with metering.
 //!
-//! M1 subset of the SPEC §5 lifecycle: auth (step 2) → forward to the single
-//! OpenAI upstream → stream passthrough with token extraction (step 5) →
-//! append `usage_events` (step 6). Quota/rate checks (step 3), key selection
-//! (step 4) and health signals (step 7) are M2+.
+//! Full SPEC §5 lifecycle as of M2:
+//! 1. auth (pool-scoped key) → 2. pool house rules (status + model
+//! allowlist) → 3. **quota/rate check BEFORE any upstream work (rule 4)** →
+//! 4. provider-key selection (first-available) + per-use decrypt →
+//! 5. forward/stream with token extraction → 6. append `usage_events`
+//! (now attributing pool + provider key) → 7. health signals (M4+).
 
 use std::convert::Infallible;
 use std::time::{Duration, Instant};
@@ -19,11 +21,21 @@ use tokio::sync::mpsc;
 use crate::db::{self, UsageEvent};
 use crate::error::ApiError;
 use crate::keys::AuthedKey;
+use crate::quota::{Decision, QuotaSubject};
+use crate::routing;
 use crate::sse::{SseMeter, UsageOutcome};
 use crate::state::AppState;
 
 /// Non-streaming calls may buffer; streaming calls must never hit it.
 const NON_STREAM_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Everything resolved during admission (before any upstream call).
+struct Admission {
+    requested_model: String,
+    is_stream: bool,
+    strip_injected_usage: bool,
+    provider_key_id: String,
+}
 
 pub async fn chat_completions(
     State(state): State<AppState>,
@@ -33,11 +45,60 @@ pub async fn chat_completions(
     let started = Instant::now();
     let mut request_body: Value = serde_json::from_slice(&body)
         .map_err(|e| ApiError::BadRequest(format!("invalid JSON body: {e}")))?;
+
+    // --- House rules: pool must be active, model must be allowed. --------
+    let pool = routing::pool_info(&state.db, &auth.pool_id)
+        .await
+        .map_err(|e| ApiError::Internal(anyhow::anyhow!("pool lookup failed: {e}")))?
+        .ok_or_else(|| ApiError::Unauthorized)?;
+    if pool.status != "active" {
+        return Err(ApiError::Forbidden("This pool is disabled.".to_string()));
+    }
     let requested_model = request_body
         .get("model")
         .and_then(Value::as_str)
         .unwrap_or("unknown")
         .to_string();
+    if !pool.allowlist.is_empty() && !pool.allowlist.iter().any(|m| m == &requested_model) {
+        // House rule (SPEC §3.1 "model allowlists") — rejected locally,
+        // upstream never sees the request.
+        return Err(ApiError::BadRequest(format!(
+            "Model '{requested_model}' is not allowed for this pool."
+        )));
+    }
+
+    // --- Rule 4: quota + rate check BEFORE any upstream call. ------------
+    let subject = QuotaSubject {
+        pool_key_id: auth.id.clone(),
+        user_id: auth.user_id.clone(),
+        pool_id: auth.pool_id.clone(),
+    };
+    let now = db::now_ms();
+    if let Decision::Deny {
+        message,
+        reset_at_ms,
+    } = state
+        .quota
+        .check(&state.db, &subject, now)
+        .await
+        .map_err(|e| ApiError::Internal(anyhow::anyhow!("quota check failed: {e}")))?
+    {
+        let retry_after_secs = ((reset_at_ms - now) / 1000).max(1);
+        return Err(ApiError::TooManyRequests {
+            message,
+            retry_after_secs,
+        });
+    }
+
+    // --- Key selection + per-use decrypt (SPEC §5 steps 4–5). ------------
+    let selected = routing::select_provider_key(&state.db, &auth.pool_id)
+        .await
+        .map_err(|e| ApiError::Internal(anyhow::anyhow!("provider key selection failed: {e}")))?
+        .ok_or_else(|| {
+            ApiError::ServiceUnavailable("No provider key is available for this pool.".to_string())
+        })?;
+    let upstream_key = routing::decrypt_provider_key(&state.config.master_key, &selected)?;
+
     let is_stream = request_body
         .get("stream")
         .and_then(Value::as_bool)
@@ -57,11 +118,14 @@ pub async fn chat_completions(
         }
     }
 
-    let url = format!("{}/chat/completions", state.config.openai_base_url);
+    // Admitted: count the request NOW (in-proc counters), then forward.
+    state.quota.record_request(&subject, now);
+
+    let url = format!("{}/chat/completions", selected.base_url);
     let mut upstream = state
         .http
         .post(&url)
-        .bearer_auth(&state.config.openai_api_key)
+        .bearer_auth(upstream_key.as_str())
         .json(&request_body);
     if !is_stream {
         upstream = upstream.timeout(NON_STREAM_TIMEOUT);
@@ -71,20 +135,20 @@ pub async fn chat_completions(
         ApiError::BadGateway("upstream request failed".to_string())
     })?;
 
+    let admission = Admission {
+        requested_model,
+        is_stream,
+        strip_injected_usage,
+        provider_key_id: selected.id,
+    };
+
     let status = response.status();
-    if !is_stream || !status.is_success() {
+    if !admission.is_stream || !status.is_success() {
         // Buffered path: non-streaming responses and upstream errors.
-        buffered_response(state, auth, response, requested_model, started).await
+        buffered_response(state, auth, admission, response, started).await
     } else {
         // Streaming success: SSE passthrough with metering.
-        streaming_response(
-            state,
-            auth,
-            response,
-            requested_model,
-            started,
-            strip_injected_usage,
-        )
+        streaming_response(state, auth, admission, response, started).await
     }
 }
 
@@ -93,8 +157,8 @@ pub async fn chat_completions(
 async fn buffered_response(
     state: AppState,
     auth: AuthedKey,
+    admission: Admission,
     response: reqwest::Response,
-    requested_model: String,
     started: Instant,
 ) -> Result<Response, ApiError> {
     let status = response.status();
@@ -109,21 +173,23 @@ async fn buffered_response(
         .map_err(|e| ApiError::BadGateway(format!("upstream body read failed: {e}")))?;
 
     let outcome = parse_nonstream_usage(&bytes);
-    let model = outcome.model.clone().unwrap_or(requested_model);
+    let model = outcome.model.clone().unwrap_or(admission.requested_model);
     let event = UsageEvent {
         id: db::new_id(),
         ts: db::now_ms(),
         pool_key_id: auth.id,
         user_id: auth.user_id,
+        pool_id: Some(auth.pool_id),
+        provider_key_id: Some(admission.provider_key_id),
         model,
         prompt_tokens: outcome.prompt_tokens,
         completion_tokens: outcome.completion_tokens,
-        cost_micros: 0, // pricing table lands M2+ (D23)
+        cost_micros: 0, // pricing table lands with D23
         latency_ms: started.elapsed().as_millis().min(i64::MAX as u128) as i64,
         status: status.as_u16().to_string(),
     };
     if let Err(err) = db::insert_usage_event(&state.db, &event).await {
-        // Metering is the point of M1 — fail loudly rather than drop rows.
+        // Metering is the product — fail loudly rather than drop rows.
         return Err(ApiError::Internal(anyhow::anyhow!(
             "failed to record usage event: {err}"
         )));
@@ -142,13 +208,12 @@ async fn buffered_response(
 
 /// Success path for streaming: spawns the meter task, returns the passthrough
 /// body immediately. The usage row is written when the upstream stream ends.
-fn streaming_response(
+async fn streaming_response(
     state: AppState,
     auth: AuthedKey,
+    admission: Admission,
     response: reqwest::Response,
-    requested_model: String,
     started: Instant,
-    strip_injected_usage: bool,
 ) -> Result<Response, ApiError> {
     let content_type = response
         .headers()
@@ -161,9 +226,13 @@ fn streaming_response(
     let db = state.db.clone();
     let pool_key_id = auth.id;
     let user_id = auth.user_id;
+    let pool_id = auth.pool_id;
+    let provider_key_id = admission.provider_key_id;
+    let requested_model = admission.requested_model;
+    let strip = admission.strip_injected_usage;
     tokio::spawn(async move {
         let mut upstream = response.bytes_stream();
-        let mut meter = SseMeter::new(strip_injected_usage);
+        let mut meter = SseMeter::new(strip);
         while let Some(chunk) = upstream.next().await {
             let Ok(bytes) = chunk else {
                 tracing::warn!("upstream stream aborted");
@@ -187,6 +256,8 @@ fn streaming_response(
             ts: db::now_ms(),
             pool_key_id,
             user_id,
+            pool_id: Some(pool_id),
+            provider_key_id: Some(provider_key_id),
             model: outcome.model.clone().unwrap_or(requested_model),
             prompt_tokens: outcome.prompt_tokens,
             completion_tokens: outcome.completion_tokens,

@@ -2135,6 +2135,9 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "tributary-common",
+ "tributary-control",
+ "tributary-crypto",
+ "zeroize",
 ]
 
 [[package]]

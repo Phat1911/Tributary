@@ -13,7 +13,7 @@ pub use tributary_common::db::{
     Db, MIGRATIONS, connect_sqlite_memory, new_id, now_ms, run_migrations,
 };
 
-/// A `pool_keys` row (subset per SPEC §6 / M1 kickoff).
+/// A `pool_keys` row (M2: carries its pool binding for routing).
 #[derive(Debug, Clone)]
 pub struct PoolKeyRow {
     pub id: String,
@@ -23,12 +23,14 @@ pub struct PoolKeyRow {
     pub status: String,
     pub expires_at: Option<i64>,
     pub user_id: Option<String>,
+    /// The pool this key unlocks; NULL only for pre-M2 rows (rejected).
+    pub pool_id: Option<String>,
 }
 
 /// Fetch a pool key by its storage hash (constant-time verify after fetch).
 pub async fn lookup_pool_key(db: &Db, key_hash: &str) -> sqlx::Result<Option<PoolKeyRow>> {
     let sql = db.sql(
-        "SELECT id, key_hash, key_prefix, kind, status, expires_at, user_id \
+        "SELECT id, key_hash, key_prefix, kind, status, expires_at, user_id, pool_id \
          FROM pool_keys WHERE key_hash = ?",
     );
     let row = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
@@ -43,6 +45,7 @@ pub async fn lookup_pool_key(db: &Db, key_hash: &str) -> sqlx::Result<Option<Poo
             status: row.get("status"),
             expires_at: row.get("expires_at"),
             user_id: row.get("user_id"),
+            pool_id: row.get("pool_id"),
         });
     Ok(row)
 }
@@ -57,6 +60,7 @@ pub struct NewPoolKey {
     pub status: String,
     pub expires_at: Option<i64>,
     pub user_id: Option<String>,
+    pub pool_id: Option<String>,
     pub created_at: i64,
 }
 
@@ -64,8 +68,8 @@ pub struct NewPoolKey {
 pub async fn insert_pool_key(db: &Db, key: &NewPoolKey) -> sqlx::Result<()> {
     let sql = db.sql(
         "INSERT INTO pool_keys \
-         (id, key_hash, key_prefix, kind, status, expires_at, user_id, created_at) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+         (id, key_hash, key_prefix, kind, status, expires_at, user_id, pool_id, created_at) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
     );
     sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
         .bind(&key.id)
@@ -75,19 +79,23 @@ pub async fn insert_pool_key(db: &Db, key: &NewPoolKey) -> sqlx::Result<()> {
         .bind(&key.status)
         .bind(key.expires_at)
         .bind(key.user_id.as_deref())
+        .bind(key.pool_id.as_deref())
         .bind(key.created_at)
         .execute(db.pool())
         .await?;
     Ok(())
 }
 
-/// A metered request (subset of SPEC §6 `usage_events`; cost stays 0 until D23).
+/// A metered request (subset of SPEC §6 `usage_events`; cost stays 0 until
+/// D23). M2 adds the pool + provider-key attribution columns.
 #[derive(Debug, Clone)]
 pub struct UsageEvent {
     pub id: String,
     pub ts: i64,
     pub pool_key_id: String,
     pub user_id: Option<String>,
+    pub pool_id: Option<String>,
+    pub provider_key_id: Option<String>,
     pub model: String,
     pub prompt_tokens: i64,
     pub completion_tokens: i64,
@@ -100,15 +108,17 @@ pub struct UsageEvent {
 pub async fn insert_usage_event(db: &Db, event: &UsageEvent) -> sqlx::Result<()> {
     let sql = db.sql(
         "INSERT INTO usage_events \
-         (id, ts, pool_key_id, user_id, model, prompt_tokens, completion_tokens, \
-          cost_micros, latency_ms, status) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+         (id, ts, pool_key_id, user_id, pool_id, provider_key_id, model, \
+          prompt_tokens, completion_tokens, cost_micros, latency_ms, status) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     );
     sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
         .bind(&event.id)
         .bind(event.ts)
         .bind(&event.pool_key_id)
         .bind(event.user_id.as_deref())
+        .bind(event.pool_id.as_deref())
+        .bind(event.provider_key_id.as_deref())
         .bind(&event.model)
         .bind(event.prompt_tokens)
         .bind(event.completion_tokens)
@@ -127,6 +137,8 @@ pub struct UsageEventRow {
     pub ts: i64,
     pub pool_key_id: String,
     pub user_id: Option<String>,
+    pub pool_id: Option<String>,
+    pub provider_key_id: Option<String>,
     pub model: String,
     pub prompt_tokens: i64,
     pub completion_tokens: i64,
@@ -138,8 +150,8 @@ pub struct UsageEventRow {
 /// All usage events for one pool key, oldest first.
 pub async fn usage_events_for_key(db: &Db, pool_key_id: &str) -> sqlx::Result<Vec<UsageEventRow>> {
     let sql = db.sql(
-        "SELECT id, ts, pool_key_id, user_id, model, prompt_tokens, completion_tokens, \
-          cost_micros, latency_ms, status \
+        "SELECT id, ts, pool_key_id, user_id, pool_id, provider_key_id, model, \
+          prompt_tokens, completion_tokens, cost_micros, latency_ms, status \
          FROM usage_events WHERE pool_key_id = ? ORDER BY ts",
     );
     let rows = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
@@ -152,6 +164,8 @@ pub async fn usage_events_for_key(db: &Db, pool_key_id: &str) -> sqlx::Result<Ve
             ts: row.get("ts"),
             pool_key_id: row.get("pool_key_id"),
             user_id: row.get("user_id"),
+            pool_id: row.get("pool_id"),
+            provider_key_id: row.get("provider_key_id"),
             model: row.get("model"),
             prompt_tokens: row.get("prompt_tokens"),
             completion_tokens: row.get("completion_tokens"),

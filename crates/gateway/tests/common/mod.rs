@@ -13,10 +13,12 @@ use axum::{Json, Router};
 use sqlx::sqlite::SqliteConnectOptions;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use tributary_control as control;
+use tributary_crypto::{MasterKey, row_ad, seal};
+use tributary_gateway::build_full_app;
 use tributary_gateway::config::Config;
 use tributary_gateway::db;
 use tributary_gateway::keys;
-use tributary_gateway::{build_app, state::AppState};
 
 /// A database under test plus anything that must outlive the pool.
 pub struct TestDb {
@@ -91,8 +93,12 @@ async fn sqlite_db() -> TestDb {
 }
 
 /// Seeds one pool key; returns `(raw_key, row_id)`.
+///
+/// `pool_id: None` produces an M1-relic key (rejected by the gateway) —
+/// useful for auth-failure cases that never reach routing.
 pub async fn seed_key(
     pool: &db::Db,
+    pool_id: Option<&str>,
     status: &str,
     expires_at: Option<i64>,
     user_id: Option<&str>,
@@ -109,6 +115,7 @@ pub async fn seed_key(
             status: status.to_string(),
             expires_at,
             user_id: user_id.map(str::to_string),
+            pool_id: pool_id.map(str::to_string),
             created_at: db::now_ms(),
         },
     )
@@ -145,6 +152,29 @@ pub async fn spawn_mock(mode: MockMode) -> MockUpstream {
     let state = (mode, captured.clone());
 
     let app = Router::new()
+        .route(
+            "/models",
+            axum::routing::get(|headers: HeaderMap| async move {
+                let auth = headers
+                    .get(header::AUTHORIZATION)
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or_default();
+                if auth == format!("Bearer {TEST_UPSTREAM_KEY}") {
+                    (
+                        StatusCode::OK,
+                        Json(serde_json::json!({
+                            "object": "list",
+                            "data": [{"id": "m-test", "object": "model"}]
+                        })),
+                    )
+                } else {
+                    (
+                        StatusCode::UNAUTHORIZED,
+                        Json(serde_json::json!({"error": {"message": "bad key"}})),
+                    )
+                }
+            }),
+        )
         .route(
             "/chat/completions",
             post(
@@ -224,24 +254,132 @@ fn sse_script(with_usage: bool) -> String {
 /// Upstream key used by tests — proves pool keys are swapped for provider keys.
 pub const TEST_UPSTREAM_KEY: &str = "sk-test-upstream-key";
 
-pub fn test_config(base_url: String) -> Config {
-    Config {
-        database_url: String::new(),
-        openai_api_key: TEST_UPSTREAM_KEY.to_string(),
-        openai_base_url: base_url,
-        bind: String::new(),
-        models: vec!["m-test".to_string(), "m-other".to_string()],
-        log_json: false,
-    }
+/// Fixed 32-byte test master key (hex) shared by seeding and the app config.
+pub const TEST_MASTER_HEX: &str =
+    "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
+
+/// The test master key instance (same bytes everywhere in a test run).
+pub fn test_master() -> MasterKey {
+    MasterKey::from_hex(TEST_MASTER_HEX).expect("test master key parses")
 }
 
-pub async fn test_app(pool: db::Db, mock: &MockUpstream) -> Router {
-    let http = reqwest::Client::builder()
-        .connect_timeout(Duration::from_secs(2))
-        .build()
-        .unwrap();
-    let state = AppState::new(pool, http, test_config(mock.base_url.clone()));
-    build_app(state)
+/// Builds the merged app exactly like `serve` does (data + control plane).
+pub async fn test_app(pool: db::Db, _mock: &MockUpstream) -> Router {
+    let config = Config {
+        database_url: String::new(),
+        master_key: test_master(),
+        bind: String::new(),
+        default_models: vec!["m-test".to_string(), "m-other".to_string()],
+        log_json: false,
+    };
+    build_full_app(pool, config).await.expect("build full app")
+}
+
+/// Seeds one organization; returns its id.
+pub async fn seed_org(pool: &db::Db) -> String {
+    let id = db::new_id();
+    control::db::insert_org(
+        pool,
+        &control::db::OrgRow {
+            id: id.clone(),
+            name: "Test Org".into(),
+            slug: format!("org-{id}"),
+            settings: "{}".into(),
+            created_at: db::now_ms(),
+        },
+    )
+    .await
+    .expect("seed org");
+    id
+}
+
+/// Seeds one pool with the given model allowlist; returns its id.
+pub async fn seed_pool(pool: &db::Db, org_id: &str, models: &[&str]) -> String {
+    let id = db::new_id();
+    control::db::insert_pool(
+        pool,
+        &control::db::PoolRow {
+            id: id.clone(),
+            org_id: org_id.to_string(),
+            name: "Test Pool".into(),
+            kind: "org".into(),
+            model_allowlist: serde_json::to_string(&models).unwrap(),
+            status: "active".into(),
+            currency: "usd".into(),
+            created_at: db::now_ms(),
+        },
+    )
+    .await
+    .expect("seed pool");
+    id
+}
+
+/// Seeds one envelope-encrypted provider key (health ok); returns its id.
+pub async fn seed_provider_key(
+    pool: &db::Db,
+    pool_id: &str,
+    base_url: &str,
+    raw_upstream_key: &str,
+) -> String {
+    let id = db::new_id();
+    let sealed = seal(
+        &test_master(),
+        raw_upstream_key.as_bytes(),
+        &row_ad("provider_keys", &id),
+    )
+    .expect("seal provider key");
+    let chars: Vec<char> = raw_upstream_key.chars().collect();
+    let key_prefix = format!(
+        "{}…{}",
+        chars[..5].iter().collect::<String>(),
+        chars[chars.len() - 4..].iter().collect::<String>()
+    );
+    control::db::insert_provider_key(
+        pool,
+        &control::db::ProviderKeyRow {
+            id: id.clone(),
+            pool_id: pool_id.to_string(),
+            provider: "openai".into(),
+            base_url: base_url.to_string(),
+            ciphertext: sealed.ciphertext,
+            dek_wrapped: sealed.dek_wrapped,
+            key_prefix,
+            health: "ok".into(),
+            last_validated_at: Some(db::now_ms()),
+            status: "active".into(),
+            created_at: db::now_ms(),
+        },
+    )
+    .await
+    .expect("seed provider key");
+    id
+}
+
+/// A fully-routed test setup: org + pool + provider key + member pool key.
+#[derive(Debug, Clone)]
+pub struct Setup {
+    pub org_id: String,
+    pub pool_id: String,
+    pub provider_key_id: String,
+    pub key_id: String,
+    /// Raw pool key (`sk-pool-…`) for the member.
+    pub key_raw: String,
+}
+
+/// The standard happy-path setup every gateway test starts from.
+pub async fn setup_working(pool: &db::Db, mock: &MockUpstream) -> Setup {
+    let org_id = seed_org(pool).await;
+    let pool_id = seed_pool(pool, &org_id, &["m-test", "m-other"]).await;
+    let provider_key_id =
+        seed_provider_key(pool, &pool_id, &mock.base_url, TEST_UPSTREAM_KEY).await;
+    let (key_raw, key_id) = seed_key(pool, Some(&pool_id), "active", None, Some("user-1")).await;
+    Setup {
+        org_id,
+        pool_id,
+        provider_key_id,
+        key_id,
+        key_raw,
+    }
 }
 
 pub fn chat_request(auth: Option<&str>, body: &serde_json::Value) -> Request<Body> {
