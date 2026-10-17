@@ -44,7 +44,7 @@ jobs:
         run: cargo test --workspace
 
   dashboard:
-    name: Dashboard (pnpm install + build)
+    name: Dashboard (pnpm install, lint, typecheck, build)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -55,6 +55,10 @@ jobs:
           cache: pnpm
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
+      - name: Lint dashboard
+        run: pnpm -C apps/dashboard lint
+      - name: Typecheck dashboard
+        run: pnpm -C apps/dashboard typecheck
       - name: Build dashboard
         run: pnpm -C apps/dashboard build
 
