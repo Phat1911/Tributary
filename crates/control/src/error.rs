@@ -29,6 +29,12 @@ pub enum ControlError {
     /// State conflict (e.g. deleting an org that still has pools).
     #[error("{0}")]
     Conflict(String),
+    /// Rate-limited (login throttle, A-004) — carries the `Retry-After`.
+    #[error("too many requests")]
+    TooManyRequests {
+        /// Whole seconds until the fixed window resets.
+        retry_after_secs: i64,
+    },
     /// Anything unexpected — details stay in server logs.
     #[error(transparent)]
     Internal(#[from] anyhow::Error),
@@ -42,6 +48,11 @@ impl IntoResponse for ControlError {
         if let Self::Internal(err) = &self {
             tracing::error!("control-plane internal error: {err:#}");
         }
+        // The throttle denial additionally sends a standard Retry-After.
+        let retry_after = match &self {
+            Self::TooManyRequests { retry_after_secs } => Some(*retry_after_secs),
+            _ => None,
+        };
         let (status, code, message): (StatusCode, &str, String) = match self {
             Self::Unauthorized => (
                 StatusCode::UNAUTHORIZED,
@@ -60,6 +71,11 @@ impl IntoResponse for ControlError {
             ),
             Self::BadRequest(msg) => (StatusCode::BAD_REQUEST, "bad_request", msg),
             Self::Conflict(msg) => (StatusCode::CONFLICT, "conflict", msg),
+            Self::TooManyRequests { .. } => (
+                StatusCode::TOO_MANY_REQUESTS,
+                "rate_limited",
+                "Too many attempts. Try again later.".to_string(),
+            ),
             Self::Internal(_) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "internal_error",
@@ -67,7 +83,16 @@ impl IntoResponse for ControlError {
             ),
         };
         let body = json!({ "error": { "message": message, "code": code } });
-        (status, Json(body)).into_response()
+        let mut response = (status, Json(body)).into_response();
+        if let Some(secs) = retry_after {
+            // Standard header the dashboard surfaces as a countdown hint.
+            if let Ok(value) = axum::http::HeaderValue::from_str(&secs.to_string()) {
+                response
+                    .headers_mut()
+                    .insert(axum::http::header::RETRY_AFTER, value);
+            }
+        }
+        response
     }
 }
 

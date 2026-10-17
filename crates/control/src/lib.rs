@@ -1,16 +1,22 @@
 //! Control plane: REST admin API, auth, sessions (SPEC §7).
 //!
-//! M2 surface: login/logout (argon2 + hashed session tokens, D8 built-in
-//! lightweight auth), orgs, members, pools, pool keys (issuance/revocation),
-//! provider keys (envelope-encrypted at rest, validate-on-save health probe,
-//! manual revalidate), and quota rules. No member self-service and no UI —
-//! both arrive with M3. The router merges into the single gateway binary
-//! (SPEC §13 "modular monolith").
+//! M3 surface: everything M2 had (login/logout with argon2 + hashed session
+//! tokens, orgs, members, pools, pool keys, provider keys, quota rules)
+//! plus cookie sessions for the browser dashboard (secure HttpOnly,
+//! SameSite=Lax — JSON-only mutations make the CSRF posture structural),
+//! login throttling (AUDIT A-004 closed), the audit trail
+//! (`audit_log` + `/api/v1/audit`), usage endpoints for dashboards, and
+//! member self-service under `/api/v1/me/*`. The router merges into the
+//! single gateway binary (SPEC §13 "modular monolith").
 
 pub mod api;
+pub mod audit;
 pub mod auth;
 pub mod db;
 pub mod error;
+pub mod me;
+pub mod throttle;
+pub mod usage;
 
 use axum::Router;
 use axum::routing::{get, post};
@@ -28,6 +34,30 @@ pub struct ControlState {
     /// Default model allowlist for new pools when the request omits one
     /// (from `TRIBUTARY_MODELS`; identities live in config, never code — SPEC §15).
     pub default_models: Vec<String>,
+    /// Login-throttle state (in-process fast path; A-004).
+    pub login_throttle: throttle::LoginThrottle,
+    /// Failed logins allowed per (email, ip) per fixed 15-minute window.
+    /// A field (not a constant) so tests can tighten it per-app; default 5.
+    pub login_max_fails: i64,
+}
+
+impl ControlState {
+    /// Builds state with production defaults (throttle: 5 fails / window).
+    pub fn new(
+        db: Db,
+        http: reqwest::Client,
+        master: MasterKey,
+        default_models: Vec<String>,
+    ) -> Self {
+        Self {
+            db,
+            http,
+            master,
+            default_models,
+            login_throttle: throttle::LoginThrottle::new(),
+            login_max_fails: 5,
+        }
+    }
 }
 
 /// Session lifetime. 24 h keeps daily admin flows token-free while bounding
@@ -40,6 +70,7 @@ pub fn router(state: ControlState) -> Router {
     Router::new()
         .route("/api/v1/auth/login", post(api::login))
         .route("/api/v1/auth/logout", post(api::logout))
+        .route("/api/v1/auth/me", get(api::whoami))
         .route("/api/v1/orgs", get(api::list_orgs).post(api::create_org))
         .route(
             "/api/v1/orgs/{id}",
@@ -86,6 +117,16 @@ pub fn router(state: ControlState) -> Router {
             "/api/v1/quota-rules/{id}",
             axum::routing::delete(api::delete_quota_rule),
         )
+        .route("/api/v1/usage", get(usage::list_for_pool))
+        .route("/api/v1/usage/summary", get(usage::summary))
+        .route("/api/v1/me/keys", get(me::my_keys))
+        .route(
+            "/api/v1/me/keys/{key_id}",
+            axum::routing::delete(me::revoke_my_key),
+        )
+        .route("/api/v1/me/usage", get(me::my_usage))
+        .route("/api/v1/me/usage/summary", get(me::my_usage_summary))
+        .route("/api/v1/audit", get(api::list_audit))
         .with_state(state)
 }
 

@@ -50,11 +50,11 @@ pub async fn build_full_app(db: Db, config: Config) -> anyhow::Result<Router> {
         .connect_timeout(std::time::Duration::from_secs(10))
         .build()?;
     let app_state = AppState::new(db.clone(), http.clone(), config.clone());
-    let control_state = ControlState {
+    let control_state = ControlState::new(
         db,
         http,
-        master: config.master_key.clone(),
-        default_models: config.default_models.clone(),
-    };
+        config.master_key.clone(),
+        config.default_models.clone(),
+    );
     Ok(build_app(app_state).merge(tributary_control::router(control_state)))
 }

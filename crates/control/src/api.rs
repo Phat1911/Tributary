@@ -9,12 +9,14 @@
 use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
+use axum::response::AppendHeaders;
 use serde::Deserialize;
 use serde::Serialize;
 use zeroize::Zeroizing;
 
 use crate::ControlState;
-use crate::auth::{self, AuthedAdmin};
+use crate::audit::{self, AuditEntry, TargetKind};
+use crate::auth::{self, AuthedAdmin, AuthedUser, client_ip};
 use crate::db::{self, PublicPoolKey, PublicProviderKey, PublicUser};
 use crate::error::{ApiResult, ControlError};
 use tributary_common::db::{new_id, now_ms};
@@ -32,52 +34,167 @@ pub struct LoginRequest {
     pub password: String,
 }
 
-/// POST /api/v1/auth/login response — the raw session token, shown once.
+/// POST /api/v1/auth/login response — the raw session token (also set as a
+/// secure HttpOnly cookie for browser callers), shown once.
 #[derive(Serialize)] // serde: this struct → JSON, for response rendering
 pub struct LoginResponse {
     pub token: String,
     pub expires_at: i64,
+    /// Who just logged in — the dashboard routes by role without a second
+    /// round-trip.
+    pub user: PublicUser,
 }
 
 /// Verifies credentials and mints a session token.
+///
+/// Order matters (A-004): the throttle gate runs BEFORE any argon2 work —
+/// a flooded login endpoint must not double as a CPU-denial-of-service
+/// vector. Cookie-authenticated callers get the same session additionally
+/// set as a cookie; CLI/bearer callers simply ignore it.
 pub async fn login(
     State(state): State<ControlState>,
+    headers: axum::http::HeaderMap,
     Json(body): Json<LoginRequest>,
-) -> ApiResult<Json<LoginResponse>> {
+) -> ApiResult<(
+    StatusCode,
+    AppendHeaders<[(axum::http::HeaderName, String); 1]>,
+    Json<LoginResponse>,
+)> {
     let email = body.email.trim().to_lowercase();
-    // One generic 401 for unknown email AND wrong password (no probing).
-    let user = db::user_by_email(&state.db, &email)
+    let ip = client_ip(&headers);
+    // Throttle gate (fixed window per email+IP, A-004) — cheap before any
+    // password hashing.
+    match state
+        .login_throttle
+        .check(&state.db, &email, &ip, state.login_max_fails, now_ms())
         .await
-        .map_err(|e| ControlError::Internal(e.into()))?
-        .ok_or(ControlError::Unauthorized)?;
+    {
+        Ok(crate::throttle::ThrottleDecision::Deny { retry_after_secs }) => {
+            return Err(ControlError::TooManyRequests { retry_after_secs });
+        }
+        Ok(crate::throttle::ThrottleDecision::Allow) => {}
+        Err(e) => {
+            return Err(ControlError::Internal(anyhow::anyhow!(
+                "login throttle check failed: {e}"
+            )));
+        }
+    }
+    // One generic 401 for unknown email AND wrong password (no probing).
+    let user = match db::user_by_email(&state.db, &email).await {
+        Ok(Some(user)) => user,
+        Ok(None) => {
+            state
+                .login_throttle
+                .record_failure(&state.db, &email, &ip, now_ms())
+                .await;
+            return Err(ControlError::Unauthorized);
+        }
+        Err(e) => return Err(ControlError::Internal(e.into())),
+    };
     if !auth::verify_password(&user.password_hash, &body.password) {
+        state
+            .login_throttle
+            .record_failure(&state.db, &email, &ip, now_ms())
+            .await;
         return Err(ControlError::Unauthorized);
     }
+    // Success clears the bucket — a legit user's typos never lock them out.
+    state.login_throttle.clear(&state.db, &email, &ip).await;
+
+    let session_id = new_id();
     let (raw, hash, expires_at) = auth::generate_session_token();
-    db::insert_session(&state.db, &new_id(), &user.id, &hash, now_ms(), expires_at)
-        .await
-        .map_err(|e| ControlError::Internal(e.into()))?;
-    Ok(Json(LoginResponse {
-        token: raw,
+    db::insert_session(
+        &state.db,
+        &session_id,
+        &user.id,
+        &hash,
+        now_ms(),
         expires_at,
-    }))
+    )
+    .await
+    .map_err(|e| ControlError::Internal(e.into()))?;
+    audit::record(
+        &state.db,
+        AuditEntry {
+            org_id: user.org_id.as_deref(),
+            actor_id: &user.id,
+            actor_email: &user.email,
+            action: "session.opened",
+            target_kind: TargetKind::Session,
+            target_id: &session_id,
+            before: None,
+            // Sanitized: ids only — no token, no token hash, ever.
+            after: Some(serde_json::json!({ "expires_at": expires_at })),
+            ip: Some(&ip),
+        },
+    )
+    .await;
+    let max_age_secs = (expires_at - now_ms()) / 1000;
+    let cookie = auth::session_cookie(&raw, max_age_secs);
+    let public = PublicUser::from(&user);
+    Ok((
+        StatusCode::OK,
+        AppendHeaders([(axum::http::header::SET_COOKIE, cookie)]),
+        Json(LoginResponse {
+            token: raw,
+            expires_at,
+            user: public,
+        }),
+    ))
 }
 
-/// POST /api/v1/auth/logout — deletes the caller's session.
+/// POST /api/v1/auth/logout — deletes the caller's session and expires the
+/// browser cookie. Open to any authenticated user (members included): a
+/// member must be able to end their own session.
 pub async fn logout(
     State(state): State<ControlState>,
     headers: axum::http::HeaderMap,
-    _admin: AuthedAdmin,
-) -> ApiResult<StatusCode> {
-    // AuthedAdmin already proved the session is valid; now resolve it again
-    // by the presented token to learn WHICH session row to delete.
-    if let Some(token) = crate::auth::bearer_token(&headers) {
-        let hash = tributary_common::keys::hash_token(token);
+    user: AuthedUser,
+) -> ApiResult<(
+    StatusCode,
+    AppendHeaders<[(axum::http::HeaderName, String); 1]>,
+)> {
+    // AuthedUser already proved a session is valid; resolve it again by the
+    // presented token (bearer OR cookie) to learn WHICH session row to drop.
+    if let Some(token) = auth::any_token(&headers) {
+        let hash = tributary_common::keys::hash_token(&token);
         if let Ok(Some(row)) = db::session_user_by_token_hash(&state.db, &hash).await {
+            audit::record(
+                &state.db,
+                AuditEntry {
+                    org_id: user.org_id.as_deref(),
+                    actor_id: &user.user_id,
+                    actor_email: &user.email,
+                    action: "session.closed",
+                    target_kind: TargetKind::Session,
+                    target_id: &row.session_id,
+                    before: None,
+                    after: None,
+                    ip: Some(&client_ip(&headers)),
+                },
+            )
+            .await;
             let _ = db::delete_session(&state.db, &row.session_id).await;
         }
     }
-    Ok(StatusCode::NO_CONTENT)
+    Ok((
+        StatusCode::NO_CONTENT,
+        AppendHeaders([(
+            axum::http::header::SET_COOKIE,
+            auth::expired_session_cookie(),
+        )]),
+    ))
+}
+
+/// GET /api/v1/auth/me — who is the caller? (Dashboard shell bootstrap.)
+pub async fn whoami(user: AuthedUser) -> Json<PublicUser> {
+    Json(PublicUser {
+        id: user.user_id,
+        email: user.email,
+        role: user.role,
+        org_id: user.org_id,
+        created_at: 0, // identity only; the account's age is not needed here
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -105,6 +222,7 @@ pub struct PublicOrg {
 pub async fn create_org(
     State(state): State<ControlState>,
     admin: AuthedAdmin,
+    headers: axum::http::HeaderMap,
     Json(body): Json<CreateOrgRequest>,
 ) -> ApiResult<(StatusCode, Json<PublicOrg>)> {
     if admin.role != "host_admin" {
@@ -137,15 +255,30 @@ pub async fn create_org(
     db::insert_org(&state.db, &org)
         .await
         .map_err(|e| ControlError::Conflict(format!("slug '{slug}' is already taken: {e}")))?;
-    Ok((
-        StatusCode::CREATED,
-        Json(PublicOrg {
-            id: org.id,
-            name: org.name,
-            slug: org.slug,
-            created_at: org.created_at,
-        }),
-    ))
+    let public = PublicOrg {
+        id: org.id.clone(),
+        name: org.name.clone(),
+        slug: org.slug.clone(),
+        created_at: org.created_at,
+    };
+    let ip = client_ip(&headers);
+    audit::record(
+        &state.db,
+        AuditEntry {
+            // The trail belongs to the new org from its first instant.
+            org_id: Some(&org.id),
+            actor_id: &admin.user_id,
+            actor_email: &admin.email,
+            action: "org.created",
+            target_kind: TargetKind::Org,
+            target_id: &org.id,
+            before: None,
+            after: serde_json::to_value(&public).ok(),
+            ip: Some(&ip),
+        },
+    )
+    .await;
+    Ok((StatusCode::CREATED, Json(public)))
 }
 
 /// Lists orgs within the caller's scope.
@@ -191,6 +324,7 @@ pub async fn get_org(
 pub async fn delete_org(
     State(state): State<ControlState>,
     admin: AuthedAdmin,
+    headers: axum::http::HeaderMap,
     Path(id): Path<String>,
 ) -> ApiResult<StatusCode> {
     let org = db::org_by_id(&state.db, &id)
@@ -210,6 +344,23 @@ pub async fn delete_org(
     db::delete_org(&state.db, &org.id)
         .await
         .map_err(|e| ControlError::Internal(e.into()))?;
+    let ip = client_ip(&headers);
+    audit::record(
+        &state.db,
+        AuditEntry {
+            org_id: Some(&org.id),
+            actor_id: &admin.user_id,
+            actor_email: &admin.email,
+            action: "org.deleted",
+            target_kind: TargetKind::Org,
+            target_id: &org.id,
+            // Masked snapshot of what was removed (name/slug only).
+            before: Some(serde_json::json!({ "name": org.name, "slug": org.slug })),
+            after: None,
+            ip: Some(&ip),
+        },
+    )
+    .await;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -236,6 +387,7 @@ pub struct MemberListQuery {
 pub async fn create_member(
     State(state): State<ControlState>,
     admin: AuthedAdmin,
+    headers: axum::http::HeaderMap,
     Json(body): Json<CreateMemberRequest>,
 ) -> ApiResult<(StatusCode, Json<PublicUser>)> {
     admin.ensure_org_scope(&body.org_id)?;
@@ -245,13 +397,31 @@ pub async fn create_member(
         email: body.email.trim().to_lowercase(),
         password_hash: auth::hash_password(&body.password)?,
         role: "member".to_string(),
-        org_id: Some(body.org_id),
+        org_id: Some(body.org_id.clone()),
         created_at: now_ms(),
     };
     db::insert_user(&state.db, &member)
         .await
         .map_err(|e| ControlError::Conflict(format!("email already exists: {e}")))?;
-    Ok((StatusCode::CREATED, Json(PublicUser::from(&member))))
+    let public = PublicUser::from(&member);
+    let ip = client_ip(&headers);
+    audit::record(
+        &state.db,
+        AuditEntry {
+            org_id: Some(&body.org_id),
+            actor_id: &admin.user_id,
+            actor_email: &admin.email,
+            action: "member.created",
+            target_kind: TargetKind::Member,
+            target_id: &member.id,
+            before: None,
+            // PublicUser is already the masked view (no password hash).
+            after: serde_json::to_value(&public).ok(),
+            ip: Some(&ip),
+        },
+    )
+    .await;
+    Ok((StatusCode::CREATED, Json(public)))
 }
 
 /// Lists an org's members (scoped by query param).
@@ -271,6 +441,7 @@ pub async fn list_members(
 pub async fn delete_member(
     State(state): State<ControlState>,
     admin: AuthedAdmin,
+    headers: axum::http::HeaderMap,
     Path(id): Path<String>,
 ) -> ApiResult<StatusCode> {
     let user = db::user_by_id(&state.db, &id)
@@ -292,6 +463,22 @@ pub async fn delete_member(
     db::delete_member(&state.db, &id)
         .await
         .map_err(|e| ControlError::Internal(e.into()))?;
+    let ip = client_ip(&headers);
+    audit::record(
+        &state.db,
+        AuditEntry {
+            org_id: user.org_id.as_deref(),
+            actor_id: &admin.user_id,
+            actor_email: &admin.email,
+            action: "member.deleted",
+            target_kind: TargetKind::Member,
+            target_id: &user.id,
+            before: serde_json::to_value(PublicUser::from(&user)).ok(),
+            after: None,
+            ip: Some(&ip),
+        },
+    )
+    .await;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -336,6 +523,7 @@ fn parse_allowlist(raw: &str) -> Vec<String> {
 pub async fn create_pool(
     State(state): State<ControlState>,
     admin: AuthedAdmin,
+    headers: axum::http::HeaderMap,
     Json(body): Json<CreatePoolRequest>,
 ) -> ApiResult<(StatusCode, Json<PublicPool>)> {
     admin.ensure_org_scope(&body.org_id)?;
@@ -356,7 +544,7 @@ pub async fn create_pool(
     }
     let pool = db::PoolRow {
         id: new_id(),
-        org_id: body.org_id,
+        org_id: body.org_id.clone(),
         name: name.to_string(),
         kind: "org".to_string(),
         model_allowlist: serde_json::to_string(&allowlist)
@@ -368,19 +556,33 @@ pub async fn create_pool(
     db::insert_pool(&state.db, &pool)
         .await
         .map_err(|e| ControlError::Internal(e.into()))?;
-    Ok((
-        StatusCode::CREATED,
-        Json(PublicPool {
-            id: pool.id,
-            org_id: pool.org_id,
-            name: pool.name,
-            kind: pool.kind,
-            model_allowlist: allowlist,
-            status: pool.status,
-            currency: pool.currency,
-            created_at: pool.created_at,
-        }),
-    ))
+    let public = PublicPool {
+        id: pool.id.clone(),
+        org_id: pool.org_id.clone(),
+        name: pool.name.clone(),
+        kind: pool.kind.clone(),
+        model_allowlist: allowlist.clone(),
+        status: pool.status.clone(),
+        currency: pool.currency.clone(),
+        created_at: pool.created_at,
+    };
+    let ip = client_ip(&headers);
+    audit::record(
+        &state.db,
+        AuditEntry {
+            org_id: Some(&pool.org_id),
+            actor_id: &admin.user_id,
+            actor_email: &admin.email,
+            action: "pool.created",
+            target_kind: TargetKind::Pool,
+            target_id: &pool.id,
+            before: None,
+            after: serde_json::to_value(&public).ok(),
+            ip: Some(&ip),
+        },
+    )
+    .await;
+    Ok((StatusCode::CREATED, Json(public)))
 }
 
 /// Lists pools: org_admin sees their org's; host_admin sees all (optionally
@@ -438,12 +640,29 @@ pub async fn get_pool(
 pub async fn disable_pool(
     State(state): State<ControlState>,
     admin: AuthedAdmin,
+    headers: axum::http::HeaderMap,
     Path(id): Path<String>,
 ) -> ApiResult<StatusCode> {
     let pool = load_scoped_pool(&state, &admin, &id).await?;
     db::disable_pool(&state.db, &pool.id)
         .await
         .map_err(|e| ControlError::Internal(e.into()))?;
+    let ip = client_ip(&headers);
+    audit::record(
+        &state.db,
+        AuditEntry {
+            org_id: Some(&pool.org_id),
+            actor_id: &admin.user_id,
+            actor_email: &admin.email,
+            action: "pool.disabled",
+            target_kind: TargetKind::Pool,
+            target_id: &pool.id,
+            before: Some(serde_json::json!({ "status": pool.status, "name": pool.name })),
+            after: Some(serde_json::json!({ "status": "disabled" })),
+            ip: Some(&ip),
+        },
+    )
+    .await;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -487,6 +706,7 @@ pub struct IssuedKeyResponse {
 pub async fn issue_pool_key(
     State(state): State<ControlState>,
     admin: AuthedAdmin,
+    headers: axum::http::HeaderMap,
     Path(pool_id): Path<String>,
     Json(body): Json<IssueKeyRequest>,
 ) -> ApiResult<(StatusCode, Json<IssuedKeyResponse>)> {
@@ -516,6 +736,30 @@ pub async fn issue_pool_key(
     )
     .await
     .map_err(|e| ControlError::Internal(e.into()))?;
+    let ip = client_ip(&headers);
+    audit::record(
+        &state.db,
+        AuditEntry {
+            org_id: Some(&pool.org_id),
+            actor_id: &admin.user_id,
+            actor_email: &admin.email,
+            action: "pool_key.issued",
+            target_kind: TargetKind::PoolKey,
+            target_id: &key_id,
+            before: None,
+            // Masked display prefix ONLY — the raw key is revealed to the
+            // admin exactly once, in the HTTP response, and nowhere else
+            // (audit sanitization invariant).
+            after: Some(serde_json::json!({
+                "pool_id": pool.id,
+                "user_id": member.id,
+                "key_prefix": generated.key_prefix,
+                "status": "active",
+            })),
+            ip: Some(&ip),
+        },
+    )
+    .await;
     Ok((
         StatusCode::CREATED,
         Json(IssuedKeyResponse {
@@ -545,18 +789,36 @@ pub async fn list_pool_keys(
 pub async fn revoke_pool_key(
     State(state): State<ControlState>,
     admin: AuthedAdmin,
+    headers: axum::http::HeaderMap,
     Path((pool_id, key_id)): Path<(String, String)>,
 ) -> ApiResult<StatusCode> {
     let pool = load_scoped_pool(&state, &admin, &pool_id).await?;
     let keys = db::pool_keys_by_pool(&state.db, &pool.id)
         .await
         .map_err(|e| ControlError::Internal(e.into()))?;
-    if !keys.iter().any(|k| k.id == key_id) {
-        return Err(ControlError::NotFound);
-    }
+    let key = keys
+        .iter()
+        .find(|k| k.id == key_id)
+        .ok_or(ControlError::NotFound)?;
     db::revoke_pool_key(&state.db, &key_id)
         .await
         .map_err(|e| ControlError::Internal(e.into()))?;
+    let ip = client_ip(&headers);
+    audit::record(
+        &state.db,
+        AuditEntry {
+            org_id: Some(&pool.org_id),
+            actor_id: &admin.user_id,
+            actor_email: &admin.email,
+            action: "pool_key.revoked",
+            target_kind: TargetKind::PoolKey,
+            target_id: &key.id,
+            before: Some(serde_json::json!({ "status": key.status, "key_prefix": key.key_prefix })),
+            after: Some(serde_json::json!({ "status": "revoked", "key_prefix": key.key_prefix })),
+            ip: Some(&ip),
+        },
+    )
+    .await;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -611,6 +873,7 @@ async fn probe(http: &reqwest::Client, base_url: &str, key: &str) -> Option<u16>
 pub async fn create_provider_key(
     State(state): State<ControlState>,
     admin: AuthedAdmin,
+    headers: axum::http::HeaderMap,
     Path(pool_id): Path<String>,
     Json(body): Json<CreateProviderKeyRequest>,
 ) -> ApiResult<(StatusCode, Json<PublicProviderKey>)> {
@@ -667,6 +930,24 @@ pub async fn create_provider_key(
     let mut public = PublicProviderKey::from(&row);
     public.health = health.to_string();
     public.last_validated_at = Some(now_ms());
+    let ip = client_ip(&headers);
+    audit::record(
+        &state.db,
+        AuditEntry {
+            org_id: Some(&pool.org_id),
+            actor_id: &admin.user_id,
+            actor_email: &admin.email,
+            action: "provider_key.created",
+            target_kind: TargetKind::ProviderKey,
+            target_id: &id,
+            before: None,
+            // PublicProviderKey is the masked view — prefix + last-4 only;
+            // ciphertext/dek never cross into the audit trail (invariant).
+            after: serde_json::to_value(&public).ok(),
+            ip: Some(&ip),
+        },
+    )
+    .await;
     Ok((StatusCode::CREATED, Json(public)))
 }
 
@@ -687,6 +968,7 @@ pub async fn list_provider_keys(
 pub async fn revoke_provider_key(
     State(state): State<ControlState>,
     admin: AuthedAdmin,
+    headers: axum::http::HeaderMap,
     Path((pool_id, key_id)): Path<(String, String)>,
 ) -> ApiResult<StatusCode> {
     let pool = load_scoped_pool(&state, &admin, &pool_id).await?;
@@ -700,6 +982,22 @@ pub async fn revoke_provider_key(
     db::revoke_provider_key(&state.db, &key_id)
         .await
         .map_err(|e| ControlError::Internal(e.into()))?;
+    let ip = client_ip(&headers);
+    audit::record(
+        &state.db,
+        AuditEntry {
+            org_id: Some(&pool.org_id),
+            actor_id: &admin.user_id,
+            actor_email: &admin.email,
+            action: "provider_key.revoked",
+            target_kind: TargetKind::ProviderKey,
+            target_id: &key_id,
+            before: Some(serde_json::json!({ "status": row.status, "key_prefix": row.key_prefix })),
+            after: Some(serde_json::json!({ "status": "revoked", "key_prefix": row.key_prefix })),
+            ip: Some(&ip),
+        },
+    )
+    .await;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -707,6 +1005,7 @@ pub async fn revoke_provider_key(
 pub async fn revalidate_provider_key(
     State(state): State<ControlState>,
     admin: AuthedAdmin,
+    headers: axum::http::HeaderMap,
     Path((pool_id, key_id)): Path<(String, String)>,
 ) -> ApiResult<Json<PublicProviderKey>> {
     let pool = load_scoped_pool(&state, &admin, &pool_id).await?;
@@ -729,6 +1028,22 @@ pub async fn revalidate_provider_key(
     let mut public = PublicProviderKey::from(&row);
     public.health = health.to_string();
     public.last_validated_at = Some(now_ms());
+    let ip = client_ip(&headers);
+    audit::record(
+        &state.db,
+        AuditEntry {
+            org_id: Some(&pool.org_id),
+            actor_id: &admin.user_id,
+            actor_email: &admin.email,
+            action: "provider_key.revalidated",
+            target_kind: TargetKind::ProviderKey,
+            target_id: &key_id,
+            before: Some(serde_json::json!({ "health": row.health })),
+            after: Some(serde_json::json!({ "health": health, "key_prefix": row.key_prefix })),
+            ip: Some(&ip),
+        },
+    )
+    .await;
     Ok(Json(public))
 }
 
@@ -771,6 +1086,7 @@ pub struct UpsertQuotaRuleRequest {
 pub async fn upsert_quota_rule(
     State(state): State<ControlState>,
     admin: AuthedAdmin,
+    headers: axum::http::HeaderMap,
     Json(body): Json<UpsertQuotaRuleRequest>,
 ) -> ApiResult<(StatusCode, Json<db::QuotaRuleRow>)> {
     if !matches!(body.subject_kind.as_str(), "pool_key" | "user" | "pool") {
@@ -813,6 +1129,27 @@ pub async fn upsert_quota_rule(
     db::upsert_quota_rule(&state.db, &rule)
         .await
         .map_err(|e| ControlError::Internal(e.into()))?;
+    let ip = client_ip(&headers);
+    audit::record(
+        &state.db,
+        AuditEntry {
+            // The subject's org owns the trail (host actions included).
+            org_id: db::subject_org(&state.db, &rule.subject_kind, &rule.subject_id)
+                .await
+                .ok()
+                .flatten()
+                .as_deref(),
+            actor_id: &admin.user_id,
+            actor_email: &admin.email,
+            action: "quota_rule.upserted",
+            target_kind: TargetKind::QuotaRule,
+            target_id: &rule.id,
+            before: None,
+            after: serde_json::to_value(&rule).ok(),
+            ip: Some(&ip),
+        },
+    )
+    .await;
     Ok((StatusCode::CREATED, Json(rule)))
 }
 
@@ -847,20 +1184,73 @@ pub async fn list_quota_rules(
 pub async fn delete_quota_rule(
     State(state): State<ControlState>,
     admin: AuthedAdmin,
+    headers: axum::http::HeaderMap,
     Path(id): Path<String>,
 ) -> ApiResult<StatusCode> {
     let rule = db::quota_rule_by_id(&state.db, &id)
         .await
         .map_err(|e| ControlError::Internal(e.into()))?
         .ok_or(ControlError::NotFound)?;
-    match db::subject_org(&state.db, &rule.subject_kind, &rule.subject_id).await {
-        Ok(Some(org)) => admin.ensure_org_scope(&org)?,
-        Ok(None) if admin.role == "host_admin" => {}
+    let org = match db::subject_org(&state.db, &rule.subject_kind, &rule.subject_id).await {
+        Ok(Some(org)) => Some(org),
+        Ok(None) if admin.role == "host_admin" => None,
         Ok(None) => return Err(ControlError::NotFound),
         Err(e) => return Err(ControlError::Internal(e.into())),
+    };
+    if let Some(org) = &org {
+        admin.ensure_org_scope(org)?;
     }
     db::delete_quota_rule(&state.db, &id)
         .await
         .map_err(|e| ControlError::Internal(e.into()))?;
+    let ip = client_ip(&headers);
+    audit::record(
+        &state.db,
+        AuditEntry {
+            org_id: org.as_deref(),
+            actor_id: &admin.user_id,
+            actor_email: &admin.email,
+            action: "quota_rule.deleted",
+            target_kind: TargetKind::QuotaRule,
+            target_id: &rule.id,
+            before: serde_json::to_value(&rule).ok(),
+            after: None,
+            ip: Some(&ip),
+        },
+    )
+    .await;
     Ok(StatusCode::NO_CONTENT)
+}
+
+// ---------------------------------------------------------------------------
+// Audit log (admin viewer)
+// ---------------------------------------------------------------------------
+
+/// GET /api/v1/audit?limit=&offset= — the control-plane trail, newest first.
+///
+/// org_admin sees only rows recorded against their org (the scope decision
+/// was made at WRITE time via `org_id`); host_admin sees everything.
+#[derive(Deserialize)]
+pub struct AuditListQuery {
+    pub limit: Option<i64>,
+    pub offset: Option<i64>,
+}
+
+/// Lists audit rows within the caller's scope.
+pub async fn list_audit(
+    State(state): State<ControlState>,
+    admin: AuthedAdmin,
+    Query(query): Query<AuditListQuery>,
+) -> ApiResult<Json<Vec<crate::audit::AuditRow>>> {
+    let scope = if admin.role == "host_admin" {
+        None
+    } else {
+        admin.org_id.as_deref()
+    };
+    let limit = query.limit.unwrap_or(50).clamp(1, 200);
+    let offset = query.offset.unwrap_or(0).max(0);
+    let rows = crate::audit::list(&state.db, scope, limit, offset)
+        .await
+        .map_err(|e| ControlError::Internal(e.into()))?;
+    Ok(Json(rows))
 }

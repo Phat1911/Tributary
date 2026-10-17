@@ -259,6 +259,8 @@ fn user_from_row(row: sqlx::any::AnyRow) -> UserRow {
 pub struct SessionUserRow {
     pub session_id: String,
     pub user_id: String,
+    /// Snapshot for audit rows / `GET /auth/me`.
+    pub email: String,
     pub role: String,
     pub org_id: Option<String>,
     pub expires_at: i64,
@@ -270,7 +272,7 @@ pub async fn session_user_by_token_hash(
     token_hash: &str,
 ) -> sqlx::Result<Option<SessionUserRow>> {
     let sql = db.sql(
-        "SELECT s.id AS session_id, s.expires_at, u.id AS user_id, u.role, u.org_id \
+        "SELECT s.id AS session_id, s.expires_at, u.id AS user_id, u.email, u.role, u.org_id \
          FROM sessions s JOIN users u ON s.user_id = u.id \
          WHERE s.token_hash = ?",
     );
@@ -281,6 +283,7 @@ pub async fn session_user_by_token_hash(
         .map(|row| SessionUserRow {
             session_id: row.get("session_id"),
             user_id: row.get("user_id"),
+            email: row.get("email"),
             role: row.get("role"),
             org_id: row.get("org_id"),
             expires_at: row.get("expires_at"),
@@ -786,4 +789,226 @@ pub async fn subject_org(db: &Db, kind: &str, id: &str) -> sqlx::Result<Option<S
             org
         });
     Ok(row.flatten())
+}
+
+// ---------------------------------------------------------------------------
+// Usage queries (M3 dashboards)
+// ---------------------------------------------------------------------------
+
+/// A `usage_events` row as served to dashboards — metrics + ids only, with
+/// the pool key's MASKED display prefix joined in (never the hash).
+#[derive(Debug, Clone, Serialize)] // serde: this struct → JSON — usage table row shape
+pub struct UsageEventPublic {
+    pub id: String,
+    pub ts: i64,
+    pub pool_id: Option<String>,
+    pub pool_name: Option<String>,
+    pub pool_key_id: String,
+    pub key_prefix: String,
+    pub user_id: Option<String>,
+    pub model: String,
+    pub prompt_tokens: i64,
+    pub completion_tokens: i64,
+    pub cost_micros: i64,
+    pub latency_ms: i64,
+    pub status: String,
+}
+
+/// Which slice of `usage_events` a caller reads: one pool (admin view,
+/// optionally one member within it) or one user across pools (self-service).
+#[derive(Debug, Clone, Default)]
+pub struct UsageFilter<'a> {
+    pub pool_id: Option<&'a str>,
+    pub user_id: Option<&'a str>,
+}
+
+/// Lists usage events newest-first with pagination (LIMIT/OFFSET are the
+/// same on both backends; the WHERE list is assembled before the portable
+/// `?`-rewrite runs, so bind order still matches placeholder order).
+pub async fn usage_events(
+    db: &Db,
+    filter: &UsageFilter<'_>,
+    limit: i64,
+    offset: i64,
+) -> sqlx::Result<Vec<UsageEventPublic>> {
+    let mut sql = String::from(
+        "SELECT e.id, e.ts, e.pool_id, p.name AS pool_name, e.pool_key_id, k.key_prefix, \
+          e.user_id, e.model, e.prompt_tokens, e.completion_tokens, e.cost_micros, \
+          e.latency_ms, e.status \
+         FROM usage_events e \
+         JOIN pool_keys k ON e.pool_key_id = k.id \
+         LEFT JOIN pools p ON e.pool_id = p.id",
+    );
+    let mut clauses: Vec<&'static str> = Vec::new();
+    if filter.pool_id.is_some() {
+        clauses.push("e.pool_id = ?");
+    }
+    if filter.user_id.is_some() {
+        clauses.push("e.user_id = ?");
+    }
+    if !clauses.is_empty() {
+        sql.push_str(" WHERE ");
+        sql.push_str(&clauses.join(" AND "));
+    }
+    sql.push_str(" ORDER BY e.ts DESC, e.id LIMIT ? OFFSET ?");
+    let sql = db.sql(&sql);
+    let mut q = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()));
+    if let Some(pool) = filter.pool_id {
+        q = q.bind(pool);
+    }
+    if let Some(user) = filter.user_id {
+        q = q.bind(user);
+    }
+    let rows = q
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(db.pool())
+        .await?
+        .into_iter()
+        .map(|row| UsageEventPublic {
+            id: row.get("id"),
+            ts: row.get("ts"),
+            pool_id: row.get("pool_id"),
+            pool_name: row.get("pool_name"),
+            pool_key_id: row.get("pool_key_id"),
+            key_prefix: row.get("key_prefix"),
+            user_id: row.get("user_id"),
+            model: row.get("model"),
+            prompt_tokens: row.get("prompt_tokens"),
+            completion_tokens: row.get("completion_tokens"),
+            cost_micros: row.get("cost_micros"),
+            latency_ms: row.get("latency_ms"),
+            status: row.get("status"),
+        })
+        .collect();
+    Ok(rows)
+}
+
+/// One UTC day of usage totals (the sparkline's data point).
+#[derive(Debug, Clone, Serialize)] // serde: this struct → JSON — sparkline point
+pub struct DailyUsage {
+    /// Unix epoch ms of the UTC day's start (the x-axis key).
+    pub day_start_ms: i64,
+    pub requests: i64,
+    /// prompt + completion tokens.
+    pub tokens: i64,
+}
+
+/// Aggregates usage per UTC day since `since_ms` for the same filter shape
+/// as [`usage_events`]. `ts / 86400000` is integer division on BOTH backends
+/// (SQLite int/int, PG bigint/bigint) — the M2 CAST rule still wraps SUM.
+pub async fn usage_daily(
+    db: &Db,
+    filter: &UsageFilter<'_>,
+    since_ms: i64,
+) -> sqlx::Result<Vec<DailyUsage>> {
+    let mut sql = String::from(
+        "SELECT CAST(ts / 86400000 AS BIGINT) AS day_idx, COUNT(*) AS requests, \
+          CAST(COALESCE(SUM(prompt_tokens + completion_tokens), 0) AS BIGINT) AS tokens \
+         FROM usage_events",
+    );
+    let mut clauses: Vec<&'static str> = Vec::new();
+    if filter.pool_id.is_some() {
+        clauses.push("pool_id = ?");
+    }
+    if filter.user_id.is_some() {
+        clauses.push("user_id = ?");
+    }
+    clauses.push("ts >= ?");
+    sql.push_str(" WHERE ");
+    sql.push_str(&clauses.join(" AND "));
+    sql.push_str(" GROUP BY day_idx ORDER BY day_idx");
+    let sql = db.sql(&sql);
+    let mut q = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()));
+    if let Some(pool) = filter.pool_id {
+        q = q.bind(pool);
+    }
+    if let Some(user) = filter.user_id {
+        q = q.bind(user);
+    }
+    let rows = q
+        .bind(since_ms)
+        .fetch_all(db.pool())
+        .await?
+        .into_iter()
+        .map(|row| {
+            let day_idx: i64 = row.get("day_idx");
+            DailyUsage {
+                day_start_ms: day_idx * 86_400_000,
+                requests: row.get("requests"),
+                tokens: row.get("tokens"),
+            }
+        })
+        .collect();
+    Ok(rows)
+}
+
+// ---------------------------------------------------------------------------
+// Member self-service (M3): own pool keys, by user
+// ---------------------------------------------------------------------------
+
+/// A member's own pool key with its pool name for display.
+#[derive(Debug, Clone, Serialize)] // serde: this struct → JSON — self-service key row
+pub struct OwnPoolKey {
+    pub id: String,
+    pub pool_id: String,
+    pub pool_name: String,
+    pub key_prefix: String,
+    pub status: String,
+    pub created_at: i64,
+}
+
+/// Lists one user's pool keys across pools (masked — hash never selected).
+pub async fn pool_keys_by_user(db: &Db, user_id: &str) -> sqlx::Result<Vec<OwnPoolKey>> {
+    let sql = db.sql(
+        "SELECT k.id, k.pool_id, p.name AS pool_name, k.key_prefix, k.status, k.created_at \
+         FROM pool_keys k JOIN pools p ON k.pool_id = p.id \
+         WHERE k.user_id = ? ORDER BY k.created_at",
+    );
+    let rows = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
+        .bind(user_id)
+        .fetch_all(db.pool())
+        .await?
+        .into_iter()
+        .map(|row| OwnPoolKey {
+            id: row.get("id"),
+            pool_id: row.get("pool_id"),
+            pool_name: row.get("pool_name"),
+            key_prefix: row.get("key_prefix"),
+            status: row.get("status"),
+            created_at: row.get("created_at"),
+        })
+        .collect();
+    Ok(rows)
+}
+
+/// Loads ONE pool key by id together with its owner (self-service checks).
+/// Returns the masked display fields only.
+pub async fn pool_key_with_owner(
+    db: &Db,
+    key_id: &str,
+) -> sqlx::Result<Option<(PublicPoolKey, Option<String>)>> {
+    let sql = db.sql(
+        "SELECT k.id, k.pool_id, k.key_prefix, k.user_id, k.status, k.created_at \
+         FROM pool_keys k WHERE k.id = ?",
+    );
+    let row = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
+        .bind(key_id)
+        .fetch_optional(db.pool())
+        .await?
+        .map(|row| {
+            let user_id: Option<String> = row.get("user_id");
+            (
+                PublicPoolKey {
+                    id: row.get("id"),
+                    pool_id: row.get("pool_id"),
+                    key_prefix: row.get("key_prefix"),
+                    user_id: user_id.clone(),
+                    status: row.get("status"),
+                    created_at: row.get("created_at"),
+                },
+                user_id,
+            )
+        });
+    Ok(row)
 }
