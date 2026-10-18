@@ -189,6 +189,96 @@ function DeleteMemberButton({
   );
 }
 
+/** Creates a pool in the org (org_admin scope, server-enforced). The
+ * model allowlist is optional — empty means the deployment default. */
+function CreatePoolDialog({
+  orgId,
+  onCreated,
+}: {
+  orgId: string | null;
+  onCreated: () => void;
+}) {
+  const [name, setName] = useState("");
+  const [models, setModels] = useState("");
+  const [open, setOpen] = useState(false);
+  const [busy, setBusy] = useState(false);
+
+  async function submit(e: React.FormEvent) {
+    e.preventDefault();
+    setBusy(true);
+    try {
+      if (!orgId) throw new ApiError(0, "no_org", "No organization found for your account");
+      // Comma-separated → array; empty input → omit (deployment default).
+      const allowlist = models
+        .split(",")
+        .map((m) => m.trim())
+        .filter(Boolean);
+      await api.post("/pools", {
+        org_id: orgId,
+        name,
+        ...(allowlist.length > 0 ? { model_allowlist: allowlist } : {}),
+      });
+      toast.success(`Pool "${name}" created`);
+      setOpen(false);
+      setName("");
+      setModels("");
+      onCreated();
+    } catch (err) {
+      toast.error(
+        err instanceof ApiError ? err.message : "Failed to create pool",
+      );
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={setOpen}>
+      <DialogTrigger asChild>
+        <Button variant="outline">
+          <Plus className="size-4" aria-hidden />
+          New pool
+        </Button>
+      </DialogTrigger>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle className="font-display">New pool</DialogTitle>
+          <DialogDescription>
+            A pool funds one shared upstream budget — members get per-user
+            keys into it.
+          </DialogDescription>
+        </DialogHeader>
+        <form onSubmit={submit} className="space-y-4">
+          <div className="space-y-2">
+            <Label htmlFor="pool-name">Name</Label>
+            <Input
+              id="pool-name"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              placeholder="default"
+              required
+            />
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="pool-models">Model allowlist (optional)</Label>
+            <Input
+              id="pool-models"
+              value={models}
+              onChange={(e) => setModels(e.target.value)}
+              placeholder="gpt-4o-mini, gpt-4o — leave empty for the default"
+            />
+          </div>
+          <DialogFooter>
+            <Button type="submit" disabled={busy}>
+              {busy ? "Creating…" : "Create pool"}
+            </Button>
+          </DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 export default function OrgPage() {
   // An org_admin's /orgs returns exactly their org. The members list
   // REQUIRES ?org_id= (the API scopes by it), so it waits for the org.
@@ -250,7 +340,10 @@ export default function OrgPage() {
       </section>
 
       <section className="space-y-3">
-        <h2 className="font-display text-lg font-medium">Pools</h2>
+        <div className="flex items-center justify-between">
+          <h2 className="font-display text-lg font-medium">Pools</h2>
+          <CreatePoolDialog orgId={orgId} onCreated={pools.reload} />
+        </div>
         {pools.loading ? (
           <TableSkeleton />
         ) : pools.error ? (
@@ -258,7 +351,7 @@ export default function OrgPage() {
         ) : (pools.data ?? []).length === 0 ? (
           <EmptyState
             title="No pools"
-            hint="Ask your host admin to create one, or create it here."
+            hint="Create your first pool, then issue member keys into it."
           />
         ) : (
           <Table>
