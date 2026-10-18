@@ -2,7 +2,7 @@
 // anyone else's is reachable, enforced server-side by the /me endpoints.
 "use client";
 
-import { KeyRound, Trash2 } from "lucide-react";
+import { Eye, KeyRound, ShieldAlert, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import { AppShell, PageHeader } from "@/components/app-shell";
 import { EmptyState, ErrorState, TableSkeleton } from "@/components/data-state";
@@ -33,6 +33,7 @@ import {
 import {
   api,
   ApiError,
+  type Disclosure,
   type OwnPoolKey,
   type UsageList,
   type UsageSummary,
@@ -40,7 +41,45 @@ import {
 import { formatDateTime, formatTokens } from "@/lib/format";
 import { useApi } from "@/lib/use-api";
 
+/** The M4 disclosure banner: shown whenever classification runs at all
+ * (Alert mode included) — the wording strengthens when auto-block is live. */
+function DisclosureBanner({ disclosure }: { disclosure: Disclosure }) {
+  if (!disclosure.classification_active) return null;
+  const live = disclosure.auto_block_live;
+  return (
+    <div
+      className={`flex items-start gap-3 rounded-lg border p-4 text-sm ${
+        live
+          ? "border-amber-500/50 bg-amber-500/5"
+          : "border-border bg-muted/40"
+      }`}
+      role="status"
+    >
+      {live ? (
+        <ShieldAlert className="mt-0.5 size-4 shrink-0 text-amber-600 dark:text-amber-400" aria-hidden />
+      ) : (
+        <Eye className="mt-0.5 size-4 shrink-0 text-muted-foreground" aria-hidden />
+      )}
+      <p className="leading-relaxed">
+        Requests made with your keys are classified for purpose alignment.{" "}
+        {live ? (
+          <strong>
+            Off-purpose requests may be blocked — your key is suspended
+            pending review, and your administrator can restore it.
+          </strong>
+        ) : (
+          <span className="text-muted-foreground">
+            Off-purpose requests may be flagged for your administrator&rsquo;s
+            review.
+          </span>
+        )}
+      </p>
+    </div>
+  );
+}
+
 export default function MePage() {
+  const disclosure = useApi<Disclosure>("/me/disclosure");
   const keys = useApi<OwnPoolKey[]>("/me/keys");
   const usage = useApi<UsageList>("/me/usage?limit=50");
   const summary = useApi<UsageSummary>("/me/usage/summary");
@@ -66,6 +105,11 @@ export default function MePage() {
         title="My keys & usage"
         description="Only you can see this. Point your OpenAI-compatible client at the gateway with one of your keys."
       />
+
+      {/* M4 disclosure — required whenever classification runs at all */}
+      {disclosure.data ? (
+        <DisclosureBanner disclosure={disclosure.data} />
+      ) : null}
 
       {/* Keys */}
       <section className="space-y-3">
@@ -102,7 +146,13 @@ export default function MePage() {
                   </TableCell>
                   <TableCell>
                     <Badge
-                      variant={key.status === "active" ? "default" : "secondary"}
+                      variant={
+                            key.status === "active"
+                              ? "default"
+                              : key.status === "suspended"
+                                ? "destructive"
+                                : "secondary"
+                          }
                     >
                       {key.status}
                     </Badge>

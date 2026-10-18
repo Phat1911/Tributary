@@ -6,7 +6,16 @@
 
 import { useState } from "react";
 import { useParams } from "next/navigation";
-import { KeyRound, Plus, RefreshCw, Trash2 } from "lucide-react";
+import {
+  CalendarClock,
+  Fingerprint,
+  KeyRound,
+  Plus,
+  RefreshCw,
+  RotateCcw,
+  ShieldCheck,
+  Trash2,
+} from "lucide-react";
 import { toast } from "sonner";
 import { AppShell, PageHeader } from "@/components/app-shell";
 import { EmptyState, ErrorState, TableSkeleton } from "@/components/data-state";
@@ -48,12 +57,17 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   api,
   ApiError,
+  type CanaryManagementView,
+  type CanaryModel,
   type IssuedKey,
+  type IpAllowlistEntry,
+  type ManagedPoolKey,
+  type PlantedCanaryKeys,
   type PublicMember,
   type PublicPool,
-  type PublicPoolKey,
   type PublicProviderKey,
   type QuotaRule,
+  type RotatedKey,
   type UsageList,
   type UsageSummary,
 } from "@/lib/api";
@@ -386,6 +400,452 @@ function AddBudgetDialog({
   );
 }
 
+/** Key-governance dialog: IP allowlist editor for one live key. */
+function AllowlistDialog({
+  poolId,
+  poolKey,
+  onClose,
+}: {
+  poolId: string;
+  poolKey: ManagedPoolKey;
+  onClose: () => void;
+}) {
+  // useApi fetches on mount (the dialog only mounts while open) and
+  // `reload` re-fetches after each add/remove — no manual effect.
+  const allowlists = useApi<IpAllowlistEntry[]>(
+    `/pools/${poolId}/keys/${poolKey.id}/allowlists`,
+  );
+  const [cidr, setCidr] = useState("");
+  const [note, setNote] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  async function add(e: React.FormEvent) {
+    e.preventDefault();
+    setBusy(true);
+    try {
+      await api.post(`/pools/${poolId}/keys/${poolKey.id}/allowlists`, {
+        cidr,
+        note: note || null,
+      });
+      setCidr("");
+      setNote("");
+      allowlists.reload();
+    } catch (err) {
+      toast.error(err instanceof ApiError ? err.message : "Failed to add");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Dialog open onOpenChange={(next: boolean) => !next && onClose()}>
+      <DialogContent className="max-w-lg">
+        <DialogHeader>
+          <DialogTitle className="font-display">
+            IP allowlist · {poolKey.key_prefix}
+          </DialogTitle>
+          <DialogDescription>
+            With at least one CIDR set, requests from other source IPs are
+            denied. Direct (proxy-less) requests fail closed — the gateway
+            sees no forwarding header.
+          </DialogDescription>
+        </DialogHeader>
+        <form onSubmit={add} className="flex items-end gap-2">
+          <div className="flex-1 space-y-1">
+            <Label htmlFor="cidr">CIDR</Label>
+            <Input
+              id="cidr"
+              value={cidr}
+              onChange={(e) => setCidr(e.target.value)}
+              placeholder="203.0.113.0/24"
+              className="font-mono text-xs"
+              required
+            />
+          </div>
+          <div className="flex-1 space-y-1">
+            <Label htmlFor="cidr-note">Note</Label>
+            <Input
+              id="cidr-note"
+              value={note}
+              onChange={(e) => setNote(e.target.value)}
+              placeholder="office"
+            />
+          </div>
+          <Button type="submit" disabled={busy}>
+            Add
+          </Button>
+        </form>
+        {allowlists.error ? (
+          <p className="text-sm text-destructive">
+            {allowlists.error.message}
+          </p>
+        ) : allowlists.loading && !allowlists.data ? (
+          <TableSkeleton />
+        ) : (allowlists.data ?? []).length === 0 ? (
+          <p className="text-sm text-muted-foreground">
+            No CIDRs yet — this key accepts requests from any source IP.
+          </p>
+        ) : (
+          <ul className="space-y-1">
+            {(allowlists.data ?? []).map((entry) => (
+              <li
+                key={entry.id}
+                className="flex items-center justify-between rounded-md border px-3 py-1.5"
+              >
+                <span className="font-mono text-xs">{entry.cidr}</span>
+                <span className="flex items-center gap-2 text-xs text-muted-foreground">
+                  {entry.note ?? ""}
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    aria-label={`Remove ${entry.cidr}`}
+                    onClick={() =>
+                      run(
+                        () =>
+                          api.del(
+                            `/pools/${poolId}/keys/${poolKey.id}/allowlists/${entry.id}`,
+                          ),
+                        `${entry.cidr} removed`,
+                        allowlists.reload,
+                      )
+                    }
+                  >
+                    <Trash2 className="size-4 text-destructive" />
+                  </Button>
+                </span>
+              </li>
+            ))}
+          </ul>
+        )}
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+/** Rotate flow: confirms, then reveals the new raw key exactly once. */
+function RotateKeyDialog({
+  poolId,
+  poolKey,
+  onClose,
+  onRotated,
+}: {
+  poolId: string;
+  poolKey: ManagedPoolKey;
+  onClose: () => void;
+  onRotated: () => void;
+}) {
+  const [rotated, setRotated] = useState<RotatedKey | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function rotate() {
+    setBusy(true);
+    try {
+      setRotated(
+        await api.post<RotatedKey>(
+          `/pools/${poolId}/keys/${poolKey.id}/rotate`,
+        ),
+      );
+      onRotated();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Rotation failed");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Dialog open onOpenChange={(next: boolean) => !next && onClose()}>
+      <DialogContent>
+        {rotated ? (
+          <div className="space-y-4">
+            <DialogHeader>
+              <DialogTitle className="font-display">Key rotated</DialogTitle>
+              <DialogDescription>
+                The old key {poolKey.key_prefix} stopped working the moment
+                you pressed rotate. Hand the new one to the member over a
+                secure channel — it is shown only now.
+              </DialogDescription>
+            </DialogHeader>
+            <SecretReveal
+              secret={rotated.raw}
+              label={`Pool key ${rotated.key_prefix}`}
+            />
+          </div>
+        ) : (
+          <>
+            <DialogHeader>
+              <DialogTitle className="font-display">
+                Rotate {poolKey.key_prefix}?
+              </DialogTitle>
+              <DialogDescription>
+                Issues a replacement key and revokes this one immediately.
+                Any expiry carries over.
+              </DialogDescription>
+            </DialogHeader>
+            {error ? (
+              <p className="text-sm text-destructive">{error}</p>
+            ) : null}
+            <DialogFooter>
+              <Button variant="outline" onClick={onClose}>
+                Cancel
+              </Button>
+              <Button onClick={rotate} disabled={busy}>
+                {busy ? "Rotating…" : "Rotate now"}
+              </Button>
+            </DialogFooter>
+          </>
+        )}
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+/** Set-or-clear expiry dialog (epoch ms sent; input is a date). */
+function ExpiryDialog({
+  poolId,
+  poolKey,
+  onClose,
+  onSaved,
+}: {
+  poolId: string;
+  poolKey: ManagedPoolKey;
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const current = poolKey.expires_at
+    ? new Date(poolKey.expires_at).toISOString().slice(0, 10)
+    : "";
+  const [date, setDate] = useState(current);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function save(e: React.FormEvent) {
+    e.preventDefault();
+    setBusy(true);
+    try {
+      await api.post(`/pools/${poolId}/keys/${poolKey.id}/expiry`, {
+        expires_at: date ? new Date(date).getTime() : null,
+      });
+      onSaved();
+      onClose();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Failed to save");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Dialog open onOpenChange={(next: boolean) => !next && onClose()}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle className="font-display">
+            Expiry · {poolKey.key_prefix}
+          </DialogTitle>
+          <DialogDescription>
+            The gateway rejects expired keys at auth. Clear the field to make
+            the key non-expiring.
+          </DialogDescription>
+        </DialogHeader>
+        <form onSubmit={save} className="space-y-4">
+          <div className="space-y-2">
+            <Label htmlFor="expiry-date">Expires on (local midnight)</Label>
+            <Input
+              id="expiry-date"
+              type="date"
+              value={date}
+              min={new Date().toISOString().slice(0, 10)}
+              onChange={(e) => setDate(e.target.value)}
+            />
+          </div>
+          {error ? (
+            <p className="text-sm text-destructive">{error}</p>
+          ) : null}
+          <DialogFooter>
+            <Button variant="outline" onClick={onClose}>
+              Cancel
+            </Button>
+            <Button type="submit" disabled={busy}>
+              {busy ? "Saving…" : "Save expiry"}
+            </Button>
+          </DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+/** Plant honey keys: the raw baits are revealed exactly once. */
+function PlantCanariesDialog({
+  poolId,
+  onClose,
+  onPlanted,
+}: {
+  poolId: string;
+  onClose: () => void;
+  onPlanted: () => void;
+}) {
+  const [count, setCount] = useState("3");
+  const [planted, setPlanted] = useState<PlantedCanaryKeys | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function plant(e: React.FormEvent) {
+    e.preventDefault();
+    setBusy(true);
+    try {
+      setPlanted(
+        await api.post<PlantedCanaryKeys>(`/pools/${poolId}/canary-keys`, {
+          count: Number(count),
+        }),
+      );
+      onPlanted();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Planting failed");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Dialog open onOpenChange={(next: boolean) => !next && onClose()}>
+      <DialogContent>
+        {planted ? (
+          <div className="space-y-4">
+            <DialogHeader>
+              <DialogTitle className="font-display">
+                {planted.keys.length} honey key
+                {planted.keys.length === 1 ? "" : "s"} planted
+              </DialogTitle>
+              <DialogDescription>
+                Drop these wherever key lists get shared or scraped. Their
+                use anywhere fires an alert and NEVER serves traffic. The
+                raws below appear exactly once.
+              </DialogDescription>
+            </DialogHeader>
+            <div className="space-y-2">
+              {planted.keys.map((key) => (
+                <SecretReveal
+                  key={key.id}
+                  secret={key.raw}
+                  label={`Honey key ${key.key_prefix}`}
+                />
+              ))}
+            </div>
+          </div>
+        ) : (
+          <>
+            <DialogHeader>
+              <DialogTitle className="font-display">
+                Plant honey keys
+              </DialogTitle>
+              <DialogDescription>
+                Decoy keys that ride the shared listing shape-identically
+                (backdated into the pool&rsquo;s issuance history).
+              </DialogDescription>
+            </DialogHeader>
+            <form onSubmit={plant} className="space-y-4">
+              <div className="space-y-2">
+                <Label htmlFor="canary-count">How many (1–10)</Label>
+                <Input
+                  id="canary-count"
+                  type="number"
+                  min={1}
+                  max={10}
+                  value={count}
+                  onChange={(e) => setCount(e.target.value)}
+                  required
+                />
+              </div>
+              {error ? (
+                <p className="text-sm text-destructive">{error}</p>
+              ) : null}
+              <DialogFooter>
+                <Button variant="outline" onClick={onClose}>
+                  Cancel
+                </Button>
+                <Button type="submit" disabled={busy}>
+                  {busy ? "Planting…" : "Plant"}
+                </Button>
+              </DialogFooter>
+            </form>
+          </>
+        )}
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+/** Add-canary-alias form row (inline, not a dialog). */
+function AddCanaryModelForm({
+  poolId,
+  members,
+  onAdded,
+}: {
+  poolId: string;
+  members: PublicMember[];
+  onAdded: () => void;
+}) {
+  const [alias, setAlias] = useState("");
+  const [scope, setScope] = useState("pool");
+  const [busy, setBusy] = useState(false);
+
+  async function submit(e: React.FormEvent) {
+    e.preventDefault();
+    setBusy(true);
+    try {
+      await api.post(`/pools/${poolId}/canary-models`, {
+        alias,
+        user_id: scope === "pool" ? null : scope,
+      });
+      toast.success(`Canary alias ${alias} armed`);
+      setAlias("");
+      onAdded();
+    } catch (err) {
+      toast.error(err instanceof ApiError ? err.message : "Failed to add");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <form onSubmit={submit} className="flex items-end gap-2">
+      <div className="flex-1 space-y-1">
+        <Label htmlFor="canary-alias">Alias</Label>
+        <Input
+          id="canary-alias"
+          value={alias}
+          onChange={(e) => setAlias(e.target.value)}
+          placeholder="gpt-4o-preview-canary"
+          className="font-mono text-xs"
+          required
+        />
+      </div>
+      <div className="space-y-1">
+        <Label htmlFor="canary-scope">Visible to</Label>
+        <Select value={scope} onValueChange={setScope}>
+          <SelectTrigger id="canary-scope" className="w-44">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="pool">Everyone in pool</SelectItem>
+            {members.map((member) => (
+              <SelectItem key={member.id} value={member.id}>
+                {member.email}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      </div>
+      <Button type="submit" disabled={busy}>
+        <Plus className="size-4" aria-hidden />
+        Arm
+      </Button>
+    </form>
+  );
+}
+
 export default function PoolDetailPage() {
   const params = useParams<{ id: string }>();
   const poolId = params.id;
@@ -395,7 +855,16 @@ export default function PoolDetailPage() {
   const members = useApi<PublicMember[]>(
     orgId ? `/members?org_id=${orgId}` : null,
   );
-  const keys = useApi<PublicPoolKey[]>(`/pools/${poolId}/keys`);
+  // M4: the keys tab reads the MANAGEMENT view (kind/owner/expiry live
+  // here, and here ONLY — the shared listing is shape-uniform by design).
+  const keys = useApi<ManagedPoolKey[]>(`/pools/${poolId}/keys/manage`);
+  const canaries = useApi<CanaryManagementView>(
+    `/pools/${poolId}/canaries`,
+  );
+  const [allowlistKey, setAllowlistKey] = useState<ManagedPoolKey | null>(null);
+  const [rotateKey, setRotateKey] = useState<ManagedPoolKey | null>(null);
+  const [expiryKey, setExpiryKey] = useState<ManagedPoolKey | null>(null);
+  const [planting, setPlanting] = useState(false);
   const providerKeys = useApi<PublicProviderKey[]>(
     `/pools/${poolId}/provider-keys`,
   );
@@ -430,6 +899,7 @@ export default function PoolDetailPage() {
       <Tabs defaultValue="keys">
         <TabsList>
           <TabsTrigger value="keys">Keys</TabsTrigger>
+          <TabsTrigger value="canaries">Canaries</TabsTrigger>
           <TabsTrigger value="provider">Provider keys</TabsTrigger>
           <TabsTrigger value="budgets">Budgets</TabsTrigger>
           <TabsTrigger value="usage">Usage</TabsTrigger>
@@ -460,14 +930,24 @@ export default function PoolDetailPage() {
                   <TableHead>Member</TableHead>
                   <TableHead>Key</TableHead>
                   <TableHead>Status</TableHead>
+                  <TableHead>Expires</TableHead>
                   <TableHead>Issued</TableHead>
-                  <TableHead className="w-12" aria-label="Actions" />
+                  <TableHead className="w-40" aria-label="Actions" />
                 </TableRow>
               </TableHeader>
               <TableBody>
                 {(keys.data ?? []).map((key) => (
-                  <TableRow key={key.id}>
-                    <TableCell>{memberName(key.user_id)}</TableCell>
+                  <TableRow key={key.id} className={key.kind === "canary" ? "bg-amber-500/5" : undefined}>
+                    <TableCell>
+                      {key.kind === "canary" ? (
+                        <span className="inline-flex items-center gap-1.5 text-amber-600 dark:text-amber-400">
+                          <Fingerprint className="size-3" aria-hidden />
+                          honey (no owner)
+                        </span>
+                      ) : (
+                        memberName(key.user_id)
+                      )}
+                    </TableCell>
                     <TableCell className="font-mono text-xs">
                       <span className="inline-flex items-center gap-1.5">
                         <KeyRound className="size-3 text-muted-foreground" aria-hidden />
@@ -476,28 +956,77 @@ export default function PoolDetailPage() {
                     </TableCell>
                     <TableCell>
                       <Badge
-                        variant={key.status === "active" ? "default" : "secondary"}
+                        variant={
+                          key.status === "active"
+                            ? "default"
+                            : key.status === "suspended"
+                              ? "destructive"
+                              : "secondary"
+                        }
                       >
                         {key.status}
                       </Badge>
                     </TableCell>
+                    <TableCell className="text-xs">
+                      {key.expires_at ? (
+                        <span className="inline-flex items-center gap-1.5">
+                          <CalendarClock className="size-3 text-muted-foreground" aria-hidden />
+                          {formatDateTime(key.expires_at)}
+                        </span>
+                      ) : (
+                        "—"
+                      )}
+                    </TableCell>
                     <TableCell>{formatDateTime(key.created_at)}</TableCell>
                     <TableCell>
-                      {key.status === "active" ? (
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          aria-label="Revoke key"
-                          onClick={() =>
-                            run(
-                              () => api.del(`/pools/${poolId}/keys/${key.id}`),
-                              `Key ${key.key_prefix} revoked`,
-                              keys.reload,
-                            )
-                          }
-                        >
-                          <Trash2 className="size-4 text-destructive" />
-                        </Button>
+                      {key.status === "active" || key.status === "suspended" ? (
+                        <div className="flex gap-1">
+                          {key.kind === "live" ? (
+                            <>
+                              <Button
+                                variant="ghost"
+                                size="icon"
+                                aria-label="Rotate key"
+                                title="Rotate"
+                                onClick={() => setRotateKey(key)}
+                              >
+                                <RotateCcw className="size-4" />
+                              </Button>
+                              <Button
+                                variant="ghost"
+                                size="icon"
+                                aria-label="Set expiry"
+                                title="Expiry"
+                                onClick={() => setExpiryKey(key)}
+                              >
+                                <CalendarClock className="size-4" />
+                              </Button>
+                              <Button
+                                variant="ghost"
+                                size="icon"
+                                aria-label="IP allowlist"
+                                title="IP allowlist"
+                                onClick={() => setAllowlistKey(key)}
+                              >
+                                <ShieldCheck className="size-4" />
+                              </Button>
+                            </>
+                          ) : null}
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            aria-label="Revoke key"
+                            onClick={() =>
+                              run(
+                                () => api.del(`/pools/${poolId}/keys/${key.id}`),
+                                `Key ${key.key_prefix} revoked`,
+                                keys.reload,
+                              )
+                            }
+                          >
+                            <Trash2 className="size-4 text-destructive" />
+                          </Button>
+                        </div>
                       ) : null}
                     </TableCell>
                   </TableRow>
@@ -505,6 +1034,192 @@ export default function PoolDetailPage() {
               </TableBody>
             </Table>
           )}
+          {allowlistKey ? (
+            <AllowlistDialog
+              poolId={poolId}
+              poolKey={allowlistKey}
+              onClose={() => setAllowlistKey(null)}
+            />
+          ) : null}
+          {rotateKey ? (
+            <RotateKeyDialog
+              poolId={poolId}
+              poolKey={rotateKey}
+              onClose={() => setRotateKey(null)}
+              onRotated={keys.reload}
+            />
+          ) : null}
+          {expiryKey ? (
+            <ExpiryDialog
+              poolId={poolId}
+              poolKey={expiryKey}
+              onClose={() => setExpiryKey(null)}
+              onSaved={keys.reload}
+            />
+          ) : null}
+        </TabsContent>
+
+        {/* ---- Canaries (honey keys + model aliases) ---- */}
+        <TabsContent value="canaries" className="space-y-6">
+          <Card>
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2 font-display text-base">
+                <Fingerprint className="size-4 text-amber-600 dark:text-amber-400" aria-hidden />
+                Honey keys
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <p className="text-sm text-muted-foreground">
+                Decoy keys shaped exactly like real ones in every listing.
+                Anyone using one anywhere trips an instant alert — and they
+                never serve a single request. This admin view is the only
+                place that can tell them apart.
+              </p>
+              <div className="flex justify-end">
+                <Button variant="outline" onClick={() => setPlanting(true)}>
+                  <Plus className="size-4" aria-hidden />
+                  Plant honey keys
+                </Button>
+              </div>
+              {(canaries.data?.keys ?? []).length === 0 ? (
+                <EmptyState
+                  title="No honey keys planted"
+                  hint="Plant a few and leak one on purpose — the alert proves the tripwire."
+                />
+              ) : (
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Key</TableHead>
+                      <TableHead>Status</TableHead>
+                      <TableHead>Backdated to</TableHead>
+                      <TableHead className="w-12" aria-label="Actions" />
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {(canaries.data?.keys ?? []).map((key) => (
+                      <TableRow key={key.id}>
+                        <TableCell className="font-mono text-xs">
+                          <span className="inline-flex items-center gap-1.5">
+                            <KeyRound className="size-3 text-muted-foreground" aria-hidden />
+                            {key.key_prefix}
+                          </span>
+                        </TableCell>
+                        <TableCell>
+                          <Badge
+                            variant={key.status === "active" ? "default" : "secondary"}
+                          >
+                            {key.status}
+                          </Badge>
+                        </TableCell>
+                        <TableCell>{formatDateTime(key.created_at)}</TableCell>
+                        <TableCell>
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            aria-label="Revoke honey key"
+                            onClick={() =>
+                              run(
+                                () => api.del(`/pools/${poolId}/keys/${key.id}`),
+                                `Honey key ${key.key_prefix} revoked`,
+                                () => {
+                                  keys.reload();
+                                  canaries.reload();
+                                },
+                              )
+                            }
+                          >
+                            <Trash2 className="size-4 text-destructive" />
+                          </Button>
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              )}
+              {planting ? (
+                <PlantCanariesDialog
+                  poolId={poolId}
+                  onClose={() => setPlanting(false)}
+                  onPlanted={() => {
+                    keys.reload();
+                    canaries.reload();
+                  }}
+                />
+              ) : null}
+            </CardContent>
+          </Card>
+          <Card>
+            <CardHeader>
+              <CardTitle className="font-display text-base">
+                Canary model aliases
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <p className="text-sm text-muted-foreground">
+                Fake model names that ride the member&rsquo;s /v1/models
+                listing. Requesting one is denied locally with the same
+                message as any disallowed model — and fires an alert: the
+                model list was exfiltrated.
+              </p>
+              <AddCanaryModelForm
+                poolId={poolId}
+                members={members.data ?? []}
+                onAdded={canaries.reload}
+              />
+              {(canaries.data?.models ?? []).length === 0 ? (
+                <EmptyState
+                  title="No canary aliases"
+                  hint="Arm one that looks like a tempting unreleased model."
+                />
+              ) : (
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Alias</TableHead>
+                      <TableHead>Visible to</TableHead>
+                      <TableHead>Armed</TableHead>
+                      <TableHead className="w-12" aria-label="Actions" />
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {(canaries.data?.models ?? []).map((model: CanaryModel) => (
+                      <TableRow key={model.id}>
+                        <TableCell className="font-mono text-xs">
+                          {model.alias}
+                        </TableCell>
+                        <TableCell className="text-xs">
+                          {model.user_id
+                            ? memberName(model.user_id)
+                            : "Everyone in pool"}
+                        </TableCell>
+                        <TableCell>{formatDateTime(model.created_at)}</TableCell>
+                        <TableCell>
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            aria-label="Remove alias"
+                            onClick={() =>
+                              run(
+                                () =>
+                                  api.del(
+                                    `/pools/${poolId}/canary-models/${model.id}`,
+                                  ),
+                                `Alias ${model.alias} removed`,
+                                canaries.reload,
+                              )
+                            }
+                          >
+                            <Trash2 className="size-4 text-destructive" />
+                          </Button>
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              )}
+            </CardContent>
+          </Card>
         </TabsContent>
 
         {/* ---- Provider keys ---- */}

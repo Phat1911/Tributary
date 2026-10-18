@@ -6,7 +6,16 @@
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useEffect, type ReactNode } from "react";
-import { KeyRound, LogOut, ScrollText, Users, Waves, Wifi } from "lucide-react";
+import {
+  KeyRound,
+  LogOut,
+  Scale,
+  ScrollText,
+  ShieldAlert,
+  Users,
+  Waves,
+  Wifi,
+} from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { api, type PublicUser } from "@/lib/api";
 import { useApi } from "@/lib/use-api";
@@ -30,6 +39,18 @@ const NAV: NavItem[] = [
     href: "/org",
     label: "Organization",
     icon: <Users className="size-4" aria-hidden />,
+    roles: ["org_admin"],
+  },
+  {
+    href: "/org/review",
+    label: "Review queue",
+    icon: <ShieldAlert className="size-4" aria-hidden />,
+    roles: ["org_admin"],
+  },
+  {
+    href: "/org/classifier",
+    label: "Purpose classifier",
+    icon: <Scale className="size-4" aria-hidden />,
     roles: ["org_admin"],
   },
   {

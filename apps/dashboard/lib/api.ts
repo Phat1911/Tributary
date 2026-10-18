@@ -38,6 +38,8 @@ export const api = {
   get: <T>(path: string) => request<T>(path),
   post: <T>(path: string, body?: unknown) =>
     request<T>(path, { method: "POST", body: JSON.stringify(body ?? {}) }),
+  put: <T>(path: string, body?: unknown) =>
+    request<T>(path, { method: "PUT", body: JSON.stringify(body ?? {}) }),
   del: (path: string) => request<void>(path, { method: "DELETE" }),
 };
 
@@ -169,4 +171,100 @@ export interface AuditRow {
   after: unknown;
   ip: string | null;
   ts: number;
+}
+
+// ---- M4: leak prevention (SPEC §9) ----
+
+/** Admin management view of a pool key — the ONLY surface carrying kind. */
+export interface ManagedPoolKey {
+  id: string;
+  pool_id: string;
+  key_prefix: string;
+  kind: "live" | "canary";
+  user_id: string | null;
+  status: string; // active | revoked | suspended | rotated
+  expires_at: number | null;
+  created_at: number;
+}
+
+/** Rotate response: the new raw key is shown exactly once. */
+export interface RotatedKey {
+  id: string;
+  raw: string;
+  key_prefix: string;
+}
+
+export interface PlantedCanaryKeys {
+  keys: { id: string; raw: string; key_prefix: string; listed_at: number }[];
+}
+
+export interface CanaryModel {
+  id: string;
+  pool_id: string;
+  alias: string;
+  user_id: string | null;
+  created_at: number;
+}
+
+export interface CanaryManagementView {
+  keys: ManagedPoolKey[];
+  models: CanaryModel[];
+}
+
+export interface IpAllowlistEntry {
+  id: string;
+  pool_key_id: string;
+  cidr: string;
+  note: string | null;
+  created_at: number;
+}
+
+export interface ReviewFlag {
+  id: string;
+  org_id: string;
+  pool_id: string | null;
+  pool_key_id: string | null;
+  user_id: string | null;
+  kind: string; // honey_key_used | canary_model | classifier_flag | classifier_auto_block | impossible_travel
+  severity: string;
+  score_bp: number | null;
+  detail_json: Record<string, unknown>;
+  status: string;
+  created_at: number;
+  resolved_at: number | null;
+  resolved_by: string | null;
+}
+
+export interface ClassifierConfig {
+  org_id: string;
+  base_url: string;
+  model: string;
+  key_prefix: string;
+  purpose_statement: string;
+  mode: "alert" | "auto_block";
+  alert_threshold: number;
+  auto_block_threshold: number;
+  auto_block_live: boolean;
+  shadow_started_at: number | null;
+  sampling_per_hour: number;
+  updated_at: number;
+  shadow_would_have_blocked: number;
+  shadow_distinct_members: number;
+}
+
+/** PUT body for the classifier config. */
+export interface ClassifierConfigInput {
+  base_url: string;
+  model: string;
+  key: string;
+  purpose_statement: string;
+  mode?: "alert" | "auto_block";
+  acknowledge_auto_block?: boolean;
+}
+
+/** The member-facing disclosure banner state (GET /me/disclosure). */
+export interface Disclosure {
+  classification_active: boolean;
+  mode: "alert" | "auto_block" | null;
+  auto_block_live: boolean;
 }
