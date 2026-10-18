@@ -263,9 +263,11 @@ function AddProviderKeyDialog({
 
 function AddBudgetDialog({
   poolId,
+  members,
   onAdded,
 }: {
   poolId: string;
+  members: PublicMember[];
   onAdded: () => void;
 }) {
   const [open, setOpen] = useState(false);
@@ -274,7 +276,6 @@ function AddBudgetDialog({
   const [period, setPeriod] = useState("day");
   const [limitTokens, setLimitTokens] = useState("");
   const [busy, setBusy] = useState(false);
-  const members = useApi<PublicMember[]>(open ? "/members" : null);
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
@@ -351,7 +352,7 @@ function AddBudgetDialog({
                   <SelectValue placeholder="Choose member" />
                 </SelectTrigger>
                 <SelectContent>
-                  {(members.data ?? []).map((member) => (
+                  {members.map((member) => (
                     <SelectItem key={member.id} value={member.id}>
                       {member.email}
                     </SelectItem>
@@ -389,7 +390,11 @@ export default function PoolDetailPage() {
   const params = useParams<{ id: string }>();
   const poolId = params.id;
   const pool = useApi<PublicPool>(`/pools/${poolId}`);
-  const members = useApi<PublicMember[]>("/members");
+  // GET /members REQUIRES ?org_id= (org-scoped) — the pool row names it.
+  const orgId = pool.data?.org_id ?? null;
+  const members = useApi<PublicMember[]>(
+    orgId ? `/members?org_id=${orgId}` : null,
+  );
   const keys = useApi<PublicPoolKey[]>(`/pools/${poolId}/keys`);
   const providerKeys = useApi<PublicProviderKey[]>(
     `/pools/${poolId}/provider-keys`,
@@ -611,7 +616,11 @@ export default function PoolDetailPage() {
         {/* ---- Budgets (quota rules) ---- */}
         <TabsContent value="budgets" className="space-y-4">
           <div className="flex justify-end">
-            <AddBudgetDialog poolId={poolId} onAdded={rules.reload} />
+            <AddBudgetDialog
+              poolId={poolId}
+              members={members.data ?? []}
+              onAdded={rules.reload}
+            />
           </div>
           {rules.loading ? (
             <TableSkeleton />
