@@ -151,16 +151,18 @@ pub async fn detect(db: &Db, smtp: Option<&SmtpConfig>, event: &Detection<'_>) -
     // 1) Review queue — the admin's one place to look.
     if let Err(err) = db::insert_review_flag(
         db,
-        &flag_id,
-        event.org_id,
-        event.pool_id,
-        event.pool_key_id,
-        event.user_id,
-        event.kind.as_str(),
-        severity,
-        event.score_bp,
-        &event.detail,
-        ts,
+        &db::NewReviewFlag {
+            id: &flag_id,
+            org_id: event.org_id,
+            pool_id: event.pool_id,
+            pool_key_id: event.pool_key_id,
+            user_id: event.user_id,
+            kind: event.kind.as_str(),
+            severity,
+            score_bp: event.score_bp,
+            detail_json: &event.detail,
+            created_at: ts,
+        },
     )
     .await
     {
@@ -192,49 +194,55 @@ pub async fn detect(db: &Db, smtp: Option<&SmtpConfig>, event: &Detection<'_>) -
     .await;
 
     // 3) Email alert (async send; outbox row persists even on fallback).
+    // Fan out one outbox row per recipient, then hand delivery to spawned
+    // tasks — the request path never waits on SMTP (or its absence).
+    // Lookup/insert failures only LOG: they never taint the already
+    // persisted flag + audit rows above.
     if event.email {
-        if let Ok(recipients) = db::alert_recipients(db, event.org_id).await {
-            if recipients.is_empty() {
-                tracing::warn!(
-                    "detection {} queued but no alert recipient exists for org {}",
-                    event.kind.as_str(),
+        let recipients = db::alert_recipients(db, event.org_id)
+            .await
+            .unwrap_or_else(|err| {
+                tracing::error!(
+                    "alert recipient lookup failed for org {}: {err:#}",
                     event.org_id
                 );
-            }
-            // Build the (already-sanitized) text BEFORE spawning: `event`
-            // borrows from the caller and cannot cross the 'static task
-            // boundary. Each task OWNS its cloned copies (the borrowed
-            // alternative would dangle once this block returns).
-            let subject_text = subject(event);
-            let body_text = body(event);
-            for to in recipients {
-                let Ok(alert_id) =
-                    notify::queue(db, event.org_id, &to, &subject_text, &body_text).await
-                else {
-                    tracing::error!(
-                        "email alert outbox insert failed for org {}",
-                        event.org_id
-                    );
-                    continue;
-                };
-                // Fire-and-forget delivery: the request path never waits on
-                // SMTP (or its absence).
-                let db_clone = db.clone();
-                let smtp_clone = smtp.cloned();
-                let subject_owned = subject_text.clone();
-                let body_owned = body_text.clone();
-                tokio::spawn(async move {
-                    notify::try_send(
-                        &db_clone,
-                        smtp_clone.as_ref(),
-                        &alert_id,
-                        &to,
-                        &subject_owned,
-                        &body_owned,
-                    )
-                    .await;
-                });
-            }
+                Vec::new()
+            });
+        if recipients.is_empty() {
+            tracing::warn!(
+                "detection {} queued but no alert recipient exists for org {}",
+                event.kind.as_str(),
+                event.org_id
+            );
+        }
+        // Build the (already-sanitized) text BEFORE spawning: `event`
+        // borrows from the caller and cannot cross the 'static task
+        // boundary. Each task OWNS its cloned copies (the borrowed
+        // alternative would dangle once this block returns).
+        let subject_text = subject(event);
+        let body_text = body(event);
+        for to in recipients {
+            let Ok(alert_id) =
+                notify::queue(db, event.org_id, &to, &subject_text, &body_text).await
+            else {
+                tracing::error!("email alert outbox insert failed for org {}", event.org_id);
+                continue;
+            };
+            let db_clone = db.clone();
+            let smtp_clone = smtp.cloned();
+            let subject_owned = subject_text.clone();
+            let body_owned = body_text.clone();
+            tokio::spawn(async move {
+                notify::try_send(
+                    &db_clone,
+                    smtp_clone.as_ref(),
+                    &alert_id,
+                    &to,
+                    &subject_owned,
+                    &body_owned,
+                )
+                .await;
+            });
         }
     }
 
@@ -246,7 +254,15 @@ pub async fn detect(db: &Db, smtp: Option<&SmtpConfig>, event: &Detection<'_>) -
 
 /// Email subject for a detection.
 fn subject(event: &Detection<'_>) -> String {
-    format!("[Tributary] {}: {}", event.kind.label(), event.detail.get("key_prefix").and_then(Value::as_str).unwrap_or("key"))
+    format!(
+        "[Tributary] {}: {}",
+        event.kind.label(),
+        event
+            .detail
+            .get("key_prefix")
+            .and_then(Value::as_str)
+            .unwrap_or("key")
+    )
 }
 
 /// Plain-text email body for a detection.

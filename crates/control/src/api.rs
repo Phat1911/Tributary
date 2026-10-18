@@ -1440,8 +1440,7 @@ pub async fn set_key_expiry(
         && at <= now_ms()
     {
         return Err(ControlError::BadRequest(
-            "expires_at must be in the future (revoke instead of expiring into the past)"
-                .into(),
+            "expires_at must be in the future (revoke instead of expiring into the past)".into(),
         ));
     }
     db::set_pool_key_expiry(&state.db, &key.id, body.expires_at)
@@ -1502,7 +1501,10 @@ pub async fn add_key_allowlist(
         &id,
         &key.id,
         body.cidr.trim(),
-        body.note.as_deref().map(str::trim).filter(|n| !n.is_empty()),
+        body.note
+            .as_deref()
+            .map(str::trim)
+            .filter(|n| !n.is_empty()),
         now_ms(),
     )
     .await
@@ -1532,8 +1534,24 @@ pub async fn add_key_allowlist(
         .map_err(|e| ControlError::Internal(e.into()))?
         .into_iter()
         .find(|r| r.id == id)
-        .ok_or(ControlError::Internal(anyhow::anyhow!("allowlist row vanished")))?;
+        .ok_or(ControlError::Internal(anyhow::anyhow!(
+            "allowlist row vanished"
+        )))?;
     Ok((StatusCode::CREATED, Json(row)))
+}
+
+/// GET /api/v1/pools/{id}/keys/{key_id}/allowlists — the CIDR list for the
+/// key-governance editor. Read-only; no audit noise per view.
+pub async fn list_key_allowlists(
+    State(state): State<ControlState>,
+    admin: AuthedAdmin,
+    Path((pool_id, key_id)): Path<(String, String)>,
+) -> ApiResult<Json<Vec<db::IpAllowlistRow>>> {
+    let (_pool, key) = load_scoped_key(&state, &admin, &pool_id, &key_id).await?;
+    let rows = db::ip_allowlists_for_key(&state.db, &key.id)
+        .await
+        .map_err(|e| ControlError::Internal(e.into()))?;
+    Ok(Json(rows))
 }
 
 /// Removes one CIDR row from a key's allowlist.
@@ -1676,7 +1694,10 @@ pub async fn plant_canary_keys(
         },
     )
     .await;
-    Ok((StatusCode::CREATED, Json(PlantedCanaryKeysResponse { keys: planted })))
+    Ok((
+        StatusCode::CREATED,
+        Json(PlantedCanaryKeysResponse { keys: planted }),
+    ))
 }
 
 /// GET /api/v1/pools/{id}/canaries — the canary MANAGEMENT view: honey-key
@@ -1787,7 +1808,9 @@ pub async fn add_canary_model(
         .map_err(|e| ControlError::Internal(e.into()))?
         .into_iter()
         .find(|m| m.id == id)
-        .ok_or(ControlError::Internal(anyhow::anyhow!("canary row vanished")))?;
+        .ok_or(ControlError::Internal(anyhow::anyhow!(
+            "canary row vanished"
+        )))?;
     Ok((StatusCode::CREATED, Json(row)))
 }
 
@@ -1909,12 +1932,9 @@ pub async fn resolve_review_flag(
     };
     match body.action.as_str() {
         "unblock" => {
-            let key_id = flag
-                .pool_key_id
-                .as_deref()
-                .ok_or(ControlError::BadRequest(
-                    "flag has no key to unblock — use dismiss".into(),
-                ))?;
+            let key_id = flag.pool_key_id.as_deref().ok_or(ControlError::BadRequest(
+                "flag has no key to unblock — use dismiss".into(),
+            ))?;
             let n = db::unsuspend_pool_key(&state.db, key_id)
                 .await
                 .map_err(|e| ControlError::Internal(e.into()))?;
@@ -1925,12 +1945,9 @@ pub async fn resolve_review_flag(
             }
         }
         "revoke_key" => {
-            let key_id = flag
-                .pool_key_id
-                .as_deref()
-                .ok_or(ControlError::BadRequest(
-                    "flag has no key to revoke — use dismiss".into(),
-                ))?;
+            let key_id = flag.pool_key_id.as_deref().ok_or(ControlError::BadRequest(
+                "flag has no key to revoke — use dismiss".into(),
+            ))?;
             db::revoke_pool_key(&state.db, key_id)
                 .await
                 .map_err(|e| ControlError::Internal(e.into()))?;
@@ -1964,31 +1981,31 @@ pub async fn resolve_review_flag(
     )
     .await;
     // The key action (if any) gets its own trail row for key-centric views.
-    if let (Some(key_id), Some(pool)) = (&flag.pool_key_id, &pool) {
-        if body.action != "dismiss" {
-            audit::record(
-                &state.db,
-                AuditEntry {
-                    org_id: Some(&pool.org_id),
-                    actor_id: &admin.user_id,
-                    actor_email: &admin.email,
-                    action: if body.action == "unblock" {
-                        "pool_key.unblocked"
-                    } else {
-                        "pool_key.revoked"
-                    },
-                    target_kind: TargetKind::PoolKey,
-                    target_id: key_id,
-                    before: Some(serde_json::json!({ "status": "suspended" })),
-                    after: Some(serde_json::json!({
-                        "status": if body.action == "unblock" { "active" } else { "revoked" },
-                        "via_review_flag": flag.id,
-                    })),
-                    ip: Some(&ip),
+    if let (Some(key_id), Some(pool)) = (&flag.pool_key_id, &pool)
+        && body.action != "dismiss"
+    {
+        audit::record(
+            &state.db,
+            AuditEntry {
+                org_id: Some(&pool.org_id),
+                actor_id: &admin.user_id,
+                actor_email: &admin.email,
+                action: if body.action == "unblock" {
+                    "pool_key.unblocked"
+                } else {
+                    "pool_key.revoked"
                 },
-            )
-            .await;
-        }
+                target_kind: TargetKind::PoolKey,
+                target_id: key_id,
+                before: Some(serde_json::json!({ "status": "suspended" })),
+                after: Some(serde_json::json!({
+                    "status": if body.action == "unblock" { "active" } else { "revoked" },
+                    "via_review_flag": flag.id,
+                })),
+                ip: Some(&ip),
+            },
+        )
+        .await;
     }
     Ok(StatusCode::NO_CONTENT)
 }

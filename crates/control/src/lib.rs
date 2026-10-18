@@ -106,10 +106,7 @@ pub fn router(state: ControlState) -> Router {
             "/api/v1/pools/{id}/keys",
             get(api::list_pool_keys).post(api::issue_pool_key),
         )
-        .route(
-            "/api/v1/pools/{id}/keys/manage",
-            get(api::manage_pool_keys),
-        )
+        .route("/api/v1/pools/{id}/keys/manage", get(api::manage_pool_keys))
         .route(
             "/api/v1/pools/{id}/keys/{key_id}",
             axum::routing::delete(api::revoke_pool_key),
@@ -124,7 +121,7 @@ pub fn router(state: ControlState) -> Router {
         )
         .route(
             "/api/v1/pools/{id}/keys/{key_id}/allowlists",
-            post(api::add_key_allowlist),
+            get(api::list_key_allowlists).post(api::add_key_allowlist),
         )
         .route(
             "/api/v1/pools/{id}/keys/{key_id}/allowlists/{entry_id}",
@@ -172,15 +169,9 @@ pub fn router(state: ControlState) -> Router {
         )
         .route("/api/v1/me/usage", get(me::my_usage))
         .route("/api/v1/me/usage/summary", get(me::my_usage_summary))
-        .route(
-            "/api/v1/me/disclosure",
-            get(me::my_disclosure),
-        )
+        .route("/api/v1/me/disclosure", get(me::my_disclosure))
         .route("/api/v1/audit", get(api::list_audit))
-        .route(
-            "/api/v1/review-flags",
-            get(api::list_review_flags),
-        )
+        .route("/api/v1/review-flags", get(api::list_review_flags))
         .route(
             "/api/v1/review-flags/{id}/resolve",
             post(api::resolve_review_flag),

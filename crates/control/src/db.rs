@@ -1085,7 +1085,10 @@ pub struct ManagedPoolKey {
 }
 
 /// Lists a pool's keys with full governance detail (admin management view).
-pub async fn managed_pool_keys_by_pool(db: &Db, pool_id: &str) -> sqlx::Result<Vec<ManagedPoolKey>> {
+pub async fn managed_pool_keys_by_pool(
+    db: &Db,
+    pool_id: &str,
+) -> sqlx::Result<Vec<ManagedPoolKey>> {
     let sql = db.sql(
         "SELECT id, pool_id, key_prefix, kind, user_id, status, expires_at, created_at \
          FROM pool_keys WHERE pool_id = ? ORDER BY created_at, id",
@@ -1145,8 +1148,7 @@ pub async fn insert_canary_pool_key(db: &Db, key: &NewCanaryKey) -> sqlx::Result
 /// Distinct from 'revoked' so the audit trail distinguishes rotation from
 /// kill-switch use.
 pub async fn rotate_pool_key(db: &Db, id: &str) -> sqlx::Result<u64> {
-    let sql =
-        db.sql("UPDATE pool_keys SET status = 'rotated' WHERE id = ? AND status = 'active'");
+    let sql = db.sql("UPDATE pool_keys SET status = 'rotated' WHERE id = ? AND status = 'active'");
     let res = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
         .bind(id)
         .execute(db.pool())
@@ -1157,9 +1159,8 @@ pub async fn rotate_pool_key(db: &Db, id: &str) -> sqlx::Result<u64> {
 /// Suspends a key (auto-block only): every request dies with 403 until an
 /// admin one-click-unblocks. Never a ban — the member row is untouched.
 pub async fn suspend_pool_key(db: &Db, id: &str) -> sqlx::Result<u64> {
-    let sql = db.sql(
-        "UPDATE pool_keys SET status = 'suspended' WHERE id = ? AND status = 'active'",
-    );
+    let sql =
+        db.sql("UPDATE pool_keys SET status = 'suspended' WHERE id = ? AND status = 'active'");
     let res = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
         .bind(id)
         .execute(db.pool())
@@ -1169,9 +1170,8 @@ pub async fn suspend_pool_key(db: &Db, id: &str) -> sqlx::Result<u64> {
 
 /// Unblocks a suspended key (the review queue's one-click action).
 pub async fn unsuspend_pool_key(db: &Db, id: &str) -> sqlx::Result<u64> {
-    let sql = db.sql(
-        "UPDATE pool_keys SET status = 'active' WHERE id = ? AND status = 'suspended'",
-    );
+    let sql =
+        db.sql("UPDATE pool_keys SET status = 'active' WHERE id = ? AND status = 'suspended'");
     let res = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
         .bind(id)
         .execute(db.pool())
@@ -1180,11 +1180,7 @@ pub async fn unsuspend_pool_key(db: &Db, id: &str) -> sqlx::Result<u64> {
 }
 
 /// Sets or clears a key's expiry (NULL = never expires).
-pub async fn set_pool_key_expiry(
-    db: &Db,
-    id: &str,
-    expires_at: Option<i64>,
-) -> sqlx::Result<u64> {
+pub async fn set_pool_key_expiry(db: &Db, id: &str, expires_at: Option<i64>) -> sqlx::Result<u64> {
     let sql = db.sql("UPDATE pool_keys SET expires_at = ? WHERE id = ?");
     let res = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
         .bind(expires_at)
@@ -1232,7 +1228,10 @@ pub async fn insert_ip_allowlist(
 }
 
 /// Lists the CIDRs pinned to one key (empty = unrestricted, dormant).
-pub async fn ip_allowlists_for_key(db: &Db, pool_key_id: &str) -> sqlx::Result<Vec<IpAllowlistRow>> {
+pub async fn ip_allowlists_for_key(
+    db: &Db,
+    pool_key_id: &str,
+) -> sqlx::Result<Vec<IpAllowlistRow>> {
     let sql = db.sql(
         "SELECT id, pool_key_id, cidr, note, created_at FROM ip_allowlists \
          WHERE pool_key_id = ? ORDER BY created_at",
@@ -1379,20 +1378,23 @@ pub struct ReviewFlagRow {
     pub resolved_by: Option<String>,
 }
 
+/// Parameters for [`insert_review_flag`] — one struct instead of an
+/// 11-argument flat list (readable at call sites, clippy-agreed).
+pub struct NewReviewFlag<'a> {
+    pub id: &'a str,
+    pub org_id: &'a str,
+    pub pool_id: Option<&'a str>,
+    pub pool_key_id: Option<&'a str>,
+    pub user_id: Option<&'a str>,
+    pub kind: &'a str,
+    pub severity: &'a str,
+    pub score_bp: Option<i64>,
+    pub detail_json: &'a Value,
+    pub created_at: i64,
+}
+
 /// Writes one review flag (the detection pipeline's queue insert).
-pub async fn insert_review_flag(
-    db: &Db,
-    id: &str,
-    org_id: &str,
-    pool_id: Option<&str>,
-    pool_key_id: Option<&str>,
-    user_id: Option<&str>,
-    kind: &str,
-    severity: &str,
-    score_bp: Option<i64>,
-    detail_json: &Value,
-    created_at: i64,
-) -> sqlx::Result<()> {
+pub async fn insert_review_flag(db: &Db, flag: &NewReviewFlag<'_>) -> sqlx::Result<()> {
     let sql = db.sql(
         "INSERT INTO review_flags \
          (id, org_id, pool_id, pool_key_id, user_id, kind, severity, score_bp, detail_json, \
@@ -1400,16 +1402,16 @@ pub async fn insert_review_flag(
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?)",
     );
     sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
-        .bind(id)
-        .bind(org_id)
-        .bind(pool_id)
-        .bind(pool_key_id)
-        .bind(user_id)
-        .bind(kind)
-        .bind(severity)
-        .bind(score_bp)
-        .bind(detail_json.to_string())
-        .bind(created_at)
+        .bind(flag.id)
+        .bind(flag.org_id)
+        .bind(flag.pool_id)
+        .bind(flag.pool_key_id)
+        .bind(flag.user_id)
+        .bind(flag.kind)
+        .bind(flag.severity)
+        .bind(flag.score_bp)
+        .bind(flag.detail_json.to_string())
+        .bind(flag.created_at)
         .execute(db.pool())
         .await?;
     Ok(())
@@ -1488,8 +1490,7 @@ fn review_flag_from_row(row: sqlx::any::AnyRow) -> ReviewFlagRow {
         kind: row.get("kind"),
         severity: row.get("severity"),
         score_bp: row.get("score_bp"),
-        detail_json: serde_json::from_str(&detail_raw.unwrap_or_default())
-            .unwrap_or(Value::Null),
+        detail_json: serde_json::from_str(&detail_raw.unwrap_or_default()).unwrap_or(Value::Null),
         status: row.get("status"),
         created_at: row.get("created_at"),
         resolved_at: row.get("resolved_at"),
@@ -1602,17 +1603,15 @@ pub async fn email_alert_by_id(db: &Db, id: &str) -> sqlx::Result<Option<EmailAl
 /// The org's alert recipients: its org_admins, or the host admins when the
 /// org has none of its own (host-managed orgs still deserve the alert).
 pub async fn alert_recipients(db: &Db, org_id: &str) -> sqlx::Result<Vec<String>> {
-    let admins = db.sql(
-        "SELECT email FROM users WHERE org_id = ? AND role = 'org_admin' ORDER BY created_at",
-    );
+    let admins = db
+        .sql("SELECT email FROM users WHERE org_id = ? AND role = 'org_admin' ORDER BY created_at");
     let rows = sqlx::query(sqlx::AssertSqlSafe(admins.as_str()))
         .bind(org_id)
         .fetch_all(db.pool())
         .await?;
     let mut emails: Vec<String> = rows.iter().map(|r| r.get("email")).collect();
     if emails.is_empty() {
-        let hosts =
-            db.sql("SELECT email FROM users WHERE role = 'host_admin' ORDER BY created_at");
+        let hosts = db.sql("SELECT email FROM users WHERE role = 'host_admin' ORDER BY created_at");
         let rows = sqlx::query(sqlx::AssertSqlSafe(hosts.as_str()))
             .fetch_all(db.pool())
             .await?;
@@ -1805,33 +1804,36 @@ fn classifier_row_from_row(row: sqlx::any::AnyRow) -> ClassifierConfigRow {
 
 // --- Classifier scores --------------------------------------------------------
 
+/// Parameters for [`insert_classifier_score`] (same shape rationale as
+/// [`NewReviewFlag`]).
+pub struct NewClassifierScore<'a> {
+    pub id: &'a str,
+    pub org_id: &'a str,
+    pub pool_key_id: Option<&'a str>,
+    pub user_id: Option<&'a str>,
+    pub model: &'a str,
+    pub score_bp: i64,
+    pub would_block: bool,
+    pub ts: i64,
+}
+
 /// Writes one sampled classification (score + verdict metadata, NEVER the
 /// prompt — D28).
-pub async fn insert_classifier_score(
-    db: &Db,
-    id: &str,
-    org_id: &str,
-    pool_key_id: Option<&str>,
-    user_id: Option<&str>,
-    model: &str,
-    score_bp: i64,
-    would_block: bool,
-    ts: i64,
-) -> sqlx::Result<()> {
+pub async fn insert_classifier_score(db: &Db, score: &NewClassifierScore<'_>) -> sqlx::Result<()> {
     let sql = db.sql(
         "INSERT INTO classifier_scores \
          (id, org_id, pool_key_id, user_id, model, score_bp, would_block, ts) \
          VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
     );
     sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
-        .bind(id)
-        .bind(org_id)
-        .bind(pool_key_id)
-        .bind(user_id)
-        .bind(model)
-        .bind(score_bp)
-        .bind(would_block as i64)
-        .bind(ts)
+        .bind(score.id)
+        .bind(score.org_id)
+        .bind(score.pool_key_id)
+        .bind(score.user_id)
+        .bind(score.model)
+        .bind(score.score_bp)
+        .bind(score.would_block as i64)
+        .bind(score.ts)
         .execute(db.pool())
         .await?;
     Ok(())

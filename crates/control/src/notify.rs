@@ -9,9 +9,9 @@
 //! The outbox (`email_alerts` table) is the source of truth for "an alert
 //! happened"; `status` records the delivery attempt outcome.
 
-use lettre::Message;
 use lettre::AsyncSmtpTransport;
 use lettre::AsyncTransport;
+use lettre::Message;
 use lettre::Tokio1Executor;
 use lettre::transport::smtp::authentication::Credentials;
 use tributary_common::db::{Db, now_ms};
@@ -130,7 +130,10 @@ async fn send_via_relay(
         .body(body.to_string())?;
     let mailer = AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(&smtp.host)?
         .port(smtp.port)
-        .credentials(Credentials::new(smtp.username.clone(), smtp.password.clone()))
+        .credentials(Credentials::new(
+            smtp.username.clone(),
+            smtp.password.clone(),
+        ))
         .build();
     mailer.send(email).await?;
     Ok(())

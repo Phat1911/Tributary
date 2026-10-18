@@ -147,6 +147,14 @@ pub struct MockUpstream {
     pub captured: Arc<Mutex<Vec<Captured>>>,
 }
 
+impl MockUpstream {
+    /// How many requests reached the mock upstream (the "never served
+    /// traffic" assertion for denied paths).
+    pub fn captured_count(&self) -> usize {
+        self.captured.lock().unwrap().len()
+    }
+}
+
 pub async fn spawn_mock(mode: MockMode) -> MockUpstream {
     let captured: Arc<Mutex<Vec<Captured>>> = Arc::new(Mutex::new(Vec::new()));
     let state = (mode, captured.clone());

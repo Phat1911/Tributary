@@ -123,12 +123,7 @@ async fn run_scoring(state: &AppState, ctx: &ScoreContext) -> anyhow::Result<()>
     );
 
     // 4) Call the provider (raw HTTP, version-pinned path).
-    let provider = JevClassifier::new(
-        state.http.clone(),
-        &config.base_url,
-        &config.model,
-        api_key,
-    );
+    let provider = JevClassifier::new(state.http.clone(), &config.base_url, &config.model, api_key);
     let scored = provider
         .score(ScoreRequest {
             model: &config.model,
@@ -144,14 +139,16 @@ async fn run_scoring(state: &AppState, ctx: &ScoreContext) -> anyhow::Result<()>
     // 5) Store the score (NEVER the prompt).
     cdb::insert_classifier_score(
         &state.db,
-        &new_id(),
-        &ctx.org_id,
-        Some(&ctx.pool_key_id),
-        ctx.user_id.as_deref(),
-        &ctx.model,
-        score_bp,
-        would_block,
-        now,
+        &cdb::NewClassifierScore {
+            id: &new_id(),
+            org_id: &ctx.org_id,
+            pool_key_id: Some(&ctx.pool_key_id),
+            user_id: ctx.user_id.as_deref(),
+            model: &ctx.model,
+            score_bp,
+            would_block,
+            ts: now,
+        },
     )
     .await?;
 
@@ -186,10 +183,7 @@ async fn run_scoring(state: &AppState, ctx: &ScoreContext) -> anyhow::Result<()>
 
     // 6b) Live auto-block: suspend the KEY pending review (D28: shadow
     // first; one-click unblock; never auto-ban the member).
-    if config.mode == "auto_block"
-        && config.auto_block_live
-        && would_block
-        && ctx.user_id.is_some()
+    if config.mode == "auto_block" && config.auto_block_live && would_block && ctx.user_id.is_some()
     {
         cdb::suspend_pool_key(&state.db, &ctx.pool_key_id).await?;
         security::detect(

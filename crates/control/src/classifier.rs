@@ -61,7 +61,8 @@ pub enum ClassifierError {
 /// The seam future type: `async fn` in traits is not object-safe, so
 /// implementors return this pinned boxed future instead (the gateway holds
 /// providers behind `&dyn` when wiring the smoke job / tests).
-pub type ScoreFuture<'a> = Pin<Box<dyn Future<Output = Result<Scored, ClassifierError>> + Send + 'a>>;
+pub type ScoreFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<Scored, ClassifierError>> + Send + 'a>>;
 
 /// A purpose-alignment classifier the org configured (D28). One
 /// implementation ships today (Jev); the trait is the extension point.
@@ -166,10 +167,8 @@ pub fn parse_alignment(bytes: &[u8]) -> Option<f64> {
     };
     for container in containers {
         for key in KEYS {
-            if let Some(raw) = container.get(key) {
-                if let Some(number) = coerce_number(raw) {
-                    return Some(number.clamp(0.0, 1.0));
-                }
+            if let Some(number) = container.get(key).and_then(coerce_number) {
+                return Some(number.clamp(0.0, 1.0));
             }
         }
     }

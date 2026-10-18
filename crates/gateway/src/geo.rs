@@ -111,7 +111,9 @@ pub fn build_geo_resolver(path: Option<&str>) -> std::sync::Arc<dyn CountryResol
 /// factory (VPNs, mobile carriers) that distance+time heuristics create.
 pub fn travel_verdict(prior_countries: &[String], current: Option<&str>) -> bool {
     match current {
-        Some(current) if !prior_countries.is_empty() => !prior_countries.iter().any(|c| c == current),
+        Some(current) if !prior_countries.is_empty() => {
+            !prior_countries.iter().any(|c| c == current)
+        }
         // Unknown country never fires (the resolver is likely dormant).
         _ => false,
     }

@@ -177,8 +177,8 @@ pub async fn chat_completions(
     let prior = db::prior_countries_for_key(&state.db, &auth.id, &client_ip)
         .await
         .unwrap_or_default();
-    if let Err(err) = db::record_key_ip(&state.db, &auth.id, &client_ip, country.as_deref(), now)
-        .await
+    if let Err(err) =
+        db::record_key_ip(&state.db, &auth.id, &client_ip, country.as_deref(), now).await
     {
         // History is telemetry, not metering — log and continue.
         tracing::warn!("key ip history write failed (continuing): {err:#}");

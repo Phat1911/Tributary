@@ -20,7 +20,10 @@ fn canonical_dialect_parses() {
 
 #[test]
 fn score_as_string_parses() {
-    assert_eq!(parse_alignment(&fixture("score-as-string.json")), Some(0.31));
+    assert_eq!(
+        parse_alignment(&fixture("score-as-string.json")),
+        Some(0.31)
+    );
 }
 
 #[test]
