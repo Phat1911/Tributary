@@ -5,7 +5,7 @@
 
 import Link from "next/link";
 import { useState } from "react";
-import { Building2, Plus } from "lucide-react";
+import { Building2, Plus, UserCog } from "lucide-react";
 import { toast } from "sonner";
 import { AppShell, PageHeader } from "@/components/app-shell";
 import { EmptyState, ErrorState, TableSkeleton } from "@/components/data-state";
@@ -66,6 +66,96 @@ function PoolHealthCell({ poolId }: { poolId: string }) {
       {counts.invalid > 0 ? <HealthBadge health="invalid" /> : null}
       {counts.unknown > 0 ? <HealthBadge health="unknown" /> : null}
     </span>
+  );
+}
+
+/**
+ * Hosts mint each org's FIRST admin here (POST /members with
+ * role=org_admin — the only escalation path; org_admins themselves can
+ * only create plain members, enforced server-side).
+ */
+function AddOrgAdminButton({ org }: { org: PublicOrg }) {
+  const [open, setOpen] = useState(false);
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  async function submit(e: React.FormEvent) {
+    e.preventDefault();
+    setBusy(true);
+    try {
+      await api.post("/members", {
+        org_id: org.id,
+        email,
+        password,
+        role: "org_admin",
+      });
+      toast.success(`${email} is now ${org.name}'s admin`);
+      setOpen(false);
+      setEmail("");
+      setPassword("");
+    } catch (err) {
+      toast.error(
+        err instanceof ApiError ? err.message : "Failed to create admin",
+      );
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={setOpen}>
+      <Button
+        variant="outline"
+        size="sm"
+        className="gap-1.5"
+        onClick={() => setOpen(true)}
+      >
+        <UserCog className="size-4" aria-hidden />
+        Add admin
+      </Button>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle className="font-display">
+            Admin for {org.name}
+          </DialogTitle>
+          <DialogDescription>
+            They sign in and manage {org.name}&apos;s members, pools, and
+            keys.
+          </DialogDescription>
+        </DialogHeader>
+        <form onSubmit={submit} className="space-y-4">
+          <div className="space-y-2">
+            <Label htmlFor="admin-email">Email</Label>
+            <Input
+              id="admin-email"
+              type="email"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              placeholder="lead@acme.com"
+              required
+            />
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="admin-password">Temporary password</Label>
+            <Input
+              id="admin-password"
+              type="text"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              placeholder="min. 8 characters"
+              minLength={8}
+              required
+            />
+          </div>
+          <DialogFooter>
+            <Button type="submit" disabled={busy}>
+              {busy ? "Creating…" : "Create org admin"}
+            </Button>
+          </DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
   );
 }
 
@@ -175,6 +265,7 @@ export default function HostPage() {
                 <TableHead>Name</TableHead>
                 <TableHead>Slug</TableHead>
                 <TableHead>Created</TableHead>
+                <TableHead aria-label="Actions" />
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -183,6 +274,9 @@ export default function HostPage() {
                   <TableCell className="font-medium">{org.name}</TableCell>
                   <TableCell className="font-mono text-xs">{org.slug}</TableCell>
                   <TableCell>{formatDate(org.created_at)}</TableCell>
+                  <TableCell>
+                    <AddOrgAdminButton org={org} />
+                  </TableCell>
                 </TableRow>
               ))}
             </TableBody>
