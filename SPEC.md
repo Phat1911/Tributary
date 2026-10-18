@@ -354,7 +354,7 @@ for any hosted demo (Hetzner-class, student budget); English docs first.
 - [x] **M1** — gateway core: proxy, pool keys, streaming, metering — implemented at 2e9359e `migrations/` `crates/gateway/` `.github/workflows/ci.yml` `scripts/mock_openai.py`, 2026-10-15
 - [x] **M2** — orgs, pools, provider keys (encrypted), quota/rate engine — implemented at cd5f97e (feat chain 8207e38→2fead3d) `migrations/` `crates/{common,crypto,control,gateway}/` `AGENTS.md`, 2026-10-17
 - [x] **M3** — dashboards + audit log — implemented at 9d2ec2f→ba9ca28 `migrations/0006_audit_log_login_throttle.sql` `crates/{control,gateway}/` `apps/dashboard/` `.github/workflows/ci.yml`, 2026-10-17
-- [ ] **M4** — leak prevention free tier (+ basic canaries, BYOK purpose classifier + auto-block)
+- [x] **M4** — leak prevention free tier (+ basic canaries, BYOK purpose classifier + auto-block) — implemented at 8613fab/4b2cea6/287b29d/215fdb4 (migrations/0007 + crates/{common,control,gateway} + apps/dashboard + scripts/manual_journey_m4.py), 2026-10-18
 - [ ] **M5** — packaging, docs, landing page, hosted demo (D25)
 - [ ] **M6** — pilot orgs (D20) + paid tier
 - [ ] **M7** — `LedgerTrait` + double-entry ledger
