@@ -374,6 +374,10 @@ pub struct CreateMemberRequest {
     pub org_id: String,
     pub email: String,
     pub password: String,
+    /// Optional role escalation: only `org_admin` is recognized, and only
+    /// when the caller is a host_admin (hosts provision each org's first
+    /// admin; org_admins themselves can only mint plain members).
+    pub role: Option<String>,
 }
 
 /// GET /api/v1/members?org_id=… filter.
@@ -392,11 +396,28 @@ pub async fn create_member(
 ) -> ApiResult<(StatusCode, Json<PublicUser>)> {
     admin.ensure_org_scope(&body.org_id)?;
     auth::validate_credentials(&body.email, &body.password)?;
+    // Role resolution: default member; `org_admin` needs a host caller;
+    // anything else (including `host_admin`) is rejected — the host role
+    // is bootstrap-only by design.
+    let role = match body.role.as_deref() {
+        None | Some("member") => "member",
+        Some("org_admin") => {
+            if admin.role != "host_admin" {
+                return Err(ControlError::Forbidden);
+            }
+            "org_admin"
+        }
+        Some(other) => {
+            return Err(ControlError::BadRequest(format!(
+                "unknown role '{other}' (member or org_admin)"
+            )));
+        }
+    };
     let member = db::UserRow {
         id: new_id(),
         email: body.email.trim().to_lowercase(),
         password_hash: auth::hash_password(&body.password)?,
-        role: "member".to_string(),
+        role: role.to_string(),
         org_id: Some(body.org_id.clone()),
         created_at: now_ms(),
     };

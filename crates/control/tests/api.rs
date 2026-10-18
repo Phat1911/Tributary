@@ -373,6 +373,103 @@ async fn org_admin_sees_only_their_org() {
     }
 }
 
+/// The M3 done-when journey needs org_admins to exist through the API
+/// (previously only test-seeded): hosts mint them, they cannot self-replicate.
+#[tokio::test]
+async fn host_provisions_org_admins_via_api() {
+    for db in test_dbs().await {
+        let (app, _mock) = control_app(db.pool.clone()).await;
+        let host = bootstrap_and_login(&db.pool, &app).await;
+        let (_, org) = send(
+            &app,
+            post_json(
+                "/api/v1/orgs",
+                Some(&host),
+                &json!({"name": "Provisioned", "slug": unique_slug("prov")}),
+            ),
+        )
+        .await;
+        let org_id = org["id"].as_str().unwrap().to_string();
+
+        // Host mints the org's admin through the API…
+        let admin_email = unique_email("prov-admin");
+        let (status, body) = send(
+            &app,
+            post_json(
+                "/api/v1/members",
+                Some(&host),
+                &json!({"org_id": org_id, "email": &admin_email,
+                        "password": "password123", "role": "org_admin"}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        assert_eq!(body["role"], "org_admin");
+
+        // …who can sign in and mint plain members only.
+        let (_, login) = send(
+            &app,
+            post_json(
+                "/api/v1/auth/login",
+                None,
+                &json!({"email": &admin_email, "password": "password123"}),
+            ),
+        )
+        .await;
+        let token = login["token"].as_str().unwrap().to_string();
+        let member_email = unique_email("prov-member");
+        let (status, body) = send(
+            &app,
+            post_json(
+                "/api/v1/members",
+                Some(&token),
+                &json!({"org_id": org_id, "email": &member_email,
+                        "password": "password123"}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        assert_eq!(body["role"], "member");
+
+        // Escalation attempts all fail: org_admin minting an org_admin…
+        let (status, _) = send(
+            &app,
+            post_json(
+                "/api/v1/members",
+                Some(&token),
+                &json!({"org_id": org_id, "email": unique_email("nope"),
+                        "password": "password123", "role": "org_admin"}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        // …host role is bootstrap-only…
+        let (status, _) = send(
+            &app,
+            post_json(
+                "/api/v1/members",
+                Some(&host),
+                &json!({"org_id": org_id, "email": unique_email("nope2"),
+                        "password": "password123", "role": "host_admin"}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        // …and unknown roles are rejected without creating anything.
+        let (status, _) = send(
+            &app,
+            post_json(
+                "/api/v1/members",
+                Some(&host),
+                &json!({"org_id": org_id, "email": unique_email("nope3"),
+                        "password": "password123", "role": "superadmin"}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+}
+
 #[tokio::test]
 async fn quota_rules_upsert_and_scoped_visibility() {
     for db in test_dbs().await {
