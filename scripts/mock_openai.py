@@ -26,6 +26,27 @@ CHUNKS = [
 
 
 class Handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        # Health-probe endpoint the control plane calls on provider-key
+        # save/revalidate: GET {base_url}/models with the upstream bearer.
+        if self.path != "/v1/models":
+            self.send_error(404)
+            return
+        auth = self.headers.get("authorization", "")
+        if auth != f"Bearer {UPSTREAM_KEY}":
+            self.send_error(401, "bad upstream key")
+            return
+        payload = json.dumps({
+            "object": "list",
+            "data": [{"id": "m-test", "object": "model",
+                      "owned_by": "mock"}],
+        }).encode()
+        self.send_response(200)
+        self.send_header("content-type", "application/json")
+        self.send_header("content-length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+
     def do_POST(self):
         if self.path != "/v1/chat/completions":
             self.send_error(404)
