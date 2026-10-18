@@ -1,0 +1,31 @@
+# Classifier smoke workflow (M4, SPEC §9 / D28): boots the real binary
+# against the script's in-process mocks and walks ALL FOUR leak-prevention
+# journeys through the public API (the same script the founder runs
+# manually — scripts/manual_journey_m4.py).
+#
+# DORMANT unless the repo carries the TRIBUTARY_DEMO_* secrets — job-level
+# `if` — same rule as the demo instance: no secrets, no run. A nightly
+# cadence keeps it honest without spamming PRs.
+name: Classifier smoke
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch: {}
+
+jobs:
+  smoke:
+    name: Leak-prevention journeys (mock providers)
+    runs-on: ubuntu-latest
+    # Dormant by default: skip entirely when the secrets are absent.
+    if: ${{ github.repository == 'tributary/tributary' && secrets.TRIBUTARY_DEMO_MASTER_KEY != '' }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Run the journey script (builds server + mocks, asserts every step)
+        run: python3 scripts/manual_journey_m4.py --ci
+        env:
+          # Unused on Linux (SQLite tempfile) but required for parity with
+          # the demo-instance variant of the same script.
+          TRIBUTARY_MASTER_KEY: ${{ secrets.TRIBUTARY_DEMO_MASTER_KEY }}

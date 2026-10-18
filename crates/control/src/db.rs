@@ -1745,7 +1745,10 @@ pub async fn upsert_classifier_config(db: &Db, row: &ClassifierConfigRow) -> sql
         .bind(&row.mode)
         .bind(row.alert_threshold_bp)
         .bind(row.block_threshold_bp)
-        .bind(row.auto_block_live)
+        // BIGINT column: bind the integer form — sqlx maps a raw bool to
+        // BOOLEAN, which Postgres rejects for a BIGINT target (SQLite's
+        // loose typing hides this; rule: dual-DB means INTEGER 0/1 only).
+        .bind(row.auto_block_live as i64)
         .bind(row.shadow_started_at)
         .bind(row.sampling_per_hour)
         .bind(row.updated_at)
