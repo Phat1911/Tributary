@@ -3,9 +3,10 @@
 # journeys through the public API (the same script the founder runs
 # manually — scripts/manual_journey_m4.py).
 #
-# DORMANT unless the repo carries the TRIBUTARY_DEMO_* secrets — job-level
-# `if` — same rule as the demo instance: no secrets, no run. A nightly
-# cadence keeps it honest without spamming PRs.
+# DORMANT unless the repo carries the TRIBUTARY_DEMO_MASTER_KEY secret:
+# the guard reads the secret through workflow-level env (the `secrets`
+# context is not usable in a job-level `if`) and the run step no-ops with
+# an explanatory line when it is absent. Nightly cadence, no PR noise.
 name: Classifier smoke
 
 on:
@@ -13,19 +14,26 @@ on:
     - cron: "17 3 * * *"
   workflow_dispatch: {}
 
+env:
+  # Secret → env at workflow level so the run step's `if` can see it.
+  SMOKE_KEY: ${{ secrets.TRIBUTARY_DEMO_MASTER_KEY }}
+
 jobs:
   smoke:
     name: Leak-prevention journeys (mock providers)
     runs-on: ubuntu-latest
-    # Dormant by default: skip entirely when the secrets are absent.
-    if: ${{ github.repository == 'tributary/tributary' && secrets.TRIBUTARY_DEMO_MASTER_KEY != '' }}
+    if: github.repository == 'Phat1911/Tributary'
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Run the journey script (builds server + mocks, asserts every step)
+        if: env.SMOKE_KEY != ''
         run: python3 scripts/manual_journey_m4.py --ci
         env:
-          # Unused on Linux (SQLite tempfile) but required for parity with
-          # the demo-instance variant of the same script.
+          # Parity with the demo-instance variant of the same script; the
+          # Linux path generates its own throwaway stack regardless.
           TRIBUTARY_MASTER_KEY: ${{ secrets.TRIBUTARY_DEMO_MASTER_KEY }}
+      - name: Dormant (no demo secret configured)
+        if: env.SMOKE_KEY == ''
+        run: echo "TRIBUTARY_DEMO_MASTER_KEY absent — classifier smoke stays dormant (by design)"
