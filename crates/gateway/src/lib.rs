@@ -5,11 +5,19 @@
 //! the merged control plane at `/api/v1` (SPEC §13 modular monolith — one
 //! binary). Storage is sqlx `Any` — one portable query path over SQLite and
 //! PostgreSQL.
+//!
+//! M4 adds the leak-prevention data-plane gates (SPEC §9): honey-key
+//! detection in auth (generic 401), canary-model local deny, per-key IP
+//! allowlists (fail-closed), per-key IP history with the dormant
+//! impossible-travel check, and async sampled purpose classification
+//! (`classifier`, D28).
 
 pub mod chat;
+pub mod classifier;
 pub mod config;
 pub mod db;
 pub mod error;
+pub mod geo;
 pub mod keys;
 pub mod models_api;
 pub mod quota;

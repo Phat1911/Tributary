@@ -264,6 +264,8 @@ pub fn test_master() -> MasterKey {
 }
 
 /// Builds the merged app exactly like `serve` does (data + control plane).
+/// M4: SMTP stays unconfigured in tests — email alerts take the
+/// log-fallback path (the outbox row still persists for assertions).
 pub async fn test_app(pool: db::Db, _mock: &MockUpstream) -> Router {
     let config = Config {
         database_url: String::new(),
@@ -271,6 +273,8 @@ pub async fn test_app(pool: db::Db, _mock: &MockUpstream) -> Router {
         bind: String::new(),
         default_models: vec!["m-test".to_string(), "m-other".to_string()],
         log_json: false,
+        smtp: None,
+        geoip_db_path: None,
     };
     build_full_app(pool, config).await.expect("build full app")
 }

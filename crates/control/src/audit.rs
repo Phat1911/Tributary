@@ -22,6 +22,8 @@ pub enum TargetKind {
     ProviderKey,
     QuotaRule,
     Session,
+    ReviewFlag,
+    ClassifierConfig,
 }
 
 impl TargetKind {
@@ -35,6 +37,8 @@ impl TargetKind {
             Self::ProviderKey => "provider_key",
             Self::QuotaRule => "quota_rule",
             Self::Session => "session",
+            Self::ReviewFlag => "review_flag",
+            Self::ClassifierConfig => "classifier_config",
         }
     }
 }

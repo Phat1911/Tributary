@@ -97,3 +97,44 @@ pub async fn my_usage_summary(
     };
     crate::usage::summarize(&state, &filter, query.days).await
 }
+
+/// The member-facing disclosure state (D28: covert scoring is BANNED —
+/// the banner must be visible whenever classification runs at all, i.e.
+/// Alert mode included; the text strengthens once auto-block is live).
+#[derive(serde::Serialize)] // serde: this struct → JSON — member disclosure payload
+pub struct DisclosureResponse {
+    /// True whenever a classifier config exists for the member's org —
+    /// even in Alert mode, even in auto-block shadow (director directive:
+    /// the banner rides on classification running, not on blocking).
+    pub classification_active: bool,
+    /// 'alert' | 'auto_block' (None when inactive).
+    pub mode: Option<String>,
+    /// True only when auto-block is LIVE (post shadow window).
+    pub auto_block_live: bool,
+}
+
+/// GET /api/v1/me/disclosure — what the member must be told about purpose
+/// classification. Members of orgs without a classifier see inactive.
+pub async fn my_disclosure(
+    State(state): State<ControlState>,
+    user: AuthedUser,
+) -> ApiResult<Json<DisclosureResponse>> {
+    let config = match user.org_id.as_deref() {
+        Some(org_id) => db::classifier_config_by_org(&state.db, org_id)
+            .await
+            .map_err(|e| ControlError::Internal(e.into()))?,
+        None => None,
+    };
+    Ok(Json(match config {
+        Some(cfg) => DisclosureResponse {
+            classification_active: true,
+            mode: Some(cfg.mode),
+            auto_block_live: cfg.auto_block_live,
+        },
+        None => DisclosureResponse {
+            classification_active: false,
+            mode: None,
+            auto_block_live: false,
+        },
+    }))
+}

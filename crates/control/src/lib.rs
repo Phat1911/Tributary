@@ -8,13 +8,21 @@
 //! (`audit_log` + `/api/v1/audit`), usage endpoints for dashboards, and
 //! member self-service under `/api/v1/me/*`. The router merges into the
 //! single gateway binary (SPEC §13 "modular monolith").
+//!
+//! M4 adds the leak-prevention surfaces (SPEC §9): key governance
+//! (rotation, expiry, IP allowlists), canary management, the admin review
+//! queue, email alerts (outbox + async SMTP/log-fallback), the detection
+//! pipeline shared with the gateway, and the BYOK classifier config (D28).
 
 pub mod api;
 pub mod audit;
 pub mod auth;
+pub mod classifier;
 pub mod db;
 pub mod error;
 pub mod me;
+pub mod notify;
+pub mod security;
 pub mod throttle;
 pub mod usage;
 
@@ -27,7 +35,8 @@ use tributary_crypto::MasterKey;
 #[derive(Clone)]
 pub struct ControlState {
     pub db: Db,
-    /// HTTP client for provider-key validation probes (`GET {base_url}/models`).
+    /// HTTP client for provider-key validation probes (`GET {base_url}/models`)
+    /// and classifier save-time probes (D28).
     pub http: reqwest::Client,
     /// Master key used to seal provider keys at rest (rule 2).
     pub master: MasterKey,
@@ -39,10 +48,13 @@ pub struct ControlState {
     /// Failed logins allowed per (email, ip) per fixed 15-minute window.
     /// A field (not a constant) so tests can tighten it per-app; default 5.
     pub login_max_fails: i64,
+    /// SMTP relay for detection emails; `None` ⇒ log-fallback (M4).
+    pub smtp: Option<notify::SmtpConfig>,
 }
 
 impl ControlState {
-    /// Builds state with production defaults (throttle: 5 fails / window).
+    /// Builds state with production defaults (throttle: 5 fails / window;
+    /// SMTP read from `TRIBUTARY_SMTP_*` — absent ⇒ fallback path).
     pub fn new(
         db: Db,
         http: reqwest::Client,
@@ -56,6 +68,7 @@ impl ControlState {
             default_models,
             login_throttle: throttle::LoginThrottle::new(),
             login_max_fails: 5,
+            smtp: notify::SmtpConfig::from_env(),
         }
     }
 }
@@ -94,8 +107,41 @@ pub fn router(state: ControlState) -> Router {
             get(api::list_pool_keys).post(api::issue_pool_key),
         )
         .route(
+            "/api/v1/pools/{id}/keys/manage",
+            get(api::manage_pool_keys),
+        )
+        .route(
             "/api/v1/pools/{id}/keys/{key_id}",
             axum::routing::delete(api::revoke_pool_key),
+        )
+        .route(
+            "/api/v1/pools/{id}/keys/{key_id}/rotate",
+            post(api::rotate_pool_key),
+        )
+        .route(
+            "/api/v1/pools/{id}/keys/{key_id}/expiry",
+            post(api::set_key_expiry),
+        )
+        .route(
+            "/api/v1/pools/{id}/keys/{key_id}/allowlists",
+            post(api::add_key_allowlist),
+        )
+        .route(
+            "/api/v1/pools/{id}/keys/{key_id}/allowlists/{entry_id}",
+            axum::routing::delete(api::remove_key_allowlist),
+        )
+        .route(
+            "/api/v1/pools/{id}/canary-keys",
+            post(api::plant_canary_keys),
+        )
+        .route("/api/v1/pools/{id}/canaries", get(api::list_canaries))
+        .route(
+            "/api/v1/pools/{id}/canary-models",
+            post(api::add_canary_model),
+        )
+        .route(
+            "/api/v1/pools/{id}/canary-models/{model_id}",
+            axum::routing::delete(api::remove_canary_model),
         )
         .route(
             "/api/v1/pools/{id}/provider-keys",
@@ -126,7 +172,29 @@ pub fn router(state: ControlState) -> Router {
         )
         .route("/api/v1/me/usage", get(me::my_usage))
         .route("/api/v1/me/usage/summary", get(me::my_usage_summary))
+        .route(
+            "/api/v1/me/disclosure",
+            get(me::my_disclosure),
+        )
         .route("/api/v1/audit", get(api::list_audit))
+        .route(
+            "/api/v1/review-flags",
+            get(api::list_review_flags),
+        )
+        .route(
+            "/api/v1/review-flags/{id}/resolve",
+            post(api::resolve_review_flag),
+        )
+        .route(
+            "/api/v1/orgs/{id}/classifier",
+            get(api::get_classifier)
+                .put(api::put_classifier)
+                .delete(api::delete_classifier),
+        )
+        .route(
+            "/api/v1/orgs/{id}/classifier/go-live",
+            post(api::classifier_go_live),
+        )
         .with_state(state)
 }
 

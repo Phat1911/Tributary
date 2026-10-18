@@ -176,3 +176,97 @@ pub async fn usage_events_for_key(db: &Db, pool_key_id: &str) -> sqlx::Result<Ve
         .collect();
     Ok(rows)
 }
+
+// ---------------------------------------------------------------------------
+// M4: leak prevention — canary lookups, IP allowlists, per-key IP history
+// ---------------------------------------------------------------------------
+
+/// True when `alias` is a canary model alias planted on this pool (any
+/// member attribution — detection trips regardless of who asks; a STOLEN
+/// model list is the threat being detected).
+pub async fn is_canary_model(db: &Db, pool_id: &str, alias: &str) -> sqlx::Result<bool> {
+    let sql = db.sql("SELECT id FROM canary_models WHERE pool_id = ? AND alias = ?");
+    let row = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
+        .bind(pool_id)
+        .bind(alias)
+        .fetch_optional(db.pool())
+        .await?;
+    Ok(row.is_some())
+}
+
+/// The canary aliases visible to ONE member in `GET /v1/models`: pool-wide
+/// rows (user_id NULL) plus that member's own scoped aliases.
+pub async fn canary_models_for_member(
+    db: &Db,
+    pool_id: &str,
+    user_id: Option<&str>,
+) -> sqlx::Result<Vec<String>> {
+    let sql = db.sql(
+        "SELECT alias FROM canary_models WHERE pool_id = ? AND (user_id IS NULL OR user_id = ?)",
+    );
+    let rows = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
+        .bind(pool_id)
+        .bind(user_id)
+        .fetch_all(db.pool())
+        .await?;
+    Ok(rows.iter().map(|r| r.get("alias")).collect())
+}
+
+/// The CIDR strings pinned to one key (empty = unrestricted/dormant).
+/// Raw strings suffice — the caller parses once per request for matching.
+pub async fn ip_allowlist_cidrs(db: &Db, pool_key_id: &str) -> sqlx::Result<Vec<String>> {
+    let sql = db.sql("SELECT cidr FROM ip_allowlists WHERE pool_key_id = ?");
+    let rows = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
+        .bind(pool_key_id)
+        .fetch_all(db.pool())
+        .await?;
+    Ok(rows.iter().map(|r| r.get("cidr")).collect())
+}
+
+/// Records one (key, source-ip) sighting, upserting `last_seen` and
+/// refreshing `country` when the resolver knows it. `ON CONFLICT … DO
+/// UPDATE` is the one upsert form SQLite ≥3.24 and PostgreSQL share, so it
+/// crosses the Any adapter unchanged.
+pub async fn record_key_ip(
+    db: &Db,
+    pool_key_id: &str,
+    ip: &str,
+    country: Option<&str>,
+    now: i64,
+) -> sqlx::Result<()> {
+    let sql = db.sql(
+        "INSERT INTO pool_key_ips (pool_key_id, ip, country, first_seen, last_seen) \
+         VALUES (?, ?, ?, ?, ?) \
+         ON CONFLICT (pool_key_id, ip) DO UPDATE \
+         SET last_seen = excluded.last_seen, \
+             country = COALESCE(excluded.country, pool_key_ips.country)",
+    );
+    sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
+        .bind(pool_key_id)
+        .bind(ip)
+        .bind(country)
+        .bind(now)
+        .bind(now)
+        .execute(db.pool())
+        .await?;
+    Ok(())
+}
+
+/// The DISTINCT countries a key has been seen from, excluding the current
+/// sighting's IP (the travel check asks "is this NEW relative to history?").
+pub async fn prior_countries_for_key(
+    db: &Db,
+    pool_key_id: &str,
+    exclude_ip: &str,
+) -> sqlx::Result<Vec<String>> {
+    let sql = db.sql(
+        "SELECT DISTINCT country FROM pool_key_ips \
+         WHERE pool_key_id = ? AND country IS NOT NULL AND ip != ?",
+    );
+    let rows = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
+        .bind(pool_key_id)
+        .bind(exclude_ip)
+        .fetch_all(db.pool())
+        .await?;
+    Ok(rows.iter().map(|r| r.get::<String, _>("country")).collect())
+}

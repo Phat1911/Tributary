@@ -9,6 +9,9 @@ repository.workspace = true
 [dependencies]
 anyhow = "1"
 hex = "0.4"
+# Header-map types for client-IP extraction — `http` is the tiny crate axum
+# re-exports as `axum::http` (shared types, no framework dep in `common`).
+http = "1"
 rand = "0.9"
 sha2 = "0.10"
 sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "any", "sqlite", "postgres", "migrate", "macros"] }

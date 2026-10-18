@@ -5,6 +5,7 @@
 //! handlers never serialize `password_hash` or ciphertext columns.
 
 use serde::Serialize;
+use serde_json::Value;
 use sqlx::Row;
 use tributary_common::db::Db;
 
@@ -595,14 +596,17 @@ pub struct NewPoolKey {
     pub key_hash: String,
     pub key_prefix: String,
     pub user_id: String,
+    /// Optional expiry (epoch ms; None = never) — M4 key governance.
+    pub expires_at: Option<i64>,
     pub created_at: i64,
 }
 
 /// Inserts an issued pool key.
 pub async fn insert_issued_pool_key(db: &Db, key: &NewPoolKey) -> sqlx::Result<()> {
     let sql = db.sql(
-        "INSERT INTO pool_keys (id, pool_id, key_hash, key_prefix, kind, status, user_id, created_at) \
-         VALUES (?, ?, ?, ?, 'live', 'active', ?, ?)",
+        "INSERT INTO pool_keys \
+         (id, pool_id, key_hash, key_prefix, kind, status, user_id, expires_at, created_at) \
+         VALUES (?, ?, ?, ?, 'live', 'active', ?, ?, ?)",
     );
     sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
         .bind(&key.id)
@@ -610,6 +614,7 @@ pub async fn insert_issued_pool_key(db: &Db, key: &NewPoolKey) -> sqlx::Result<(
         .bind(&key.key_hash)
         .bind(&key.key_prefix)
         .bind(&key.user_id)
+        .bind(key.expires_at)
         .bind(key.created_at)
         .execute(db.pool())
         .await?;
@@ -651,8 +656,13 @@ pub async fn pool_keys_by_pool(db: &Db, pool_id: &str) -> sqlx::Result<Vec<Publi
 }
 
 /// Revokes a pool key (soft delete — usage rows keep referencing it).
+/// M4: also revocable from 'suspended' (the review queue's manual kill
+/// switch for an auto-blocked key).
 pub async fn revoke_pool_key(db: &Db, id: &str) -> sqlx::Result<u64> {
-    let sql = db.sql("UPDATE pool_keys SET status = 'revoked' WHERE id = ? AND status = 'active'");
+    let sql = db.sql(
+        "UPDATE pool_keys SET status = 'revoked' \
+         WHERE id = ? AND status IN ('active', 'suspended')",
+    );
     let res = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
         .bind(id)
         .execute(db.pool())
@@ -1011,4 +1021,835 @@ pub async fn pool_key_with_owner(
             )
         });
     Ok(row)
+}
+
+// ---------------------------------------------------------------------------
+// M4: leak prevention — key governance, canaries, review queue, alerts,
+// classifier config/scores
+// ---------------------------------------------------------------------------
+
+/// A pool-key row as the SHARED listing serves it (SPEC §9 export surface).
+///
+/// SECURITY INVARIANT (director directive, M4 kickoff): this shape must be
+/// byte-identical for live and canary rows — same five fields, no `kind`
+/// marker, no `user_id` (nullable ownership is itself a tell), no
+/// kind-dependent ordering. Ownership and canary identity are visible ONLY
+/// through the admin management view ([`ManagedPoolKey`]).
+#[derive(Debug, Clone, Serialize)] // serde: this struct → JSON — the uniform export shape
+pub struct SharedPoolKey {
+    pub id: String,
+    pub pool_id: String,
+    pub key_prefix: String,
+    pub status: String,
+    pub created_at: i64,
+}
+
+/// Lists a pool's keys (live AND canary) in the uniform export shape,
+/// ordered by `created_at` — the same key for both kinds, so the order can
+/// never encode what a row is (canaries are backdated into the pool's
+/// existing history at plant time to interleave naturally).
+pub async fn shared_pool_keys_by_pool(db: &Db, pool_id: &str) -> sqlx::Result<Vec<SharedPoolKey>> {
+    let sql = db.sql(
+        "SELECT id, pool_id, key_prefix, status, created_at \
+         FROM pool_keys WHERE pool_id = ? ORDER BY created_at, id",
+    );
+    let rows = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
+        .bind(pool_id)
+        .fetch_all(db.pool())
+        .await?
+        .into_iter()
+        .map(|row| SharedPoolKey {
+            id: row.get("id"),
+            pool_id: row.get("pool_id"),
+            key_prefix: row.get("key_prefix"),
+            status: row.get("status"),
+            created_at: row.get("created_at"),
+        })
+        .collect();
+    Ok(rows)
+}
+
+/// A pool-key row as the ADMIN MANAGEMENT view serves it — the only place
+/// canary identity, ownership, expiry, and rotation lineage are exposed.
+#[derive(Debug, Clone, Serialize)] // serde: this struct → JSON — admin management view
+pub struct ManagedPoolKey {
+    pub id: String,
+    pub pool_id: String,
+    pub key_prefix: String,
+    /// 'live' | 'canary' — admin-only field, never on the shared listing.
+    pub kind: String,
+    pub user_id: Option<String>,
+    pub status: String,
+    pub expires_at: Option<i64>,
+    pub created_at: i64,
+}
+
+/// Lists a pool's keys with full governance detail (admin management view).
+pub async fn managed_pool_keys_by_pool(db: &Db, pool_id: &str) -> sqlx::Result<Vec<ManagedPoolKey>> {
+    let sql = db.sql(
+        "SELECT id, pool_id, key_prefix, kind, user_id, status, expires_at, created_at \
+         FROM pool_keys WHERE pool_id = ? ORDER BY created_at, id",
+    );
+    let rows = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
+        .bind(pool_id)
+        .fetch_all(db.pool())
+        .await?
+        .into_iter()
+        .map(|row| ManagedPoolKey {
+            id: row.get("id"),
+            pool_id: row.get("pool_id"),
+            key_prefix: row.get("key_prefix"),
+            kind: row.get("kind"),
+            user_id: row.get("user_id"),
+            status: row.get("status"),
+            expires_at: row.get("expires_at"),
+            created_at: row.get("created_at"),
+        })
+        .collect();
+    Ok(rows)
+}
+
+/// A canary (honey) key to insert: same shape as a live key except
+/// `kind = 'canary'`, no owner, and a backdated `created_at` so the shared
+/// listing interleaves it with real issuance history instead of clustering
+/// every canary at the end (the "ordering tell", director directive).
+#[derive(Debug, Clone)]
+pub struct NewCanaryKey {
+    pub id: String,
+    pub pool_id: String,
+    pub key_hash: String,
+    pub key_prefix: String,
+    pub created_at: i64,
+}
+
+/// Inserts one canary pool key (SPEC §6: owner none, never serves traffic —
+/// the gateway rejects canary-kind keys with the generic 401 after firing
+/// the detection pipeline).
+pub async fn insert_canary_pool_key(db: &Db, key: &NewCanaryKey) -> sqlx::Result<()> {
+    let sql = db.sql(
+        "INSERT INTO pool_keys (id, pool_id, key_hash, key_prefix, kind, status, user_id, created_at) \
+         VALUES (?, ?, ?, ?, 'canary', 'active', NULL, ?)",
+    );
+    sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
+        .bind(&key.id)
+        .bind(&key.pool_id)
+        .bind(&key.key_hash)
+        .bind(&key.key_prefix)
+        .bind(key.created_at)
+        .execute(db.pool())
+        .await?;
+    Ok(())
+}
+
+/// Marks a key ROTATED: reissue replaced it (old row keeps its history).
+/// Distinct from 'revoked' so the audit trail distinguishes rotation from
+/// kill-switch use.
+pub async fn rotate_pool_key(db: &Db, id: &str) -> sqlx::Result<u64> {
+    let sql =
+        db.sql("UPDATE pool_keys SET status = 'rotated' WHERE id = ? AND status = 'active'");
+    let res = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
+        .bind(id)
+        .execute(db.pool())
+        .await?;
+    Ok(res.rows_affected())
+}
+
+/// Suspends a key (auto-block only): every request dies with 403 until an
+/// admin one-click-unblocks. Never a ban — the member row is untouched.
+pub async fn suspend_pool_key(db: &Db, id: &str) -> sqlx::Result<u64> {
+    let sql = db.sql(
+        "UPDATE pool_keys SET status = 'suspended' WHERE id = ? AND status = 'active'",
+    );
+    let res = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
+        .bind(id)
+        .execute(db.pool())
+        .await?;
+    Ok(res.rows_affected())
+}
+
+/// Unblocks a suspended key (the review queue's one-click action).
+pub async fn unsuspend_pool_key(db: &Db, id: &str) -> sqlx::Result<u64> {
+    let sql = db.sql(
+        "UPDATE pool_keys SET status = 'active' WHERE id = ? AND status = 'suspended'",
+    );
+    let res = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
+        .bind(id)
+        .execute(db.pool())
+        .await?;
+    Ok(res.rows_affected())
+}
+
+/// Sets or clears a key's expiry (NULL = never expires).
+pub async fn set_pool_key_expiry(
+    db: &Db,
+    id: &str,
+    expires_at: Option<i64>,
+) -> sqlx::Result<u64> {
+    let sql = db.sql("UPDATE pool_keys SET expires_at = ? WHERE id = ?");
+    let res = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
+        .bind(expires_at)
+        .bind(id)
+        .execute(db.pool())
+        .await?;
+    Ok(res.rows_affected())
+}
+
+// --- IP allowlists (SPEC §6 `ip_allowlists`) -------------------------------
+
+/// One allowlist CIDR row.
+#[derive(Debug, Clone, Serialize)] // serde: this struct → JSON — allowlist row for the admin UI
+pub struct IpAllowlistRow {
+    pub id: String,
+    pub pool_key_id: String,
+    pub cidr: String,
+    pub note: Option<String>,
+    pub created_at: i64,
+}
+
+/// Adds a CIDR to a key's allowlist (idempotent per the UNIQUE index —
+/// callers map constraint errors to a friendly 409).
+pub async fn insert_ip_allowlist(
+    db: &Db,
+    id: &str,
+    pool_key_id: &str,
+    cidr: &str,
+    note: Option<&str>,
+    created_at: i64,
+) -> sqlx::Result<()> {
+    let sql = db.sql(
+        "INSERT INTO ip_allowlists (id, pool_key_id, cidr, note, created_at) \
+         VALUES (?, ?, ?, ?, ?)",
+    );
+    sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
+        .bind(id)
+        .bind(pool_key_id)
+        .bind(cidr)
+        .bind(note)
+        .bind(created_at)
+        .execute(db.pool())
+        .await?;
+    Ok(())
+}
+
+/// Lists the CIDRs pinned to one key (empty = unrestricted, dormant).
+pub async fn ip_allowlists_for_key(db: &Db, pool_key_id: &str) -> sqlx::Result<Vec<IpAllowlistRow>> {
+    let sql = db.sql(
+        "SELECT id, pool_key_id, cidr, note, created_at FROM ip_allowlists \
+         WHERE pool_key_id = ? ORDER BY created_at",
+    );
+    let rows = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
+        .bind(pool_key_id)
+        .fetch_all(db.pool())
+        .await?
+        .into_iter()
+        .map(|row| IpAllowlistRow {
+            id: row.get("id"),
+            pool_key_id: row.get("pool_key_id"),
+            cidr: row.get("cidr"),
+            note: row.get("note"),
+            created_at: row.get("created_at"),
+        })
+        .collect();
+    Ok(rows)
+}
+
+/// Lists every allowlist row for a whole pool (management view, one query).
+pub async fn ip_allowlists_for_pool(db: &Db, pool_id: &str) -> sqlx::Result<Vec<IpAllowlistRow>> {
+    let sql = db.sql(
+        "SELECT a.id, a.pool_key_id, a.cidr, a.note, a.created_at \
+         FROM ip_allowlists a JOIN pool_keys k ON a.pool_key_id = k.id \
+         WHERE k.pool_id = ? ORDER BY a.created_at",
+    );
+    let rows = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
+        .bind(pool_id)
+        .fetch_all(db.pool())
+        .await?
+        .into_iter()
+        .map(|row| IpAllowlistRow {
+            id: row.get("id"),
+            pool_key_id: row.get("pool_key_id"),
+            cidr: row.get("cidr"),
+            note: row.get("note"),
+            created_at: row.get("created_at"),
+        })
+        .collect();
+    Ok(rows)
+}
+
+/// Removes one allowlist row.
+pub async fn delete_ip_allowlist(db: &Db, id: &str) -> sqlx::Result<u64> {
+    let sql = db.sql("DELETE FROM ip_allowlists WHERE id = ?");
+    let res = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
+        .bind(id)
+        .execute(db.pool())
+        .await?;
+    Ok(res.rows_affected())
+}
+
+// --- Canary model aliases -----------------------------------------------------
+
+/// A canary model alias row.
+#[derive(Debug, Clone, Serialize)] // serde: this struct → JSON — admin management view row
+pub struct CanaryModelRow {
+    pub id: String,
+    pub pool_id: String,
+    pub alias: String,
+    /// NULL = visible pool-wide in GET /v1/models; a member id scopes the
+    /// alias to that member's listing (detection still trips for anyone).
+    pub user_id: Option<String>,
+    pub created_at: i64,
+}
+
+/// Adds a canary model alias to a pool.
+pub async fn insert_canary_model(
+    db: &Db,
+    id: &str,
+    pool_id: &str,
+    alias: &str,
+    user_id: Option<&str>,
+    created_at: i64,
+) -> sqlx::Result<()> {
+    let sql = db.sql(
+        "INSERT INTO canary_models (id, pool_id, alias, user_id, created_at) \
+         VALUES (?, ?, ?, ?, ?)",
+    );
+    sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
+        .bind(id)
+        .bind(pool_id)
+        .bind(alias)
+        .bind(user_id)
+        .bind(created_at)
+        .execute(db.pool())
+        .await?;
+    Ok(())
+}
+
+/// Lists a pool's canary model aliases (admin management view).
+pub async fn canary_models_by_pool(db: &Db, pool_id: &str) -> sqlx::Result<Vec<CanaryModelRow>> {
+    let sql = db.sql(
+        "SELECT id, pool_id, alias, user_id, created_at FROM canary_models \
+         WHERE pool_id = ? ORDER BY created_at",
+    );
+    let rows = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
+        .bind(pool_id)
+        .fetch_all(db.pool())
+        .await?
+        .into_iter()
+        .map(|row| CanaryModelRow {
+            id: row.get("id"),
+            pool_id: row.get("pool_id"),
+            alias: row.get("alias"),
+            user_id: row.get("user_id"),
+            created_at: row.get("created_at"),
+        })
+        .collect();
+    Ok(rows)
+}
+
+/// Deletes one canary model alias.
+pub async fn delete_canary_model(db: &Db, id: &str) -> sqlx::Result<u64> {
+    let sql = db.sql("DELETE FROM canary_models WHERE id = ?");
+    let res = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
+        .bind(id)
+        .execute(db.pool())
+        .await?;
+    Ok(res.rows_affected())
+}
+
+// --- Review queue --------------------------------------------------------------
+
+/// One review-queue flag as served to admins (detail already sanitized at
+/// WRITE time — this struct cannot carry prompts or key material).
+#[derive(Debug, Clone, Serialize)] // serde: this struct → JSON — review queue row
+pub struct ReviewFlagRow {
+    pub id: String,
+    pub org_id: String,
+    pub pool_id: Option<String>,
+    pub pool_key_id: Option<String>,
+    pub user_id: Option<String>,
+    pub kind: String,
+    pub severity: String,
+    /// Classifier alignment in basis points (0–10000); NULL for
+    /// non-scored kinds.
+    pub score_bp: Option<i64>,
+    pub detail_json: Value,
+    pub status: String,
+    pub created_at: i64,
+    pub resolved_at: Option<i64>,
+    pub resolved_by: Option<String>,
+}
+
+/// Writes one review flag (the detection pipeline's queue insert).
+pub async fn insert_review_flag(
+    db: &Db,
+    id: &str,
+    org_id: &str,
+    pool_id: Option<&str>,
+    pool_key_id: Option<&str>,
+    user_id: Option<&str>,
+    kind: &str,
+    severity: &str,
+    score_bp: Option<i64>,
+    detail_json: &Value,
+    created_at: i64,
+) -> sqlx::Result<()> {
+    let sql = db.sql(
+        "INSERT INTO review_flags \
+         (id, org_id, pool_id, pool_key_id, user_id, kind, severity, score_bp, detail_json, \
+          status, created_at) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?)",
+    );
+    sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
+        .bind(id)
+        .bind(org_id)
+        .bind(pool_id)
+        .bind(pool_key_id)
+        .bind(user_id)
+        .bind(kind)
+        .bind(severity)
+        .bind(score_bp)
+        .bind(detail_json.to_string())
+        .bind(created_at)
+        .execute(db.pool())
+        .await?;
+    Ok(())
+}
+
+/// Lists review flags newest-first, optionally filtered by org and status.
+pub async fn list_review_flags(
+    db: &Db,
+    org_scope: Option<&str>,
+    status: Option<&str>,
+    limit: i64,
+    offset: i64,
+) -> sqlx::Result<Vec<ReviewFlagRow>> {
+    // Clauses are assembled BEFORE the portable `?`-rewrite so bind order
+    // still matches placeholder order (same pattern as usage_events).
+    let mut sql = String::from(
+        "SELECT id, org_id, pool_id, pool_key_id, user_id, kind, severity, score_bp, \
+          detail_json, status, created_at, resolved_at, resolved_by FROM review_flags",
+    );
+    let mut clauses: Vec<&'static str> = Vec::new();
+    if org_scope.is_some() {
+        clauses.push("org_id = ?");
+    }
+    if status.is_some() {
+        clauses.push("status = ?");
+    }
+    if !clauses.is_empty() {
+        sql.push_str(" WHERE ");
+        sql.push_str(&clauses.join(" AND "));
+    }
+    sql.push_str(" ORDER BY created_at DESC, id LIMIT ? OFFSET ?");
+    let sql = db.sql(&sql);
+    let mut q = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()));
+    if let Some(org) = org_scope {
+        q = q.bind(org);
+    }
+    if let Some(st) = status {
+        q = q.bind(st);
+    }
+    let rows = q
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(db.pool())
+        .await?
+        .into_iter()
+        .map(review_flag_from_row)
+        .collect();
+    Ok(rows)
+}
+
+/// Fetches one review flag (for scoped resolution).
+pub async fn review_flag_by_id(db: &Db, id: &str) -> sqlx::Result<Option<ReviewFlagRow>> {
+    let sql = db.sql(
+        "SELECT id, org_id, pool_id, pool_key_id, user_id, kind, severity, score_bp, \
+          detail_json, status, created_at, resolved_at, resolved_by \
+         FROM review_flags WHERE id = ?",
+    );
+    let row = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
+        .bind(id)
+        .fetch_optional(db.pool())
+        .await?
+        .map(review_flag_from_row);
+    Ok(row)
+}
+
+/// Maps a SELECT row into a [`ReviewFlagRow`] (corrupt detail degrades to
+/// JSON null rather than 500-ing the viewer — same posture as audit rows).
+fn review_flag_from_row(row: sqlx::any::AnyRow) -> ReviewFlagRow {
+    let detail_raw: Option<String> = row.get("detail_json");
+    ReviewFlagRow {
+        id: row.get("id"),
+        org_id: row.get("org_id"),
+        pool_id: row.get("pool_id"),
+        pool_key_id: row.get("pool_key_id"),
+        user_id: row.get("user_id"),
+        kind: row.get("kind"),
+        severity: row.get("severity"),
+        score_bp: row.get("score_bp"),
+        detail_json: serde_json::from_str(&detail_raw.unwrap_or_default())
+            .unwrap_or(Value::Null),
+        status: row.get("status"),
+        created_at: row.get("created_at"),
+        resolved_at: row.get("resolved_at"),
+        resolved_by: row.get("resolved_by"),
+    }
+}
+
+/// Marks a flag resolved, recording who decided.
+pub async fn resolve_review_flag(
+    db: &Db,
+    id: &str,
+    resolved_by: &str,
+    resolved_at: i64,
+) -> sqlx::Result<u64> {
+    let sql = db.sql(
+        "UPDATE review_flags SET status = 'resolved', resolved_by = ?, resolved_at = ? \
+         WHERE id = ? AND status = 'open'",
+    );
+    let res = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
+        .bind(resolved_by)
+        .bind(resolved_at)
+        .bind(id)
+        .execute(db.pool())
+        .await?;
+    Ok(res.rows_affected())
+}
+
+// --- Email alert outbox ---------------------------------------------------------
+
+/// One outbox row (assertable even on the SMTP-unconfigured fallback path).
+#[derive(Debug, Clone, Serialize)] // serde: this struct → JSON — ops/debug view of the outbox
+pub struct EmailAlertRow {
+    pub id: String,
+    pub org_id: String,
+    pub to_email: String,
+    pub subject: String,
+    pub body: String,
+    pub status: String,
+    pub created_at: i64,
+    pub sent_at: Option<i64>,
+}
+
+/// Enqueues an alert email (send happens async; failure never blocks the
+/// request that raised the alert).
+pub async fn insert_email_alert(
+    db: &Db,
+    id: &str,
+    org_id: &str,
+    to_email: &str,
+    subject: &str,
+    body: &str,
+    created_at: i64,
+) -> sqlx::Result<()> {
+    let sql = db.sql(
+        "INSERT INTO email_alerts (id, org_id, to_email, subject, body, status, created_at) \
+         VALUES (?, ?, ?, ?, ?, 'queued', ?)",
+    );
+    sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
+        .bind(id)
+        .bind(org_id)
+        .bind(to_email)
+        .bind(subject)
+        .bind(body)
+        .bind(created_at)
+        .execute(db.pool())
+        .await?;
+    Ok(())
+}
+
+/// Updates an outbox row after a send attempt ('sent' or 'skipped').
+pub async fn set_email_alert_status(
+    db: &Db,
+    id: &str,
+    status: &str,
+    sent_at: Option<i64>,
+) -> sqlx::Result<u64> {
+    let sql = db.sql("UPDATE email_alerts SET status = ?, sent_at = ? WHERE id = ?");
+    let res = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
+        .bind(status)
+        .bind(sent_at)
+        .bind(id)
+        .execute(db.pool())
+        .await?;
+    Ok(res.rows_affected())
+}
+
+/// Reads one outbox row (tests assert the alert fired).
+pub async fn email_alert_by_id(db: &Db, id: &str) -> sqlx::Result<Option<EmailAlertRow>> {
+    let sql = db.sql(
+        "SELECT id, org_id, to_email, subject, body, status, created_at, sent_at \
+         FROM email_alerts WHERE id = ?",
+    );
+    let row = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
+        .bind(id)
+        .fetch_optional(db.pool())
+        .await?
+        .map(|row| EmailAlertRow {
+            id: row.get("id"),
+            org_id: row.get("org_id"),
+            to_email: row.get("to_email"),
+            subject: row.get("subject"),
+            body: row.get("body"),
+            status: row.get("status"),
+            created_at: row.get("created_at"),
+            sent_at: row.get("sent_at"),
+        });
+    Ok(row)
+}
+
+/// The org's alert recipients: its org_admins, or the host admins when the
+/// org has none of its own (host-managed orgs still deserve the alert).
+pub async fn alert_recipients(db: &Db, org_id: &str) -> sqlx::Result<Vec<String>> {
+    let admins = db.sql(
+        "SELECT email FROM users WHERE org_id = ? AND role = 'org_admin' ORDER BY created_at",
+    );
+    let rows = sqlx::query(sqlx::AssertSqlSafe(admins.as_str()))
+        .bind(org_id)
+        .fetch_all(db.pool())
+        .await?;
+    let mut emails: Vec<String> = rows.iter().map(|r| r.get("email")).collect();
+    if emails.is_empty() {
+        let hosts =
+            db.sql("SELECT email FROM users WHERE role = 'host_admin' ORDER BY created_at");
+        let rows = sqlx::query(sqlx::AssertSqlSafe(hosts.as_str()))
+            .fetch_all(db.pool())
+            .await?;
+        emails = rows.iter().map(|r| r.get("email")).collect();
+    }
+    Ok(emails)
+}
+
+// --- Classifier config (D28) -----------------------------------------------------
+
+/// A full `classifier_config` row — internal use only (the API serves the
+/// masked view without ciphertext).
+#[derive(Debug, Clone)]
+pub struct ClassifierConfigRow {
+    pub org_id: String,
+    pub base_url: String,
+    pub model: String,
+    pub ciphertext: String,
+    pub dek_wrapped: String,
+    pub key_prefix: String,
+    pub purpose_statement: String,
+    pub mode: String,
+    pub alert_threshold_bp: i64,
+    pub block_threshold_bp: i64,
+    pub auto_block_live: bool,
+    pub shadow_started_at: Option<i64>,
+    pub sampling_per_hour: i64,
+    pub updated_at: i64,
+}
+
+/// The masked, API-facing classifier view — no ciphertext, plus the shadow
+/// statistics the settings page renders ("would have blocked N from M").
+#[derive(Debug, Clone, Serialize)] // serde: this struct → JSON — classifier settings view
+pub struct PublicClassifierConfig {
+    pub org_id: String,
+    pub base_url: String,
+    pub model: String,
+    pub key_prefix: String,
+    pub purpose_statement: String,
+    pub mode: String,
+    pub alert_threshold: f64,
+    pub auto_block_threshold: f64,
+    pub auto_block_live: bool,
+    pub shadow_started_at: Option<i64>,
+    pub sampling_per_hour: i64,
+    pub updated_at: i64,
+    /// Count of sampled requests under the auto-block threshold since the
+    /// shadow window began (the "would have blocked N" number).
+    pub shadow_would_have_blocked: i64,
+    /// Distinct members those samples came from (the "from M members").
+    pub shadow_distinct_members: i64,
+}
+
+/// Maps a raw row into the public view, computing shadow stats from the
+/// scores table (one query; the numbers are small at M4 scale).
+pub async fn public_classifier_config(
+    db: &Db,
+    row: &ClassifierConfigRow,
+) -> sqlx::Result<PublicClassifierConfig> {
+    let since = row.shadow_started_at.unwrap_or(0);
+    let stats = db.sql(
+        "SELECT COUNT(*) AS n, COUNT(DISTINCT COALESCE(user_id, pool_key_id)) AS m \
+         FROM classifier_scores WHERE org_id = ? AND would_block = 1 AND ts >= ?",
+    );
+    let stat_row = sqlx::query(sqlx::AssertSqlSafe(stats.as_str()))
+        .bind(&row.org_id)
+        .bind(since)
+        .fetch_one(db.pool())
+        .await?;
+    Ok(PublicClassifierConfig {
+        org_id: row.org_id.clone(),
+        base_url: row.base_url.clone(),
+        model: row.model.clone(),
+        key_prefix: row.key_prefix.clone(),
+        purpose_statement: row.purpose_statement.clone(),
+        mode: row.mode.clone(),
+        alert_threshold: row.alert_threshold_bp as f64 / 10_000.0,
+        auto_block_threshold: row.block_threshold_bp as f64 / 10_000.0,
+        auto_block_live: row.auto_block_live,
+        shadow_started_at: row.shadow_started_at,
+        sampling_per_hour: row.sampling_per_hour,
+        updated_at: row.updated_at,
+        shadow_would_have_blocked: stat_row.get("n"),
+        shadow_distinct_members: stat_row.get("m"),
+    })
+}
+
+/// Loads an org's classifier config (None ⇒ feature dormant, D28).
+pub async fn classifier_config_by_org(
+    db: &Db,
+    org_id: &str,
+) -> sqlx::Result<Option<ClassifierConfigRow>> {
+    let sql = db.sql(
+        "SELECT org_id, base_url, model, ciphertext, dek_wrapped, key_prefix, \
+          purpose_statement, mode, alert_threshold_bp, block_threshold_bp, \
+          auto_block_live, shadow_started_at, sampling_per_hour, updated_at \
+         FROM classifier_config WHERE org_id = ?",
+    );
+    let row = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
+        .bind(org_id)
+        .fetch_optional(db.pool())
+        .await?
+        .map(classifier_row_from_row);
+    Ok(row)
+}
+
+/// Upserts (replace via delete+insert in one tx, mirroring quota rules —
+/// avoids ON CONFLICT dialect differences) an org's classifier config.
+pub async fn upsert_classifier_config(db: &Db, row: &ClassifierConfigRow) -> sqlx::Result<()> {
+    let mut tx = db.pool().begin().await?;
+    let del = db.sql("DELETE FROM classifier_config WHERE org_id = ?");
+    sqlx::query(sqlx::AssertSqlSafe(del.as_str()))
+        .bind(&row.org_id)
+        .execute(&mut *tx)
+        .await?;
+    let ins = db.sql(
+        "INSERT INTO classifier_config \
+         (org_id, base_url, model, ciphertext, dek_wrapped, key_prefix, purpose_statement, \
+          mode, alert_threshold_bp, block_threshold_bp, auto_block_live, shadow_started_at, \
+          sampling_per_hour, updated_at) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    );
+    sqlx::query(sqlx::AssertSqlSafe(ins.as_str()))
+        .bind(&row.org_id)
+        .bind(&row.base_url)
+        .bind(&row.model)
+        .bind(&row.ciphertext)
+        .bind(&row.dek_wrapped)
+        .bind(&row.key_prefix)
+        .bind(&row.purpose_statement)
+        .bind(&row.mode)
+        .bind(row.alert_threshold_bp)
+        .bind(row.block_threshold_bp)
+        .bind(row.auto_block_live)
+        .bind(row.shadow_started_at)
+        .bind(row.sampling_per_hour)
+        .bind(row.updated_at)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+/// Deletes an org's classifier config — the feature goes dormant again.
+pub async fn delete_classifier_config(db: &Db, org_id: &str) -> sqlx::Result<u64> {
+    let sql = db.sql("DELETE FROM classifier_config WHERE org_id = ?");
+    let res = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
+        .bind(org_id)
+        .execute(db.pool())
+        .await?;
+    Ok(res.rows_affected())
+}
+
+/// Flips auto-block from shadow to live (admin decision after reviewing
+/// the would-have-blocked stats). Returns rows affected (0 = no config,
+/// wrong mode, or already live).
+pub async fn classifier_go_live(db: &Db, org_id: &str, at: i64) -> sqlx::Result<u64> {
+    let sql = db.sql(
+        "UPDATE classifier_config SET auto_block_live = 1, updated_at = ? \
+         WHERE org_id = ? AND mode = 'auto_block' AND auto_block_live = 0",
+    );
+    let res = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
+        .bind(at)
+        .bind(org_id)
+        .execute(db.pool())
+        .await?;
+    Ok(res.rows_affected())
+}
+
+/// Maps a SELECT row into a [`ClassifierConfigRow`].
+fn classifier_row_from_row(row: sqlx::any::AnyRow) -> ClassifierConfigRow {
+    let live: i64 = row.get("auto_block_live");
+    ClassifierConfigRow {
+        org_id: row.get("org_id"),
+        base_url: row.get("base_url"),
+        model: row.get("model"),
+        ciphertext: row.get("ciphertext"),
+        dek_wrapped: row.get("dek_wrapped"),
+        key_prefix: row.get("key_prefix"),
+        purpose_statement: row.get("purpose_statement"),
+        mode: row.get("mode"),
+        alert_threshold_bp: row.get("alert_threshold_bp"),
+        block_threshold_bp: row.get("block_threshold_bp"),
+        auto_block_live: live != 0,
+        shadow_started_at: row.get("shadow_started_at"),
+        sampling_per_hour: row.get("sampling_per_hour"),
+        updated_at: row.get("updated_at"),
+    }
+}
+
+// --- Classifier scores --------------------------------------------------------
+
+/// Writes one sampled classification (score + verdict metadata, NEVER the
+/// prompt — D28).
+pub async fn insert_classifier_score(
+    db: &Db,
+    id: &str,
+    org_id: &str,
+    pool_key_id: Option<&str>,
+    user_id: Option<&str>,
+    model: &str,
+    score_bp: i64,
+    would_block: bool,
+    ts: i64,
+) -> sqlx::Result<()> {
+    let sql = db.sql(
+        "INSERT INTO classifier_scores \
+         (id, org_id, pool_key_id, user_id, model, score_bp, would_block, ts) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+    );
+    sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
+        .bind(id)
+        .bind(org_id)
+        .bind(pool_key_id)
+        .bind(user_id)
+        .bind(model)
+        .bind(score_bp)
+        .bind(would_block as i64)
+        .bind(ts)
+        .execute(db.pool())
+        .await?;
+    Ok(())
+}
+
+/// Count of samples recorded for the org in the current hour — the
+/// sampling budget gate (N/hour, D28).
+pub async fn classifier_samples_this_hour(
+    db: &Db,
+    org_id: &str,
+    hour_start_ms: i64,
+) -> sqlx::Result<i64> {
+    let sql = db.sql("SELECT COUNT(*) AS n FROM classifier_scores WHERE org_id = ? AND ts >= ?");
+    let row = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
+        .bind(org_id)
+        .bind(hour_start_ms)
+        .fetch_one(db.pool())
+        .await?;
+    let n: i64 = row.get("n");
+    Ok(n)
 }

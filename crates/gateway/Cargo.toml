@@ -6,10 +6,20 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[features]
+default = []
+# GeoLite2 country resolution for the impossible-travel check (SPEC §9).
+# OFF by default: the default build carries no GeoIP dependency (dormant
+# feature — activated by TRIBUTARY_GEOIP_DB_PATH + this feature together).
+geoip = ["dep:maxminddb"]
+
 [dependencies]
 anyhow = "1"
 axum = "0.8"
 futures-util = "0.3"
+# Optional GeoLite2 reader (feature `geoip`): pure Rust, no C toolchain.
+# Justified in PLAN.md per workflow step 10 (mail + geo dep discipline).
+maxminddb = { version = "0.32", optional = true }
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

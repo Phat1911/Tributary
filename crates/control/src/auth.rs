@@ -129,16 +129,11 @@ pub fn expired_session_cookie() -> String {
 ///
 /// Trust model: only the edge proxy writes XFF in a sane deployment; a
 /// client-forged XFF can shift its own bucket to a fake IP, but not evade
-/// the per-email dimension of the (email, ip) bucket.
+/// the per-email dimension of the (email, ip) bucket. M4: the logic moved
+/// to `tributary_common::net` so the gateway's IP allowlist shares it;
+/// kept here as a re-export-shaped wrapper for existing callers.
 pub fn client_ip(headers: &axum::http::HeaderMap) -> String {
-    headers
-        .get("x-forwarded-for")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.split(',').next())
-        .map(str::trim)
-        .filter(|ip| !ip.is_empty())
-        .unwrap_or("local")
-        .to_string()
+    tributary_common::net::client_ip(headers)
 }
 
 /// Any authenticated user (admin or member) — the base identity extractors

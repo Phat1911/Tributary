@@ -16,8 +16,10 @@ use axum::http::{StatusCode, header};
 use axum::response::Response;
 use futures_util::StreamExt;
 use serde_json::Value;
+use serde_json::json;
 use tokio::sync::mpsc;
 
+use crate::classifier::{self, ScoreContext};
 use crate::db::{self, UsageEvent};
 use crate::error::ApiError;
 use crate::keys::AuthedKey;
@@ -37,9 +39,17 @@ struct Admission {
     provider_key_id: String,
 }
 
+/// The canary-model local deny: BYTE-IDENTICAL to the plain allowlist
+/// rejection. A scraper probing models cannot distinguish "canary" from
+/// "not allowed here" — both are the same 400 with the same body.
+fn model_not_allowed(model: &str) -> ApiError {
+    ApiError::BadRequest(format!("Model '{model}' is not allowed for this pool."))
+}
+
 pub async fn chat_completions(
     State(state): State<AppState>,
     auth: AuthedKey,
+    headers: axum::http::HeaderMap,
     body: Bytes,
 ) -> Result<Response, ApiError> {
     let started = Instant::now();
@@ -59,12 +69,82 @@ pub async fn chat_completions(
         .and_then(Value::as_str)
         .unwrap_or("unknown")
         .to_string();
+
+    // --- M4 canary model check (SPEC §9): BEFORE the allowlist logic, ----
+    // so an alias planted inside the allowlist still trips detection. The
+    // response is the SAME local 400 an allowlist reject gets — upstream
+    // never sees the request, and the attacker learns nothing.
+    let client_ip = tributary_common::net::client_ip(&headers);
+    if db::is_canary_model(&state.db, &auth.pool_id, &requested_model)
+        .await
+        .map_err(|e| ApiError::Internal(anyhow::anyhow!("canary model lookup failed: {e}")))?
+    {
+        tributary_control::security::detect(
+            &state.db,
+            state.config.smtp.as_ref(),
+            &tributary_control::security::Detection {
+                org_id: &pool.org_id,
+                pool_id: Some(&auth.pool_id),
+                pool_key_id: Some(&auth.id),
+                user_id: auth.user_id.as_deref(),
+                kind: tributary_control::security::DetectionKind::CanaryModel,
+                severity: None,
+                score_bp: None,
+                detail: json!({
+                    "model": requested_model,
+                    "key_prefix": auth.key_prefix,
+                    "ip": client_ip,
+                    "note": "canary model alias requested — model list was exfiltrated",
+                }),
+                email: true,
+            },
+        )
+        .await;
+        return Err(model_not_allowed(&requested_model));
+    }
+
     if !pool.allowlist.is_empty() && !pool.allowlist.iter().any(|m| m == &requested_model) {
         // House rule (SPEC §3.1 "model allowlists") — rejected locally,
         // upstream never sees the request.
-        return Err(ApiError::BadRequest(format!(
-            "Model '{requested_model}' is not allowed for this pool."
-        )));
+        return Err(model_not_allowed(&requested_model));
+    }
+
+    // --- M4 IP allowlist (SPEC §9): fail-closed CIDR matching. ------------
+    let cidrs_raw = db::ip_allowlist_cidrs(&state.db, &auth.id)
+        .await
+        .map_err(|e| ApiError::Internal(anyhow::anyhow!("allowlist lookup failed: {e}")))?;
+    let parsed_cidrs: Vec<_> = cidrs_raw
+        .iter()
+        .filter_map(|c| tributary_common::net::Cidr::parse(c))
+        .collect();
+    if let tributary_common::net::AllowlistVerdict::Denied =
+        tributary_common::net::evaluate_allowlist(&parsed_cidrs, &client_ip)
+    {
+        // Denied: audit row (the J4 proof) — the source IP is the whole
+        // story, no queue/email spam (misconfigured clients are loud, not
+        // malicious).
+        tributary_control::audit::record(
+            &state.db,
+            tributary_control::audit::AuditEntry {
+                org_id: Some(&pool.org_id),
+                actor_id: "system",
+                actor_email: "system@tributary.internal",
+                action: "security.ip_allowlist_denied",
+                target_kind: tributary_control::audit::TargetKind::PoolKey,
+                target_id: &auth.id,
+                before: None,
+                after: Some(json!({
+                    "key_prefix": auth.key_prefix,
+                    "ip": client_ip,
+                    "cidrs": cidrs_raw,
+                })),
+                ip: Some(&client_ip),
+            },
+        )
+        .await;
+        return Err(ApiError::Forbidden(
+            "This key is restricted to configured IP ranges.".to_string(),
+        ));
     }
 
     // --- Rule 4: quota + rate check BEFORE any upstream call. ------------
@@ -89,6 +169,59 @@ pub async fn chat_completions(
             retry_after_secs,
         });
     }
+
+    // --- M4 per-key IP history + impossible travel (dormant default). ----
+    // Country resolution only exists when a GeoLite2 db + the geoip feature
+    // are both present; NoGeo keeps this a pure history write.
+    let country = state.geo.country_of(&client_ip);
+    let prior = db::prior_countries_for_key(&state.db, &auth.id, &client_ip)
+        .await
+        .unwrap_or_default();
+    if let Err(err) = db::record_key_ip(&state.db, &auth.id, &client_ip, country.as_deref(), now)
+        .await
+    {
+        // History is telemetry, not metering — log and continue.
+        tracing::warn!("key ip history write failed (continuing): {err:#}");
+    }
+    if crate::geo::travel_verdict(&prior, country.as_deref()) {
+        tributary_control::security::detect(
+            &state.db,
+            state.config.smtp.as_ref(),
+            &tributary_control::security::Detection {
+                org_id: &pool.org_id,
+                pool_id: Some(&auth.pool_id),
+                pool_key_id: Some(&auth.id),
+                user_id: auth.user_id.as_deref(),
+                kind: tributary_control::security::DetectionKind::ImpossibleTravel,
+                severity: None,
+                score_bp: None,
+                detail: json!({
+                    "key_prefix": auth.key_prefix,
+                    "ip": client_ip,
+                    "country": country,
+                    "prior_countries": prior,
+                }),
+                email: true,
+            },
+        )
+        .await;
+    }
+
+    // --- M4 classifier scoring (D28): async off-hot-path. The spawn only ----
+    // acts when the org configured a classifier; the prompt text leaves
+    // this scope exclusively inside the scoring task (never stored).
+    classifier::spawn_scoring(
+        state.clone(),
+        ScoreContext {
+            org_id: pool.org_id.clone(),
+            pool_id: auth.pool_id.clone(),
+            pool_key_id: auth.id.clone(),
+            key_prefix: auth.key_prefix.clone(),
+            user_id: auth.user_id.clone(),
+            model: requested_model.clone(),
+            prompt_text: classifier::extract_prompt(&request_body),
+        },
+    );
 
     // --- Key selection + per-use decrypt (SPEC §5 steps 4–5). ------------
     let selected = routing::select_provider_key(&state.db, &auth.pool_id)

@@ -11,12 +11,19 @@ anyhow = "1"
 argon2 = "0.5"
 axum = "0.8"
 hex = "0.4"
+# M4 email alerts (SPEC §9 free tier): lettre is the audited standard Rust
+# SMTP client. rustls-tls (no native-tls) keeps the OpenSSL-free build that
+# D30 established; bodies are plain text — no templating feature.
+lettre = { version = "0.11", default-features = false, features = ["builder", "smtp-transport", "tokio1", "tokio1-rustls-tls"] }
 rand = "0.9"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "any", "sqlite", "postgres", "migrate", "macros"] }
 thiserror = "2"
+# The async email sender spawns on the tokio runtime (alerts are off the
+# request path — SPEC §9 "email alert on activation" must never stall it).
+tokio = { version = "1", features = ["rt", "macros"] }
 tracing = "0.1"
 tributary-common = { path = "../common" }
 tributary-crypto = { path = "../crypto" }

@@ -23,11 +23,18 @@ pub struct Config {
     pub default_models: Vec<String>,
     /// Emit structured JSON logs (SPEC §13 "JSON logs (tracing)").
     pub log_json: bool,
+    /// SMTP relay for detection emails (M4); `None` ⇒ log-fallback.
+    pub smtp: Option<tributary_control::notify::SmtpConfig>,
+    /// Optional GeoLite2-Country db path — activates the impossible-travel
+    /// check ONLY when the `geoip` feature is also compiled in (dormant
+    /// otherwise; see `geo`).
+    pub geoip_db_path: Option<String>,
 }
 
 impl fmt::Debug for Config {
-    /// Manual Debug impl: the master key and any DSN password must never
-    /// reach logs. (MasterKey redacts itself, but defense in depth is cheap.)
+    /// Manual Debug impl: the master key, the DSN password, and the SMTP
+    /// password must never reach logs. (MasterKey redacts itself, but
+    /// defense in depth is cheap.)
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Config")
             .field("database_url", &"<redacted>")
@@ -35,6 +42,8 @@ impl fmt::Debug for Config {
             .field("bind", &self.bind)
             .field("default_models", &self.default_models)
             .field("log_json", &self.log_json)
+            .field("smtp", &self.smtp.as_ref().map(|_| "<configured>"))
+            .field("geoip_db_path", &self.geoip_db_path)
             .finish()
     }
 }
@@ -49,6 +58,10 @@ impl Config {
             default_models: model_list(),
             log_json: env::var("TRIBUTARY_LOG_FORMAT")
                 .is_ok_and(|v| v.eq_ignore_ascii_case("json")),
+            smtp: tributary_control::notify::SmtpConfig::from_env(),
+            geoip_db_path: env::var("TRIBUTARY_GEOIP_DB_PATH")
+                .ok()
+                .filter(|p| !p.trim().is_empty()),
         })
     }
 
@@ -94,6 +107,8 @@ mod tests {
             bind: "127.0.0.1:8080".to_string(),
             default_models: model_list(),
             log_json: false,
+            smtp: None,
+            geoip_db_path: None,
         };
         let rendered = format!("{config:?}");
         assert!(!rendered.contains("supersecret"));

@@ -15,3 +15,6 @@ out/
 # Environment / secrets — never commit
 .env
 .env.*
+
+# Internal note:
+M3-FINAL-REPORT.md

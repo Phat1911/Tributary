@@ -17,7 +17,8 @@ use zeroize::Zeroizing;
 use crate::ControlState;
 use crate::audit::{self, AuditEntry, TargetKind};
 use crate::auth::{self, AuthedAdmin, AuthedUser, client_ip};
-use crate::db::{self, PublicPoolKey, PublicProviderKey, PublicUser};
+use crate::classifier::ClassifierProvider;
+use crate::db::{self, PublicProviderKey, PublicUser};
 use crate::error::{ApiResult, ControlError};
 use tributary_common::db::{new_id, now_ms};
 use tributary_common::keys::generate_key;
@@ -709,6 +710,9 @@ async fn load_scoped_pool(
 #[derive(Deserialize)]
 pub struct IssueKeyRequest {
     pub user_id: String,
+    /// Optional expiry (epoch ms). M4 key governance — unexpired-by-default
+    /// stays the ergonomic norm; rotation is the reissue path.
+    pub expires_at: Option<i64>,
 }
 
 /// Response: the raw pool key, revealed exactly once.
@@ -752,6 +756,7 @@ pub async fn issue_pool_key(
             key_hash: generated.key_hash,
             key_prefix: generated.key_prefix.clone(),
             user_id: member.id.clone(),
+            expires_at: body.expires_at,
             created_at: now_ms(),
         },
     )
@@ -776,6 +781,7 @@ pub async fn issue_pool_key(
                 "user_id": member.id,
                 "key_prefix": generated.key_prefix,
                 "status": "active",
+                "expires_at": body.expires_at,
             })),
             ip: Some(&ip),
         },
@@ -793,14 +799,20 @@ pub async fn issue_pool_key(
     ))
 }
 
-/// Lists a pool's keys (masked).
+/// Lists a pool's keys in the SHARED export shape (M4): every row — live
+/// AND canary — rendered with the same five fields and no ownership or kind
+/// marker, ordered by `created_at` (canaries are backdated at plant time so
+/// they interleave with issuance history). Ownership and canary identity
+/// are served only by [`manage_pool_keys`]. Director directive, M4
+/// kickoff: an insider scraping this payload must not be able to filter
+/// out the canaries.
 pub async fn list_pool_keys(
     State(state): State<ControlState>,
     admin: AuthedAdmin,
     Path(pool_id): Path<String>,
-) -> ApiResult<Json<Vec<PublicPoolKey>>> {
+) -> ApiResult<Json<Vec<db::SharedPoolKey>>> {
     let pool = load_scoped_pool(&state, &admin, &pool_id).await?;
-    let keys = db::pool_keys_by_pool(&state.db, &pool.id)
+    let keys = db::shared_pool_keys_by_pool(&state.db, &pool.id)
         .await
         .map_err(|e| ControlError::Internal(e.into()))?;
     Ok(Json(keys))
@@ -1274,4 +1286,998 @@ pub async fn list_audit(
         .await
         .map_err(|e| ControlError::Internal(e.into()))?;
     Ok(Json(rows))
+}
+
+// ---------------------------------------------------------------------------
+// M4: key governance — management view, rotation, expiry, IP allowlists
+// ---------------------------------------------------------------------------
+
+/// Loads a pool AND one of its keys, enforcing the caller's org scope on
+/// both (a key from another pool under the same org id is still a 404).
+async fn load_scoped_key(
+    state: &ControlState,
+    admin: &AuthedAdmin,
+    pool_id: &str,
+    key_id: &str,
+) -> ApiResult<(db::PoolRow, db::ManagedPoolKey)> {
+    let pool = load_scoped_pool(state, admin, pool_id).await?;
+    let keys = db::managed_pool_keys_by_pool(&state.db, &pool.id)
+        .await
+        .map_err(|e| ControlError::Internal(e.into()))?;
+    let key = keys
+        .into_iter()
+        .find(|k| k.id == key_id)
+        .ok_or(ControlError::NotFound)?;
+    Ok((pool, key))
+}
+
+/// GET /api/v1/pools/{id}/keys/manage — the admin management view: kind,
+/// owner, expiry, status. The ONLY surface (with the canary view) where
+/// canary identity is visible; the dashboard consumes this, not the
+/// shared export listing.
+pub async fn manage_pool_keys(
+    State(state): State<ControlState>,
+    admin: AuthedAdmin,
+    Path(pool_id): Path<String>,
+) -> ApiResult<Json<Vec<db::ManagedPoolKey>>> {
+    let pool = load_scoped_pool(&state, &admin, &pool_id).await?;
+    let keys = db::managed_pool_keys_by_pool(&state.db, &pool.id)
+        .await
+        .map_err(|e| ControlError::Internal(e.into()))?;
+    Ok(Json(keys))
+}
+
+/// Response for rotation: the replacement key, revealed exactly once.
+#[derive(Serialize)]
+pub struct RotatedKeyResponse {
+    /// The NEW key's row id (the old row keeps its own id, status rotated).
+    pub id: String,
+    pub pool_id: String,
+    pub user_id: Option<String>,
+    pub raw: String,
+    pub key_prefix: String,
+    /// The replaced row id, for the audit trail/UI lineage.
+    pub replaced_key_id: String,
+}
+
+/// POST /api/v1/pools/{id}/keys/{key_id}/rotate — key rotation (reissue):
+/// mints a fresh key for the same member, marks the old row 'rotated'
+/// (distinct from 'revoked' — rotation is hygiene, not incident response),
+/// preserves the expiry policy.
+pub async fn rotate_pool_key(
+    State(state): State<ControlState>,
+    admin: AuthedAdmin,
+    headers: axum::http::HeaderMap,
+    Path((pool_id, key_id)): Path<(String, String)>,
+) -> ApiResult<(StatusCode, Json<RotatedKeyResponse>)> {
+    let (pool, old) = load_scoped_key(&state, &admin, &pool_id, &key_id).await?;
+    if old.kind != "live" {
+        return Err(ControlError::Conflict(
+            "canary keys are not rotatable — revoke and replant instead".into(),
+        ));
+    }
+    if old.status != "active" && old.status != "suspended" {
+        return Err(ControlError::Conflict(format!(
+            "key is {} — only active or suspended keys rotate",
+            old.status
+        )));
+    }
+    let generated = generate_key();
+    let new_key_id = new_id();
+    db::insert_issued_pool_key(
+        &state.db,
+        &db::NewPoolKey {
+            id: new_key_id.clone(),
+            pool_id: pool.id.clone(),
+            key_hash: generated.key_hash,
+            key_prefix: generated.key_prefix.clone(),
+            user_id: old
+                .user_id
+                .clone()
+                .ok_or(ControlError::Conflict("key has no owner".into()))?,
+            expires_at: old.expires_at,
+            created_at: now_ms(),
+        },
+    )
+    .await
+    .map_err(|e| ControlError::Internal(e.into()))?;
+    db::rotate_pool_key(&state.db, &old.id)
+        .await
+        .map_err(|e| ControlError::Internal(e.into()))?;
+    let ip = client_ip(&headers);
+    audit::record(
+        &state.db,
+        AuditEntry {
+            org_id: Some(&pool.org_id),
+            actor_id: &admin.user_id,
+            actor_email: &admin.email,
+            action: "pool_key.rotated",
+            target_kind: TargetKind::PoolKey,
+            target_id: &new_key_id,
+            before: Some(serde_json::json!({
+                "id": old.id, "status": old.status, "key_prefix": old.key_prefix,
+            })),
+            after: Some(serde_json::json!({
+                "id": new_key_id,
+                "replaces": old.id,
+                "key_prefix": generated.key_prefix,
+                "status": "active",
+            })),
+            ip: Some(&ip),
+        },
+    )
+    .await;
+    Ok((
+        StatusCode::CREATED,
+        Json(RotatedKeyResponse {
+            id: new_key_id,
+            pool_id: pool.id,
+            user_id: old.user_id,
+            raw: generated.raw,
+            key_prefix: generated.key_prefix,
+            replaced_key_id: old.id,
+        }),
+    ))
+}
+
+/// POST /api/v1/pools/{id}/keys/{key_id}/expiry body (`null` clears).
+#[derive(Deserialize)]
+pub struct SetExpiryRequest {
+    pub expires_at: Option<i64>,
+}
+
+/// POST /api/v1/pools/{id}/keys/{key_id}/expiry — set or clear a key's
+/// expiry (epoch ms). The gateway already rejects expired keys at auth.
+pub async fn set_key_expiry(
+    State(state): State<ControlState>,
+    admin: AuthedAdmin,
+    headers: axum::http::HeaderMap,
+    Path((pool_id, key_id)): Path<(String, String)>,
+    Json(body): Json<SetExpiryRequest>,
+) -> ApiResult<StatusCode> {
+    let (pool, key) = load_scoped_key(&state, &admin, &pool_id, &key_id).await?;
+    if let Some(at) = body.expires_at
+        && at <= now_ms()
+    {
+        return Err(ControlError::BadRequest(
+            "expires_at must be in the future (revoke instead of expiring into the past)"
+                .into(),
+        ));
+    }
+    db::set_pool_key_expiry(&state.db, &key.id, body.expires_at)
+        .await
+        .map_err(|e| ControlError::Internal(e.into()))?;
+    let ip = client_ip(&headers);
+    audit::record(
+        &state.db,
+        AuditEntry {
+            org_id: Some(&pool.org_id),
+            actor_id: &admin.user_id,
+            actor_email: &admin.email,
+            action: "pool_key.expiry_set",
+            target_kind: TargetKind::PoolKey,
+            target_id: &key.id,
+            before: Some(serde_json::json!({ "expires_at": key.expires_at })),
+            after: Some(serde_json::json!({ "expires_at": body.expires_at })),
+            ip: Some(&ip),
+        },
+    )
+    .await;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// POST /api/v1/pools/{id}/keys/{key_id}/allowlists body.
+#[derive(Deserialize)]
+pub struct AddAllowlistRequest {
+    pub cidr: String,
+    pub note: Option<String>,
+}
+
+/// Adds one CIDR to a key's IP allowlist. The gateway evaluates the whole
+/// set per request (fail-closed: no rows = unrestricted — dormant default).
+pub async fn add_key_allowlist(
+    State(state): State<ControlState>,
+    admin: AuthedAdmin,
+    headers: axum::http::HeaderMap,
+    Path((pool_id, key_id)): Path<(String, String)>,
+    Json(body): Json<AddAllowlistRequest>,
+) -> ApiResult<(StatusCode, Json<db::IpAllowlistRow>)> {
+    let (pool, key) = load_scoped_key(&state, &admin, &pool_id, &key_id).await?;
+    if key.kind != "live" {
+        return Err(ControlError::Conflict(
+            "canary keys never serve traffic — allowlists do not apply".into(),
+        ));
+    }
+    // Parse-validate BEFORE storing: garbage CIDRs would silently become
+    // deny-everything rows at the gateway (fail-closed matching).
+    if tributary_common::net::Cidr::parse(&body.cidr).is_none() {
+        return Err(ControlError::BadRequest(format!(
+            "cidr '{}' is not a valid IPv4/IPv6 network (e.g. 10.0.0.0/8)",
+            body.cidr
+        )));
+    }
+    let id = new_id();
+    db::insert_ip_allowlist(
+        &state.db,
+        &id,
+        &key.id,
+        body.cidr.trim(),
+        body.note.as_deref().map(str::trim).filter(|n| !n.is_empty()),
+        now_ms(),
+    )
+    .await
+    .map_err(|e| ControlError::Conflict(format!("cidr already allowlisted: {e}")))?;
+    let ip = client_ip(&headers);
+    audit::record(
+        &state.db,
+        AuditEntry {
+            org_id: Some(&pool.org_id),
+            actor_id: &admin.user_id,
+            actor_email: &admin.email,
+            action: "ip_allowlist.added",
+            target_kind: TargetKind::PoolKey,
+            target_id: &key.id,
+            before: None,
+            after: Some(serde_json::json!({
+                "cidr": body.cidr.trim(),
+                "note": body.note,
+                "key_prefix": key.key_prefix,
+            })),
+            ip: Some(&ip),
+        },
+    )
+    .await;
+    let row = db::ip_allowlists_for_key(&state.db, &key.id)
+        .await
+        .map_err(|e| ControlError::Internal(e.into()))?
+        .into_iter()
+        .find(|r| r.id == id)
+        .ok_or(ControlError::Internal(anyhow::anyhow!("allowlist row vanished")))?;
+    Ok((StatusCode::CREATED, Json(row)))
+}
+
+/// Removes one CIDR row from a key's allowlist.
+pub async fn remove_key_allowlist(
+    State(state): State<ControlState>,
+    admin: AuthedAdmin,
+    headers: axum::http::HeaderMap,
+    Path((pool_id, key_id, entry_id)): Path<(String, String, String)>,
+) -> ApiResult<StatusCode> {
+    let (pool, key) = load_scoped_key(&state, &admin, &pool_id, &key_id).await?;
+    let entries = db::ip_allowlists_for_key(&state.db, &key.id)
+        .await
+        .map_err(|e| ControlError::Internal(e.into()))?;
+    let entry = entries
+        .iter()
+        .find(|e| e.id == entry_id)
+        .ok_or(ControlError::NotFound)?;
+    let removed = entry.clone();
+    db::delete_ip_allowlist(&state.db, &entry.id)
+        .await
+        .map_err(|e| ControlError::Internal(e.into()))?;
+    let ip = client_ip(&headers);
+    audit::record(
+        &state.db,
+        AuditEntry {
+            org_id: Some(&pool.org_id),
+            actor_id: &admin.user_id,
+            actor_email: &admin.email,
+            action: "ip_allowlist.removed",
+            target_kind: TargetKind::PoolKey,
+            target_id: &key.id,
+            before: Some(serde_json::json!({
+                "cidr": removed.cidr, "key_prefix": key.key_prefix,
+            })),
+            after: None,
+            ip: Some(&ip),
+        },
+    )
+    .await;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// ---------------------------------------------------------------------------
+// M4: canaries — honey keys + canary model aliases (admin management)
+// ---------------------------------------------------------------------------
+
+/// POST /api/v1/pools/{id}/canary-keys body.
+#[derive(Deserialize)]
+pub struct PlantCanaryKeysRequest {
+    /// How many honey keys to plant (1–10 per call).
+    pub count: Option<i64>,
+}
+
+/// Response: the raw honey keys, revealed exactly ONCE (plant them
+/// wherever listings/exports get scraped from — that surface is the bait).
+#[derive(Serialize)]
+pub struct PlantedCanaryKeysResponse {
+    pub keys: Vec<PlantedCanaryKey>,
+}
+
+/// One planted honey key with its backdated listing position.
+#[derive(Serialize)]
+pub struct PlantedCanaryKey {
+    pub id: String,
+    pub pool_id: String,
+    pub raw: String,
+    pub key_prefix: String,
+    /// The backdated epoch-ms the shared listing will show — planting
+    /// interleaves canaries into the pool's real issuance history instead
+    /// of clustering them at the end (the "ordering tell" the director
+    /// directive bans).
+    pub listed_at: i64,
+}
+
+/// Plants honey keys: real pool-key rows (kind 'canary', no owner) whose
+/// use at the gateway fires the detection pipeline and dies with the
+/// generic 401. Created_at is backdated uniformly into [pool creation,
+/// now] — a uniform-random position is statistically indistinguishable
+/// from real issuance timing at the listing level.
+pub async fn plant_canary_keys(
+    State(state): State<ControlState>,
+    admin: AuthedAdmin,
+    headers: axum::http::HeaderMap,
+    Path(pool_id): Path<String>,
+    Json(body): Json<PlantCanaryKeysRequest>,
+) -> ApiResult<(StatusCode, Json<PlantedCanaryKeysResponse>)> {
+    use rand::Rng;
+    let pool = load_scoped_pool(&state, &admin, &pool_id).await?;
+    let count = body.count.unwrap_or(1).clamp(1, 10);
+    let now = now_ms();
+    let mut planted = Vec::new();
+    for _ in 0..count {
+        let generated = generate_key();
+        let id = new_id();
+        // Backdate: uniform in [pool.created_at, now] — the same range real
+        // issuance timestamps live in.
+        let listed_at = if now > pool.created_at {
+            rand::rng().random_range(pool.created_at..=now)
+        } else {
+            pool.created_at
+        };
+        db::insert_canary_pool_key(
+            &state.db,
+            &db::NewCanaryKey {
+                id: id.clone(),
+                pool_id: pool.id.clone(),
+                key_hash: generated.key_hash,
+                key_prefix: generated.key_prefix.clone(),
+                created_at: listed_at,
+            },
+        )
+        .await
+        .map_err(|e| ControlError::Internal(e.into()))?;
+        planted.push(PlantedCanaryKey {
+            id,
+            pool_id: pool.id.clone(),
+            raw: generated.raw,
+            key_prefix: generated.key_prefix,
+            listed_at,
+        });
+    }
+    let ip = client_ip(&headers);
+    audit::record(
+        &state.db,
+        AuditEntry {
+            org_id: Some(&pool.org_id),
+            actor_id: &admin.user_id,
+            actor_email: &admin.email,
+            action: "canary_keys.planted",
+            target_kind: TargetKind::Pool,
+            target_id: &pool.id,
+            before: None,
+            // Count + masked prefixes only — raw keys live in the HTTP
+            // response exactly once, never in the audit trail.
+            after: Some(serde_json::json!({
+                "count": planted.len(),
+                "key_prefixes": planted.iter().map(|k| &k.key_prefix).collect::<Vec<_>>(),
+            })),
+            ip: Some(&ip),
+        },
+    )
+    .await;
+    Ok((StatusCode::CREATED, Json(PlantedCanaryKeysResponse { keys: planted })))
+}
+
+/// GET /api/v1/pools/{id}/canaries — the canary MANAGEMENT view: honey-key
+/// rows (identity + masked prefix) and model aliases with attribution.
+/// This is the only place canary identity is exposed (director directive).
+pub async fn list_canaries(
+    State(state): State<ControlState>,
+    admin: AuthedAdmin,
+    Path(pool_id): Path<String>,
+) -> ApiResult<Json<CanaryManagementView>> {
+    let pool = load_scoped_pool(&state, &admin, &pool_id).await?;
+    let keys = db::managed_pool_keys_by_pool(&state.db, &pool.id)
+        .await
+        .map_err(|e| ControlError::Internal(e.into()))?
+        .into_iter()
+        .filter(|k| k.kind == "canary")
+        .collect::<Vec<_>>();
+    let models = db::canary_models_by_pool(&state.db, &pool.id)
+        .await
+        .map_err(|e| ControlError::Internal(e.into()))?;
+    Ok(Json(CanaryManagementView { keys, models }))
+}
+
+/// The canary management view payload.
+#[derive(Serialize)]
+pub struct CanaryManagementView {
+    pub keys: Vec<db::ManagedPoolKey>,
+    pub models: Vec<db::CanaryModelRow>,
+}
+
+/// POST /api/v1/pools/{id}/canary-models body.
+#[derive(Deserialize)]
+pub struct AddCanaryModelRequest {
+    pub alias: String,
+    /// Optional member id: the alias appears only in THAT member's
+    /// /v1/models listing (per-member canary, SPEC §9). Detection trips
+    /// for ANY requester — the stolen list is the threat.
+    pub user_id: Option<String>,
+}
+
+/// Adds a canary model alias. It surfaces in GET /v1/models exactly like a
+/// real model; any chat request targeting it is denied locally and fires
+/// the detection pipeline.
+pub async fn add_canary_model(
+    State(state): State<ControlState>,
+    admin: AuthedAdmin,
+    headers: axum::http::HeaderMap,
+    Path(pool_id): Path<String>,
+    Json(body): Json<AddCanaryModelRequest>,
+) -> ApiResult<(StatusCode, Json<db::CanaryModelRow>)> {
+    let pool = load_scoped_pool(&state, &admin, &pool_id).await?;
+    let alias = body.alias.trim();
+    if alias.is_empty() || alias.len() > 200 {
+        return Err(ControlError::BadRequest(
+            "alias must be 1-200 characters".into(),
+        ));
+    }
+    // Model-like charset: letters, digits, dot, dash, underscore, colon —
+    // anything else would look off in a models listing (the bait must swim).
+    if !alias
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | ':'))
+    {
+        return Err(ControlError::BadRequest(
+            "alias may contain only alphanumerics, dot, dash, underscore, colon".into(),
+        ));
+    }
+    if let Some(member_id) = &body.user_id {
+        let member = db::user_by_id(&state.db, member_id)
+            .await
+            .map_err(|e| ControlError::Internal(e.into()))?
+            .ok_or(ControlError::NotFound)?;
+        if member.org_id.as_deref() != Some(pool.org_id.as_str()) {
+            return Err(ControlError::BadRequest(
+                "member does not belong to the pool's org".into(),
+            ));
+        }
+    }
+    let id = new_id();
+    db::insert_canary_model(
+        &state.db,
+        &id,
+        &pool.id,
+        alias,
+        body.user_id.as_deref(),
+        now_ms(),
+    )
+    .await
+    .map_err(|e| ControlError::Conflict(format!("alias already planted: {e}")))?;
+    let ip = client_ip(&headers);
+    audit::record(
+        &state.db,
+        AuditEntry {
+            org_id: Some(&pool.org_id),
+            actor_id: &admin.user_id,
+            actor_email: &admin.email,
+            action: "canary_model.created",
+            target_kind: TargetKind::Pool,
+            target_id: &pool.id,
+            before: None,
+            after: Some(serde_json::json!({ "alias": alias, "user_id": body.user_id })),
+            ip: Some(&ip),
+        },
+    )
+    .await;
+    let row = db::canary_models_by_pool(&state.db, &pool.id)
+        .await
+        .map_err(|e| ControlError::Internal(e.into()))?
+        .into_iter()
+        .find(|m| m.id == id)
+        .ok_or(ControlError::Internal(anyhow::anyhow!("canary row vanished")))?;
+    Ok((StatusCode::CREATED, Json(row)))
+}
+
+/// Removes one canary model alias.
+pub async fn remove_canary_model(
+    State(state): State<ControlState>,
+    admin: AuthedAdmin,
+    headers: axum::http::HeaderMap,
+    Path((pool_id, model_id)): Path<(String, String)>,
+) -> ApiResult<StatusCode> {
+    let pool = load_scoped_pool(&state, &admin, &pool_id).await?;
+    let models = db::canary_models_by_pool(&state.db, &pool.id)
+        .await
+        .map_err(|e| ControlError::Internal(e.into()))?;
+    let model = models
+        .iter()
+        .find(|m| m.id == model_id)
+        .ok_or(ControlError::NotFound)?;
+    let removed = model.clone();
+    db::delete_canary_model(&state.db, &model.id)
+        .await
+        .map_err(|e| ControlError::Internal(e.into()))?;
+    let ip = client_ip(&headers);
+    audit::record(
+        &state.db,
+        AuditEntry {
+            org_id: Some(&pool.org_id),
+            actor_id: &admin.user_id,
+            actor_email: &admin.email,
+            action: "canary_model.removed",
+            target_kind: TargetKind::Pool,
+            target_id: &pool.id,
+            before: Some(serde_json::json!({ "alias": removed.alias })),
+            after: None,
+            ip: Some(&ip),
+        },
+    )
+    .await;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// ---------------------------------------------------------------------------
+// M4: review queue (admin) — the free-tier response surface
+// ---------------------------------------------------------------------------
+
+/// GET /api/v1/review-flags query.
+#[derive(Deserialize)]
+pub struct ReviewFlagListQuery {
+    /// 'open' (default) | 'resolved' | 'all'.
+    pub status: Option<String>,
+    pub limit: Option<i64>,
+    pub offset: Option<i64>,
+}
+
+/// Lists review flags within the caller's scope (org_admin: their org;
+/// host_admin: every org).
+pub async fn list_review_flags(
+    State(state): State<ControlState>,
+    admin: AuthedAdmin,
+    Query(query): Query<ReviewFlagListQuery>,
+) -> ApiResult<Json<Vec<db::ReviewFlagRow>>> {
+    let scope = if admin.role == "host_admin" {
+        None
+    } else {
+        admin.org_id.as_deref()
+    };
+    let status = match query.status.as_deref() {
+        None | Some("open") => Some("open"),
+        Some("resolved") => Some("resolved"),
+        Some("all") => None,
+        Some(other) => {
+            return Err(ControlError::BadRequest(format!(
+                "status filter must be open, resolved, or all (got '{other}')"
+            )));
+        }
+    };
+    let limit = query.limit.unwrap_or(50).clamp(1, 200);
+    let offset = query.offset.unwrap_or(0).max(0);
+    let rows = db::list_review_flags(&state.db, scope, status, limit, offset)
+        .await
+        .map_err(|e| ControlError::Internal(e.into()))?;
+    Ok(Json(rows))
+}
+
+/// POST /api/v1/review-flags/{id}/resolve body.
+#[derive(Deserialize)]
+pub struct ResolveFlagRequest {
+    /// 'unblock' (restore a suspended key), 'revoke_key' (kill it), or
+    /// 'dismiss' (no key action).
+    pub action: String,
+}
+
+/// Resolves one review flag — the human decision step (D17: detection is
+/// free, the RESPONSE is manual in the free tier). One-click unblock is
+/// the auto-block recovery path (D28: never auto-ban).
+pub async fn resolve_review_flag(
+    State(state): State<ControlState>,
+    admin: AuthedAdmin,
+    headers: axum::http::HeaderMap,
+    Path(id): Path<String>,
+    Json(body): Json<ResolveFlagRequest>,
+) -> ApiResult<StatusCode> {
+    let flag = db::review_flag_by_id(&state.db, &id)
+        .await
+        .map_err(|e| ControlError::Internal(e.into()))?
+        .ok_or(ControlError::NotFound)?;
+    admin.ensure_org_scope(&flag.org_id)?;
+    if flag.status != "open" {
+        return Err(ControlError::Conflict("flag is already resolved".into()));
+    }
+    let pool = match &flag.pool_id {
+        Some(pool_id) => Some(
+            db::pool_by_id(&state.db, pool_id)
+                .await
+                .map_err(|e| ControlError::Internal(e.into()))?
+                .ok_or(ControlError::NotFound)?,
+        ),
+        None => None,
+    };
+    match body.action.as_str() {
+        "unblock" => {
+            let key_id = flag
+                .pool_key_id
+                .as_deref()
+                .ok_or(ControlError::BadRequest(
+                    "flag has no key to unblock — use dismiss".into(),
+                ))?;
+            let n = db::unsuspend_pool_key(&state.db, key_id)
+                .await
+                .map_err(|e| ControlError::Internal(e.into()))?;
+            if n == 0 {
+                return Err(ControlError::Conflict(
+                    "key is not suspended (already unblocked or revoked?)".into(),
+                ));
+            }
+        }
+        "revoke_key" => {
+            let key_id = flag
+                .pool_key_id
+                .as_deref()
+                .ok_or(ControlError::BadRequest(
+                    "flag has no key to revoke — use dismiss".into(),
+                ))?;
+            db::revoke_pool_key(&state.db, key_id)
+                .await
+                .map_err(|e| ControlError::Internal(e.into()))?;
+        }
+        "dismiss" => {}
+        other => {
+            return Err(ControlError::BadRequest(format!(
+                "action must be unblock, revoke_key, or dismiss (got '{other}')"
+            )));
+        }
+    }
+    db::resolve_review_flag(&state.db, &flag.id, &admin.user_id, now_ms())
+        .await
+        .map_err(|e| ControlError::Internal(e.into()))?;
+    let ip = client_ip(&headers);
+    audit::record(
+        &state.db,
+        AuditEntry {
+            org_id: Some(&flag.org_id),
+            actor_id: &admin.user_id,
+            actor_email: &admin.email,
+            action: "review_flag.resolved",
+            target_kind: TargetKind::ReviewFlag,
+            target_id: &flag.id,
+            before: Some(serde_json::json!({
+                "kind": flag.kind, "severity": flag.severity, "status": flag.status,
+            })),
+            after: Some(serde_json::json!({ "action": body.action })),
+            ip: Some(&ip),
+        },
+    )
+    .await;
+    // The key action (if any) gets its own trail row for key-centric views.
+    if let (Some(key_id), Some(pool)) = (&flag.pool_key_id, &pool) {
+        if body.action != "dismiss" {
+            audit::record(
+                &state.db,
+                AuditEntry {
+                    org_id: Some(&pool.org_id),
+                    actor_id: &admin.user_id,
+                    actor_email: &admin.email,
+                    action: if body.action == "unblock" {
+                        "pool_key.unblocked"
+                    } else {
+                        "pool_key.revoked"
+                    },
+                    target_kind: TargetKind::PoolKey,
+                    target_id: key_id,
+                    before: Some(serde_json::json!({ "status": "suspended" })),
+                    after: Some(serde_json::json!({
+                        "status": if body.action == "unblock" { "active" } else { "revoked" },
+                        "via_review_flag": flag.id,
+                    })),
+                    ip: Some(&ip),
+                },
+            )
+            .await;
+        }
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// ---------------------------------------------------------------------------
+// M4: BYOK purpose classifier config (D28)
+// ---------------------------------------------------------------------------
+
+/// PUT /api/v1/orgs/{id}/classifier body. `key` is plaintext ONCE here.
+#[derive(Deserialize)]
+pub struct PutClassifierRequest {
+    pub base_url: String,
+    pub model: String,
+    pub key: String,
+    pub purpose_statement: String,
+    /// 'alert' (default) | 'auto_block'.
+    pub mode: Option<String>,
+    pub alert_threshold: Option<f64>,
+    pub auto_block_threshold: Option<f64>,
+    pub sampling_per_hour: Option<i64>,
+    /// REQUIRED true when mode = auto_block: the admin has seen the
+    /// auto-block warning (shadow-first, suspends keys — never bans).
+    pub acknowledge_auto_block: Option<bool>,
+}
+
+/// GET /api/v1/orgs/{id}/classifier — the masked config + shadow stats.
+/// 404 when unconfigured (dormant is the absence of a row, D28).
+pub async fn get_classifier(
+    State(state): State<ControlState>,
+    admin: AuthedAdmin,
+    Path(org_id): Path<String>,
+) -> ApiResult<Json<db::PublicClassifierConfig>> {
+    let org = db::org_by_id(&state.db, &org_id)
+        .await
+        .map_err(|e| ControlError::Internal(e.into()))?
+        .ok_or(ControlError::NotFound)?;
+    admin.ensure_org_scope(&org.id)?;
+    let row = db::classifier_config_by_org(&state.db, &org.id)
+        .await
+        .map_err(|e| ControlError::Internal(e.into()))?
+        .ok_or(ControlError::NotFound)?;
+    let public = db::public_classifier_config(&state.db, &row)
+        .await
+        .map_err(|e| ControlError::Internal(e.into()))?;
+    Ok(Json(public))
+}
+
+/// PUT /api/v1/orgs/{id}/classifier — configure (or reconfigure) the
+/// classifier. The key is PROBED against the provider at save time
+/// (validates key + model; D28); only a passing probe persists. Entering
+/// auto_block mode requires `acknowledge_auto_block` and always starts a
+/// fresh SHADOW window (1–2 weeks of "would have blocked N" before an
+/// explicit go-live — D28).
+pub async fn put_classifier(
+    State(state): State<ControlState>,
+    admin: AuthedAdmin,
+    headers: axum::http::HeaderMap,
+    Path(org_id): Path<String>,
+    Json(body): Json<PutClassifierRequest>,
+) -> ApiResult<(StatusCode, Json<db::PublicClassifierConfig>)> {
+    let org = db::org_by_id(&state.db, &org_id)
+        .await
+        .map_err(|e| ControlError::Internal(e.into()))?
+        .ok_or(ControlError::NotFound)?;
+    admin.ensure_org_scope(&org.id)?;
+    // Move the secret into Zeroizing immediately (secrets convention).
+    let raw_key = Zeroizing::new(body.key);
+    if raw_key.len() < 8 {
+        return Err(ControlError::BadRequest(
+            "classifier key looks too short to be real".into(),
+        ));
+    }
+    let base_url = body.base_url.trim().trim_end_matches('/').to_string();
+    if !(base_url.starts_with("http://") || base_url.starts_with("https://")) {
+        return Err(ControlError::BadRequest("base_url must be http(s)".into()));
+    }
+    let model = body.model.trim();
+    if model.is_empty() || model.len() > 200 {
+        return Err(ControlError::BadRequest(
+            "model must be 1-200 characters".into(),
+        ));
+    }
+    let purpose = body.purpose_statement.trim();
+    if purpose.is_empty() || purpose.len() > 2000 {
+        return Err(ControlError::BadRequest(
+            "purpose_statement must be 1-2000 characters".into(),
+        ));
+    }
+    let mode = match body.mode.as_deref() {
+        None | Some("alert") => "alert",
+        Some("auto_block") => {
+            if body.acknowledge_auto_block != Some(true) {
+                return Err(ControlError::BadRequest(
+                    "auto_block requires acknowledge_auto_block=true — it suspends member keys \
+                     below the alignment threshold; run the shadow window first (D28)"
+                        .into(),
+                ));
+            }
+            "auto_block"
+        }
+        Some(other) => {
+            return Err(ControlError::BadRequest(format!(
+                "mode must be alert or auto_block (got '{other}')"
+            )));
+        }
+    };
+    let alert_bp = threshold_bp(body.alert_threshold.unwrap_or(0.5))?;
+    let block_bp = threshold_bp(body.auto_block_threshold.unwrap_or(0.15))?;
+    let sampling = body.sampling_per_hour.unwrap_or(30).clamp(1, 100_000);
+
+    // Save-time probe (D28): the provider must accept this key + model and
+    // return a parseable score, or nothing is stored.
+    let provider = crate::classifier::JevClassifier::new(
+        state.http.clone(),
+        &base_url,
+        model,
+        raw_key.clone(),
+    );
+    let probe = provider
+        .score(crate::classifier::ScoreRequest {
+            model,
+            purpose: "validate this configuration",
+            text: "Tributary save-time probe",
+        })
+        .await;
+    if let Err(err) = probe {
+        return Err(ControlError::BadRequest(format!(
+            "classifier probe failed — nothing was saved: {err:#}"
+        )));
+    }
+
+    // Seal under this org's row identity (rule 2: envelope encryption, the
+    // same construction as provider keys).
+    let sealed = seal(
+        &state.master,
+        raw_key.as_bytes(),
+        &row_ad("classifier_config", &org.id),
+    )
+    .map_err(ControlError::Internal)?;
+    let row = db::ClassifierConfigRow {
+        org_id: org.id.clone(),
+        base_url,
+        model: model.to_string(),
+        ciphertext: sealed.ciphertext,
+        dek_wrapped: sealed.dek_wrapped,
+        key_prefix: display_prefix(&raw_key),
+        purpose_statement: purpose.to_string(),
+        mode: mode.to_string(),
+        alert_threshold_bp: alert_bp,
+        block_threshold_bp: block_bp,
+        // Entering (or re-entering) auto_block ALWAYS starts in shadow —
+        // go-live is a separate explicit decision.
+        auto_block_live: false,
+        shadow_started_at: if mode == "auto_block" {
+            Some(now_ms())
+        } else {
+            None
+        },
+        sampling_per_hour: sampling,
+        updated_at: now_ms(),
+    };
+    db::upsert_classifier_config(&state.db, &row)
+        .await
+        .map_err(|e| ControlError::Internal(e.into()))?;
+    let public = db::public_classifier_config(&state.db, &row)
+        .await
+        .map_err(|e| ControlError::Internal(e.into()))?;
+    let ip = client_ip(&headers);
+    audit::record(
+        &state.db,
+        AuditEntry {
+            org_id: Some(&org.id),
+            actor_id: &admin.user_id,
+            actor_email: &admin.email,
+            action: "classifier.configured",
+            target_kind: TargetKind::ClassifierConfig,
+            target_id: &org.id,
+            before: None,
+            // Masked view only — the sealed key material never crosses
+            // into the audit trail.
+            after: serde_json::to_value(&public).ok(),
+            ip: Some(&ip),
+        },
+    )
+    .await;
+    Ok((StatusCode::CREATED, Json(public)))
+}
+
+/// Validates a 0..=1 float threshold into basis points (exact integer
+/// storage — see the migration note on why scores avoid REAL columns).
+fn threshold_bp(value: f64) -> ApiResult<i64> {
+    if !(0.0..=1.0).contains(&value) {
+        return Err(ControlError::BadRequest(
+            "thresholds must be between 0.0 and 1.0".into(),
+        ));
+    }
+    Ok((value * 10_000.0).round() as i64)
+}
+
+/// DELETE /api/v1/orgs/{id}/classifier — remove the config; the feature
+/// goes dormant (no row ⇒ no classification, D28).
+pub async fn delete_classifier(
+    State(state): State<ControlState>,
+    admin: AuthedAdmin,
+    headers: axum::http::HeaderMap,
+    Path(org_id): Path<String>,
+) -> ApiResult<StatusCode> {
+    let org = db::org_by_id(&state.db, &org_id)
+        .await
+        .map_err(|e| ControlError::Internal(e.into()))?
+        .ok_or(ControlError::NotFound)?;
+    admin.ensure_org_scope(&org.id)?;
+    let existing = db::classifier_config_by_org(&state.db, &org.id)
+        .await
+        .map_err(|e| ControlError::Internal(e.into()))?;
+    let Some(existing) = existing else {
+        return Err(ControlError::NotFound);
+    };
+    db::delete_classifier_config(&state.db, &org.id)
+        .await
+        .map_err(|e| ControlError::Internal(e.into()))?;
+    let ip = client_ip(&headers);
+    audit::record(
+        &state.db,
+        AuditEntry {
+            org_id: Some(&org.id),
+            actor_id: &admin.user_id,
+            actor_email: &admin.email,
+            action: "classifier.deleted",
+            target_kind: TargetKind::ClassifierConfig,
+            target_id: &org.id,
+            before: Some(serde_json::json!({
+                "mode": existing.mode,
+                "auto_block_live": existing.auto_block_live,
+                "key_prefix": existing.key_prefix,
+            })),
+            after: None,
+            ip: Some(&ip),
+        },
+    )
+    .await;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// POST /api/v1/orgs/{id}/classifier/go-live — flip auto-block from shadow
+/// to live. The admin should review the shadow stats first (the GET view
+/// shows "would have blocked N from M members"); the endpoint itself never
+/// auto-triggers (D28: explicit decision, never automatic).
+pub async fn classifier_go_live(
+    State(state): State<ControlState>,
+    admin: AuthedAdmin,
+    headers: axum::http::HeaderMap,
+    Path(org_id): Path<String>,
+) -> ApiResult<Json<db::PublicClassifierConfig>> {
+    let org = db::org_by_id(&state.db, &org_id)
+        .await
+        .map_err(|e| ControlError::Internal(e.into()))?
+        .ok_or(ControlError::NotFound)?;
+    admin.ensure_org_scope(&org.id)?;
+    let n = db::classifier_go_live(&state.db, &org.id, now_ms())
+        .await
+        .map_err(|e| ControlError::Internal(e.into()))?;
+    if n == 0 {
+        return Err(ControlError::Conflict(
+            "no auto_block config in shadow — configure it first (PUT with acknowledge)".into(),
+        ));
+    }
+    let row = db::classifier_config_by_org(&state.db, &org.id)
+        .await
+        .map_err(|e| ControlError::Internal(e.into()))?
+        .ok_or(ControlError::NotFound)?;
+    let ip = client_ip(&headers);
+    audit::record(
+        &state.db,
+        AuditEntry {
+            org_id: Some(&org.id),
+            actor_id: &admin.user_id,
+            actor_email: &admin.email,
+            action: "classifier.go_live",
+            target_kind: TargetKind::ClassifierConfig,
+            target_id: &org.id,
+            before: Some(serde_json::json!({ "auto_block_live": false })),
+            after: Some(serde_json::json!({ "auto_block_live": true })),
+            ip: Some(&ip),
+        },
+    )
+    .await;
+    let public = db::public_classifier_config(&state.db, &row)
+        .await
+        .map_err(|e| ControlError::Internal(e.into()))?;
+    Ok(Json(public))
 }
