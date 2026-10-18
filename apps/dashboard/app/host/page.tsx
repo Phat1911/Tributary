@@ -300,6 +300,7 @@ export default function HostPage() {
             <TableHeader>
               <TableRow>
                 <TableHead>Pool</TableHead>
+                <TableHead>Organization</TableHead>
                 <TableHead>Status</TableHead>
                 <TableHead>Models</TableHead>
                 <TableHead>Key health</TableHead>
@@ -316,6 +317,10 @@ export default function HostPage() {
                     >
                       {pool.name}
                     </Link>
+                  </TableCell>
+                  <TableCell>
+                    {(orgs.data ?? []).find((org) => org.id === pool.org_id)
+                      ?.name ?? "—"}
                   </TableCell>
                   <TableCell>
                     <Badge
