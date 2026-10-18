@@ -48,23 +48,23 @@ import {
 import { formatDate } from "@/lib/format";
 import { useApi } from "@/lib/use-api";
 
-function AddMemberDialog({ onAdded }: { onAdded: () => void }) {
+function AddMemberDialog({
+  orgId,
+  onAdded,
+}: {
+  orgId: string | null;
+  onAdded: () => void;
+}) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
-  const orgs = useApi<{ id: string }[]>("/orgs");
-  // An org_admin's /orgs returns exactly their org — the id for the POST.
-  const orgId = orgs.data?.[0]?.id ?? null;
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
-    if (!orgId) {
-      toast.error("No organization found for your account");
-      return;
-    }
     setBusy(true);
     try {
+      if (!orgId) throw new ApiError(0, "no_org", "No organization found for your account");
       await api.post("/members", { org_id: orgId, email, password });
       toast.success(`Member ${email} added`);
       setOpen(false);
@@ -190,7 +190,13 @@ function DeleteMemberButton({
 }
 
 export default function OrgPage() {
-  const members = useApi<PublicMember[]>("/members");
+  // An org_admin's /orgs returns exactly their org. The members list
+  // REQUIRES ?org_id= (the API scopes by it), so it waits for the org.
+  const orgs = useApi<{ id: string }[]>("/orgs");
+  const orgId = orgs.data?.[0]?.id ?? null;
+  const members = useApi<PublicMember[]>(
+    orgId ? `/members?org_id=${orgId}` : null,
+  );
   const pools = useApi<PublicPool[]>("/pools");
 
   return (
@@ -198,7 +204,7 @@ export default function OrgPage() {
       <PageHeader
         title="Organization"
         description="Your members and pools. Issue keys from a pool's page."
-        actions={<AddMemberDialog onAdded={members.reload} />}
+        actions={<AddMemberDialog orgId={orgId} onAdded={members.reload} />}
       />
 
       <section className="space-y-3">
