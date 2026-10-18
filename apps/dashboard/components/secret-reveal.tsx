@@ -35,8 +35,10 @@ export function SecretReveal({
         <KeyRound className="size-4 text-primary" aria-hidden />
         {label}
       </div>
-      <div className="flex items-center gap-2">
-        <code className="min-w-0 flex-1 truncate rounded bg-background px-2 py-1.5 font-mono text-xs">
+      {/* Wrap the secret (break-all) instead of truncating: a revealed key
+          must be fully readable, and nowrap here bursts the dialog's width. */}
+      <div className="flex items-start gap-2">
+        <code className="min-w-0 flex-1 break-all rounded bg-background px-2 py-1.5 font-mono text-xs">
           {visible ? secret : "•".repeat(Math.min(secret.length, 40))}
         </code>
         <Button
