@@ -62,6 +62,7 @@ this file (how we work), **PLAN.md** (status & log), **AUDIT.md** (security find
 9. *(Added)* New spec ambiguity discovered mid-work: record it in `AUDIT.md`; continue only if non-blocking, otherwise stop and ask.
 10. *(Added)* Any new/changed dependency must be justified in the `PLAN.md` entry (supply-chain discipline; `cargo-deny` runs in CI).
 11. *(Added)* **Parallelism policy:** sub-agents only for tasks that are large, have disjoint write-scopes, and share an interface that is fully agreed *before* the split. Scaffold/shared-config work and interface definition stay sequential. The milestone kickoff prompt names where parallelism is allowed.
+12. *(Added, from the M3 retro 2026-10-18)* **Journey proof:** a milestone whose SPEC "done when" describes a user journey MUST include an automated test that walks that journey through the **public API surface only** — test setup may not seed entities directly into the DB for anything the product itself has a provisioning path for. UI-visible changes additionally ship a written manual journey script for the founder to execute before close-out. Director-side commitment: kickoff prompts enumerate the *journey* first, screens second. Browser-level E2E (Playwright) activates at M5.
 
 ## Session protocol (director–worker model)
 
