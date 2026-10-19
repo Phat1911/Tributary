@@ -24,6 +24,7 @@ the script never touches the database directly.
 import json
 import os
 import secrets
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -198,6 +199,21 @@ def start_server(mock_url: str) -> subprocess.Popen:
     say("0", "building the server (first run takes a minute)")
     bin_path = os.environ.get("TRIBUTARY_BIN")
     if not bin_path:
+        # Guard the classic trap: running under WSL/Linux python on the
+        # dev box that only has WINDOWS cargo. The build must happen on
+        # the same side as the server + its loopback, so the fix is the
+        # interpreter, not a fallback — a Linux-built server here would
+        # also be unreachable through the WSL→Windows firewall anyway.
+        if not WINDOWS and shutil.which("cargo") is None:
+            sys.stderr.write(
+                "\nno Linux `cargo` on PATH — this looks like the Windows-toolchain dev box.\n"
+                "Run me with the WINDOWS python instead, from WSL:\n"
+                "  /mnt/c/Python312/python.exe scripts/manual_journey_m4.py --ci\n"
+                "or from PowerShell:\n"
+                "  python scripts\\manual_journey_m4.py --ci\n"
+                "(a Linux python + Linux cargo works the same on real Linux/CI)\n\n"
+            )
+            sys.exit(2)
         build_env = dict(os.environ)
         if WINDOWS:
             # Repo-on-UNC builds fail the incremental-session lock (the

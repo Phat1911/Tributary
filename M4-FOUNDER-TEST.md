@@ -13,10 +13,13 @@ that deviates is a finding, tell the worker session.
 
 ## Level 0 — automated journey script (run this first)
 
-```powershell
-# from the repo root, Windows python (builds the server itself)
-python scripts\manual_journey_m4.py --ci
-```
+**Which python matters.** The server, mocks and loopback must all live on
+one side of the WSL/Windows fence:
+
+- from **WSL** (repo root): `/mnt/c/Python312/python.exe scripts/manual_journey_m4.py --ci`
+- from **PowerShell**: `python scripts\manual_journey_m4.py --ci` (Windows python)
+- plain `python3` in WSL = the miniforge **Linux** python → the script
+  stops with a hint (no Linux cargo on this box); real Linux/CI is fine.
 
 Expect a ✓ tree ending in `DONE — all four journeys + the shape directive
 hold on this build`, exit code 0. Uses Postgres `journey_m4` (needs the
