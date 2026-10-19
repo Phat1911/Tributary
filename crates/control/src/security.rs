@@ -8,10 +8,10 @@
 //! 2. an **audit row** (actor `system`, sanitized detail),
 //! 3. an optional **email alert** (async outbox send, log-fallback).
 //!
-//! The gateway data plane calls this on honey-key use, canary-model hits,
-//! classifier flags/auto-blocks, and impossible travel. Writes are
+//! The gateway data plane calls this on classifier flags/auto-blocks and
+//! impossible travel (canary sensors were removed post-M4, D31). Writes are
 //! best-effort-logged (a failing detection write must not change the
-//! client-visible response — e.g. the honey key's generic 401), but on the
+//! client-visible response), but on the
 //! happy path all rows land before the caller proceeds, so tests can assert
 //! them deterministically.
 
@@ -25,13 +25,6 @@ use crate::notify::{self, SmtpConfig};
 /// Which free-tier sensor fired.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DetectionKind {
-    /// A honey (canary) pool key was presented at the gateway — the key
-    /// listing was scraped and the canary leaked. Strong signal: the caller
-    /// holds key material that was never issued to a person.
-    HoneyKeyUsed,
-    /// A request targeted a canary model alias — the member's model list
-    /// was exfiltrated and replayed.
-    CanaryModel,
     /// The purpose classifier scored a request below the alert threshold
     /// (D28). The member's key stays live unless auto-block is LIVE.
     ClassifierFlag,
@@ -47,8 +40,6 @@ impl DetectionKind {
     /// Wire form stored in `review_flags.kind`.
     pub fn as_str(&self) -> &'static str {
         match self {
-            Self::HoneyKeyUsed => "honey_key_used",
-            Self::CanaryModel => "canary_model",
             Self::ClassifierFlag => "classifier_flag",
             Self::ClassifierAutoBlock => "classifier_auto_block",
             Self::ImpossibleTravel => "impossible_travel",
@@ -58,8 +49,6 @@ impl DetectionKind {
     /// The audit-log action for this sensor.
     fn audit_action(&self) -> &'static str {
         match self {
-            Self::HoneyKeyUsed => "security.honey_key_used",
-            Self::CanaryModel => "security.canary_model_hit",
             Self::ClassifierFlag => "security.classifier_flag",
             Self::ClassifierAutoBlock => "security.classifier_auto_block",
             Self::ImpossibleTravel => "security.impossible_travel",
@@ -69,8 +58,6 @@ impl DetectionKind {
     /// Default severity in the review queue.
     fn default_severity(&self) -> &'static str {
         match self {
-            Self::HoneyKeyUsed => "high",
-            Self::CanaryModel => "high",
             Self::ClassifierFlag => "medium",
             Self::ClassifierAutoBlock => "high",
             Self::ImpossibleTravel => "medium",
@@ -80,8 +67,6 @@ impl DetectionKind {
     /// One-line human label for email subjects/bodies.
     fn label(&self) -> &'static str {
         match self {
-            Self::HoneyKeyUsed => "honey key used (leaked key material)",
-            Self::CanaryModel => "canary model requested (scraped model list)",
             Self::ClassifierFlag => "off-purpose request flagged",
             Self::ClassifierAutoBlock => "off-purpose request auto-blocked (key suspended)",
             Self::ImpossibleTravel => "impossible travel between countries",
@@ -124,7 +109,7 @@ pub struct Detection<'a> {
     pub score_bp: Option<i64>,
     /// Sanitized context JSON for the reviewer.
     pub detail: Value,
-    /// Queue an email alert too? (Honey/canary/auto-block yes; noisy
+    /// Queue an email alert too? (Classifier sensors yes; noisy
     /// low-value sensors can opt out.)
     pub email: bool,
 }
@@ -297,8 +282,6 @@ mod tests {
 
     #[test]
     fn kinds_map_to_stable_wire_forms() {
-        assert_eq!(DetectionKind::HoneyKeyUsed.as_str(), "honey_key_used");
-        assert_eq!(DetectionKind::CanaryModel.as_str(), "canary_model");
         assert_eq!(DetectionKind::ClassifierFlag.as_str(), "classifier_flag");
         assert_eq!(
             DetectionKind::ClassifierAutoBlock.as_str(),
@@ -308,8 +291,6 @@ mod tests {
             DetectionKind::ImpossibleTravel.as_str(),
             "impossible_travel"
         );
-        // Honey keys are the strongest signal — highest default severity.
-        assert_eq!(DetectionKind::HoneyKeyUsed.default_severity(), "high");
         assert_eq!(DetectionKind::ClassifierFlag.default_severity(), "medium");
     }
 
@@ -320,15 +301,15 @@ mod tests {
             pool_id: Some("pool-1"),
             pool_key_id: Some("key-1"),
             user_id: None,
-            kind: DetectionKind::HoneyKeyUsed,
+            kind: DetectionKind::ClassifierFlag,
             severity: None,
-            score_bp: None,
-            detail: json!({ "key_prefix": "sk-pool-abcd…wxyz", "ip": "203.0.113.9" }),
+            score_bp: Some(420),
+            detail: json!({ "key_prefix": "sk-pool-abcd…wxyz", "score": 0.42 }),
             email: false,
         };
         let text = body(&event);
         assert!(text.contains("sk-pool-abcd…wxyz"));
-        assert!(text.contains("honey key used"));
+        assert!(text.contains("off-purpose"));
         assert!(text.contains("review queue"));
         assert!(!text.contains("<") || !text.contains("<html>"));
     }

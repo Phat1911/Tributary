@@ -1024,16 +1024,16 @@ pub async fn pool_key_with_owner(
 }
 
 // ---------------------------------------------------------------------------
-// M4: leak prevention — key governance, canaries, review queue, alerts,
+// M4: leak prevention — key governance, review queue, alerts,
 // classifier config/scores
 // ---------------------------------------------------------------------------
 
 /// A pool-key row as the SHARED listing serves it (SPEC §9 export surface).
 ///
 /// SECURITY INVARIANT (director directive, M4 kickoff): this shape must be
-/// byte-identical for live and canary rows — same five fields, no `kind`
+/// byte-identical across rows — same five fields
 /// marker, no `user_id` (nullable ownership is itself a tell), no
-/// kind-dependent ordering. Ownership and canary identity are visible ONLY
+/// kind-dependent ordering. Ownership is visible ONLY
 /// through the admin management view ([`ManagedPoolKey`]).
 #[derive(Debug, Clone, Serialize)] // serde: this struct → JSON — the uniform export shape
 pub struct SharedPoolKey {
@@ -1044,7 +1044,7 @@ pub struct SharedPoolKey {
     pub created_at: i64,
 }
 
-/// Lists a pool's keys (live AND canary) in the uniform export shape,
+/// Lists a pool's keys in the uniform export shape,
 /// ordered by `created_at` — the same key for both kinds, so the order can
 /// never encode what a row is (canaries are backdated into the pool's
 /// existing history at plant time to interleave naturally).
@@ -1070,14 +1070,12 @@ pub async fn shared_pool_keys_by_pool(db: &Db, pool_id: &str) -> sqlx::Result<Ve
 }
 
 /// A pool-key row as the ADMIN MANAGEMENT view serves it — the only place
-/// canary identity, ownership, expiry, and rotation lineage are exposed.
+/// ownership, expiry, and rotation lineage are exposed.
 #[derive(Debug, Clone, Serialize)] // serde: this struct → JSON — admin management view
 pub struct ManagedPoolKey {
     pub id: String,
     pub pool_id: String,
     pub key_prefix: String,
-    /// 'live' | 'canary' — admin-only field, never on the shared listing.
-    pub kind: String,
     pub user_id: Option<String>,
     pub status: String,
     pub expires_at: Option<i64>,
@@ -1090,7 +1088,7 @@ pub async fn managed_pool_keys_by_pool(
     pool_id: &str,
 ) -> sqlx::Result<Vec<ManagedPoolKey>> {
     let sql = db.sql(
-        "SELECT id, pool_id, key_prefix, kind, user_id, status, expires_at, created_at \
+        "SELECT id, pool_id, key_prefix, user_id, status, expires_at, created_at \
          FROM pool_keys WHERE pool_id = ? ORDER BY created_at, id",
     );
     let rows = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
@@ -1102,7 +1100,6 @@ pub async fn managed_pool_keys_by_pool(
             id: row.get("id"),
             pool_id: row.get("pool_id"),
             key_prefix: row.get("key_prefix"),
-            kind: row.get("kind"),
             user_id: row.get("user_id"),
             status: row.get("status"),
             expires_at: row.get("expires_at"),
@@ -1110,38 +1107,6 @@ pub async fn managed_pool_keys_by_pool(
         })
         .collect();
     Ok(rows)
-}
-
-/// A canary (honey) key to insert: same shape as a live key except
-/// `kind = 'canary'`, no owner, and a backdated `created_at` so the shared
-/// listing interleaves it with real issuance history instead of clustering
-/// every canary at the end (the "ordering tell", director directive).
-#[derive(Debug, Clone)]
-pub struct NewCanaryKey {
-    pub id: String,
-    pub pool_id: String,
-    pub key_hash: String,
-    pub key_prefix: String,
-    pub created_at: i64,
-}
-
-/// Inserts one canary pool key (SPEC §6: owner none, never serves traffic —
-/// the gateway rejects canary-kind keys with the generic 401 after firing
-/// the detection pipeline).
-pub async fn insert_canary_pool_key(db: &Db, key: &NewCanaryKey) -> sqlx::Result<()> {
-    let sql = db.sql(
-        "INSERT INTO pool_keys (id, pool_id, key_hash, key_prefix, kind, status, user_id, created_at) \
-         VALUES (?, ?, ?, ?, 'canary', 'active', NULL, ?)",
-    );
-    sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
-        .bind(&key.id)
-        .bind(&key.pool_id)
-        .bind(&key.key_hash)
-        .bind(&key.key_prefix)
-        .bind(key.created_at)
-        .execute(db.pool())
-        .await?;
-    Ok(())
 }
 
 /// Marks a key ROTATED: reissue replaced it (old row keeps its history).
@@ -1278,76 +1243,6 @@ pub async fn ip_allowlists_for_pool(db: &Db, pool_id: &str) -> sqlx::Result<Vec<
 /// Removes one allowlist row.
 pub async fn delete_ip_allowlist(db: &Db, id: &str) -> sqlx::Result<u64> {
     let sql = db.sql("DELETE FROM ip_allowlists WHERE id = ?");
-    let res = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
-        .bind(id)
-        .execute(db.pool())
-        .await?;
-    Ok(res.rows_affected())
-}
-
-// --- Canary model aliases -----------------------------------------------------
-
-/// A canary model alias row.
-#[derive(Debug, Clone, Serialize)] // serde: this struct → JSON — admin management view row
-pub struct CanaryModelRow {
-    pub id: String,
-    pub pool_id: String,
-    pub alias: String,
-    /// NULL = visible pool-wide in GET /v1/models; a member id scopes the
-    /// alias to that member's listing (detection still trips for anyone).
-    pub user_id: Option<String>,
-    pub created_at: i64,
-}
-
-/// Adds a canary model alias to a pool.
-pub async fn insert_canary_model(
-    db: &Db,
-    id: &str,
-    pool_id: &str,
-    alias: &str,
-    user_id: Option<&str>,
-    created_at: i64,
-) -> sqlx::Result<()> {
-    let sql = db.sql(
-        "INSERT INTO canary_models (id, pool_id, alias, user_id, created_at) \
-         VALUES (?, ?, ?, ?, ?)",
-    );
-    sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
-        .bind(id)
-        .bind(pool_id)
-        .bind(alias)
-        .bind(user_id)
-        .bind(created_at)
-        .execute(db.pool())
-        .await?;
-    Ok(())
-}
-
-/// Lists a pool's canary model aliases (admin management view).
-pub async fn canary_models_by_pool(db: &Db, pool_id: &str) -> sqlx::Result<Vec<CanaryModelRow>> {
-    let sql = db.sql(
-        "SELECT id, pool_id, alias, user_id, created_at FROM canary_models \
-         WHERE pool_id = ? ORDER BY created_at",
-    );
-    let rows = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
-        .bind(pool_id)
-        .fetch_all(db.pool())
-        .await?
-        .into_iter()
-        .map(|row| CanaryModelRow {
-            id: row.get("id"),
-            pool_id: row.get("pool_id"),
-            alias: row.get("alias"),
-            user_id: row.get("user_id"),
-            created_at: row.get("created_at"),
-        })
-        .collect();
-    Ok(rows)
-}
-
-/// Deletes one canary model alias.
-pub async fn delete_canary_model(db: &Db, id: &str) -> sqlx::Result<u64> {
-    let sql = db.sql("DELETE FROM canary_models WHERE id = ?");
     let res = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
         .bind(id)
         .execute(db.pool())

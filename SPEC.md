@@ -193,7 +193,7 @@ excluding provider time; streaming first-byte overhead < 20 ms.
 | `users` | id, email, password_hash(argon2), role (host_admin / org_admin / member), org_id? |
 | `pools` | id, org_id, name, kind (`org` \| `root`), model_allowlist(json), status, currency |
 | `provider_keys` | id, pool_id, provider, base_url, ciphertext, key_prefix(**** last4), weight, health, status |
-| `pool_keys` | id, pool_id, user_id, kind (`live` \| `canary`), key_hash, key_prefix, scopes, limits(json), expires_at, last_used_at, status — canary rows: owner=none, quota 0, alert metadata |
+| `pool_keys` | id, pool_id, user_id, kind (always `live` since D31), key_hash, key_prefix, scopes, limits(json), expires_at, last_used_at, status |
 | `quota_rules` | id, subject (pool_key/user/pool), period (minute/hour/day/month), limit_tokens, limit_requests, limit_cost |
 | `usage_events` | id, ts, pool_id, pool_key_id, user_id, provider_key_id, model, prompt_tokens, completion_tokens, cost_micros, latency_ms, status |
 | `usage_rollups` | period, pool_id, user_id, model → totals (hourly/daily) |
@@ -240,9 +240,9 @@ Price table: `model_prices` (model, provider, in_per_1k, out_per_1k, refreshed).
   scanning in CI.
 - **Threat model (V1):** curious member, leaked DB dump, rogue org admin
   (audit-logged), outsider with a stolen pool key (§9).
-- **Canary tokens:** honey keys + canary model aliases detect scraping/replay;
-  detection (alert) free, response automation (tarpit, auto-revoke,
-  attribution) paid — see §9.
+- **Canary tokens:** REMOVED post-M4 founder testing (D31) — low-yield
+  tripwires; detection now rests on quota caps, impossible travel, and the
+  purpose classifier (§9).
 
 ## 9. Leak prevention (the wedge)
 
@@ -255,14 +255,13 @@ Honest scope: a determined insider can always proxy their own traffic. Goal =
 - IP/CIDR allowlists per key
 - Key expiry & rotation; instant revocation
 - Concurrent-connection limits; impossible-travel IP checks (simple)
-- **Basic canaries:** honey keys planted in platform-generated exports + per-member canary model aliases; email alert on activation; manual revoke
+- **Detection = quota caps (every cap firing writes an audit row) + impossible travel (geo-dormant) + classifier flags.** Honey keys and canary model aliases were REMOVED post-M4 founder testing (2026-10-19, D31): low-yield tripwires
 - **Purpose-alignment signals (BYOK classifier, D28):** org pastes a third-party classifier API key (e.g., Jev) in settings — **no key configured ⇒ feature stays dormant**; the settings page probes the API at save-time (validates key, shows served model — model id lives in org config, never code); **member disclosure banner mandatory** (covert scoring banned); scores feed the admin review queue; classifier key stored under existing envelope encryption; setup guide in docs
 - **Purpose-alignment enforcement modes (D28, free tier):** *Alert* (default) — org-tunable threshold (recommended: flag below **0.5** alignment); admin reviews flags and manually blocks/unblocks/bans. *Auto-block* (explicit opt-in + warning) — recommended conservative threshold **0.15** alignment; **shadow mode first** (1–2 weeks showing "would have blocked N requests from M members" before going live); auto-block **only suspends the member's pool key pending review** (one-click unblock, full audit trail) — **never auto-bans people**; disclosure banner strengthens to "off-purpose requests may be blocked" when active
 
 **Paid tier (M6+):**
 - mTLS client certificates / device binding
-- Behavioral anomaly detection (volume spikes, odd hours, new-ASN bursts) — covers leaks canaries miss
-- **Canary response automation:** tarpit, auto-revoke chains, per-surface attribution reports
+- Behavioral anomaly detection (volume spikes, odd hours, new-ASN bursts) — covers leaks static rules miss
 - Alert integrations (Slack/webhook/PagerDuty), audit export (CSV/JSON)
 - SSO/SAML (SAML-OIDC bridge or vendor lib — build vs. buy at M6)
 
@@ -336,7 +335,7 @@ The chain cannot see off-chain routing; hence staged trust:
 | CI/CD | GitHub Actions: fmt/clippy/test (SQLite+PG via testcontainers)/pnpm build/cargo-deny; tag → multi-arch image → GHCR | Free on public repo |
 | License | **FSL-1.1-ALv2** (SPDX; was informally "FSL-1.1-Apache-2.0" — corrected per AUDIT A-001) | Internal use free; no competing service; → Apache-2.0 in 2y |
 | Payments | **Manual invoices (pilots) → Polar** (~4–5%, VN-verified MoR) | Stripe N/A for VN sellers |
-| Monetization | Open-core: self-host free; paid = mTLS, anomaly, canary response automation, SSO, support | Hosted SaaS deferred |
+| Monetization | Open-core: self-host free; paid = mTLS, anomaly, SSO, support | Hosted SaaS deferred |
 | On-chain (V2) | Anchor on Solana; upgrade authority → Squads multisig → optional freeze | |
 
 **Assumed defaults:** OpenAI-compatible API is table stakes; VPS deploy target
@@ -354,7 +353,7 @@ for any hosted demo (Hetzner-class, student budget); English docs first.
 - [x] **M1** — gateway core: proxy, pool keys, streaming, metering — implemented at 2e9359e `migrations/` `crates/gateway/` `.github/workflows/ci.yml` `scripts/mock_openai.py`, 2026-10-15
 - [x] **M2** — orgs, pools, provider keys (encrypted), quota/rate engine — implemented at cd5f97e (feat chain 8207e38→2fead3d) `migrations/` `crates/{common,crypto,control,gateway}/` `AGENTS.md`, 2026-10-17
 - [x] **M3** — dashboards + audit log — implemented at 9d2ec2f→ba9ca28 `migrations/0006_audit_log_login_throttle.sql` `crates/{control,gateway}/` `apps/dashboard/` `.github/workflows/ci.yml`, 2026-10-17
-- [x] **M4** — leak prevention free tier (+ basic canaries, BYOK purpose classifier + auto-block) — implemented at 8613fab/4b2cea6/287b29d/215fdb4 (migrations/0007 + crates/{common,control,gateway} + apps/dashboard + scripts/manual_journey_m4.py), 2026-10-18
+- [x] **M4** — leak prevention free tier (+ BYOK purpose classifier + auto-block; canaries added then REMOVED by founder-tested decision D31) — implemented at 8613fab/4b2cea6/287b29d/215fdb4 (migrations/0007 + crates/{common,control,gateway} + apps/dashboard + scripts/manual_journey_m4.py), 2026-10-18; amended done-when satisfied at 210d1e8 (migrations/0008 + crates/{control,gateway} + apps/dashboard + scripts/manual_journey_m4.py + m4_journeys.rs j5), 2026-10-19
 - [ ] **M5** — packaging, docs, landing page, hosted demo (D25)
 - [ ] **M6** — pilot orgs (D20) + paid tier
 - [ ] **M7** — `LedgerTrait` + double-entry ledger
@@ -374,9 +373,9 @@ for any hosted demo (Hetzner-class, student budget); English docs first.
 | **M1** | Gateway core: proxy 1 provider (OpenAI), pool keys, streaming passthrough, token counting, `usage_events` | `curl` chat via `sk-pool-…` key; usage row written; both DBs pass |
 | **M2** | Orgs, members, pools, provider keys (encrypted), quota/rate engine, key health | Two pools isolated: one's quota never affects the other |
 | **M3** | Dashboards (host + org admin + member usage), audit log | Org admin creates member + key + budget without CLI |
-| **M4** | Leak prevention free tier: IP allowlist, expiry/rotation, per-user caps, impossible-travel flag, basic canaries (honey keys + aliases + email alert), purpose-alignment BYOK classifier (dormant without org key, member disclosure, Alert + Auto-block modes per D28) | Shared-key demo detected + capped in audit log; purpose-drift flag visible in admin queue when a classifier key is configured |
+| **M4** | Leak prevention free tier: IP allowlist, expiry/rotation, per-user caps (audited on every 429), impossible-travel flag, purpose-alignment BYOK classifier (dormant without org key, member disclosure, Alert + Auto-block modes per D28). Honey keys + canary aliases removed post-testing (D31) | Off-purpose flag visible in admin queue when a classifier key is configured; quota cap demonstrated in audit log |
 | **M5** | Packaging: one-command compose + single-container SQLite image, GHCR releases, docs site, landing page, **OpenAI-SDK contract tests in CI (official Python + JS SDKs — activated here per director ruling 2026-10-15, deferred from M1)** | Stranger deploys in <10 min from README |
-| **M6** | Pilot org onboarded (manual invoice); pricing + paid-tier structure finalized (D27: real delivery cost + pilot WTP + competitor scan; under D29 cost-mirror — binary features default free; tier candidates re-derived: support, costed integrations; mTLS/anomaly/canary automation/SSO only if they carry real cost) | First real org daily-driving it; ≥1 pays |
+| **M6** | Pilot org onboarded (manual invoice); pricing + paid-tier structure finalized (D27: real delivery cost + pilot WTP + competitor scan; under D29 cost-mirror — binary features default free; tier candidates re-derived: support, costed integrations; mTLS/anomaly/SSO only if they carry real cost) | First real org daily-driving it; ≥1 pays |
 
 ### V2 — Root Pool (settlement layer)
 
@@ -431,7 +430,7 @@ for any hosted demo (Hetzner-class, student budget); English docs first.
 |---|---|---|
 | 1 | Name/branding | **Tributary** (D19) — GitHub repo claimed (`Phat1911/Tributary`); still to claim before M5: crates.io crate name, `tributary.dev`/`.ai` |
 | 2 | First pilot orgs | Multi-track (D20): a free-pilot track for M6; the first paying pilot org (manual invoice, private pilot terms); 2–3 more orgs approached after M5 demo instance is live. Founder drafts outreach (AI-assisted) at M5. |
-| 3 | Pricing | **PROVISIONAL (D27)** — pilots via manual invoice; placeholder public tier: Pro self-host license pricing [redacted], includes mTLS + anomaly detection + canary response automation + SSO-later; root-pool operator fee inside the 5–10% band (§11). **Final pricing is decided at M6 implementation time** from actual delivery cost per org + pilot willingness-to-pay + competitor scan; entry tier (entry tier [redacted]) or regional pricing may be considered. |
+| 3 | Pricing | **PROVISIONAL (D27)** — pilots via manual invoice; placeholder public tier: Pro self-host license pricing [redacted], includes mTLS + anomaly detection + SSO-later; root-pool operator fee inside the 5–10% band (§11). **Final pricing is decided at M6 implementation time** from actual delivery cost per org + pilot willingness-to-pay + competitor scan; entry tier (entry tier [redacted]) or regional pricing may be considered. |
 | 4 | Provider priority | D22: OpenAI (M1) → Anthropic → Gemini native adapters; **OpenRouter-as-upstream immediately after** (one OpenAI-dialect adapter → 100+ models); vLLM/Ollama self-host upstreams arrive free via the same dialect. |
 | 5 | Model price table | D23: import script against LiteLLM's community-maintained `model_prices_and_context_window.json` + repo-owned `price_overrides.json` for corrections; refreshed per release; the price used is snapshotted into `usage_events` for auditability. |
 | 6 | Individual renter identity | D24: custodial prepaid only, **hard balance cap $50** initially + manual AML red-flag review; KYC-lite deferred to V2 public-launch legal review; caps raised case-by-case. |
@@ -459,7 +458,7 @@ for any hosted demo (Hetzner-class, student budget); English docs first.
 | D14 | CI/CD | GitHub Actions from M0; GHCR releases from M5 |
 | D15 | Roadmap shape | Milestones per version; no monolith versions |
 | D16 | Spec artifact | This file, SPEC.md |
-| D17 | Canary tiering (post-spec amendment) | Detection free (honey keys, canary aliases, email alert, manual revoke); response automation + anomaly coverage paid |
+| D17 | Canary tiering (post-spec amendment) — **SUPERSEDED by D31** | Detection free (honey keys, canary aliases, email alert, manual revoke); response automation + anomaly coverage paid |
 | D18 | Ledger semantics (post-spec amendment) | Machine-enforced, not name-based: enum account codes + typed columns (account_type/owner_kind/owner_id) + normative chart-of-accounts seed + posting-rule templates; invariants as property tests |
 | D19 | Project name (2026-10-14) | **Tributary** — tagline "Small streams. Pooled power."; collision scan clean (only an unrelated water-tech startup); claim GitHub org / crates.io / domain before M5 |
 | D20 | Pilot orgs (2026-10-14) | Multi-track: a free-pilot org, 1 pilot org (first paying, manual invoice, private pilot terms), 2–3 more orgs after M5 demo live |
@@ -473,3 +472,5 @@ for any hosted demo (Hetzner-class, student budget); English docs first.
 | D28 | Purpose-alignment signals (2026-10-15, founder-directed; amended same day) | **Free tier (M4), BYOK-only:** org supplies third-party classifier API key (e.g., Jev) via settings; no key ⇒ feature dormant; member disclosure banner mandatory; key under envelope encryption; `ClassifierProvider` adapter with churn defenses — raw HTTP version-pinned (no vendor SDKs), save-time key+model probe (model id in org config, never code), fixture contract tests, weekly live smoke job in CI, tolerant parsing, fail-open auxiliary path. **Enforcement modes (free per D29 cost-mirror rule):** Alert (default, threshold rec. 0.5 alignment, manual block/ban/unblock) and Auto-block (opt-in + warning, threshold rec. 0.15, shadow mode 1–2 weeks first, suspends pool key pending review only — never auto-bans; stronger member disclosure when active) |
 | D29 | Paywall mirrors cost (2026-10-15, founder principle) | Gate a feature behind the paid tier ONLY when it carries real per-org cost to us — hosted/managed infra, third-party licenses we must buy, heavy support load. Code shipping in the self-hosted binary defaults to **free** (runs on the org's machine, $0 marginal cost). Existing tier assignments (D17 canary response automation; D21 mTLS/anomaly/SSO) re-derived at M6 alongside D27; SSO stays paid only if we license a vendor component. Durable paid anchors now: support + genuinely costed integrations; **hosted/managed stays deferred** (original trigger: ≥3 pilot orgs asking). Goal: minimize client price — adoption first. until then this rule governs. |
 | D30 | Crypto implementation (2026-10-17, director ruling at M2) | Envelope encryption uses RustCrypto `chacha20poly1305` (XChaCha20Poly1305, pure Rust) instead of libsodium bindings — no C toolchain in CI/Docker/multi-arch cross-compiles (D14), audited, zeroize-first-class. The spec invariant is the algorithm + envelope format + AD binding (table:id), not the library; crypto crate remains the seam (§15). |
+| D31 | Canary removal (2026-10-19, director — founder-tested decision) | Honey keys + canary aliases removed post-M4 founder testing (2026-10-19): low-yield tripwires; rogue-admin handled by audit accountability (§8); raw-key export removed with them, shrinking attack surface. |
+

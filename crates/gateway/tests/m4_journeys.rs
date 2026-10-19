@@ -27,10 +27,8 @@ use axum::http::{Request, StatusCode, header};
 use common::*;
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
-use sqlx::Row; // trait for AnyRow::get in assertion helpers
 use tower::ServiceExt;
 use tributary_gateway::db;
-use tributary_gateway::keys;
 
 /// Fires a control-plane request with a bearer token.
 fn api(method: &str, uri: &str, token: &str, body: Option<&Value>) -> Request<Body> {
@@ -126,7 +124,6 @@ async fn bootstrap_admin_and_login(pool: &db::Db, app: &axum::Router) -> String 
 struct Stack {
     org_id: String,
     pool_id: String,
-    member_id: String,
     member_email: String,
     key_id: String,
     key_raw: String,
@@ -208,7 +205,6 @@ async fn provision_stack(app: &axum::Router, token: &str, mock: &MockUpstream) -
     Stack {
         org_id,
         pool_id,
-        member_id,
         member_email,
         key_id: key["id"].as_str().unwrap().to_string(),
         key_raw: key["raw"].as_str().unwrap().to_string(),
@@ -272,469 +268,6 @@ async fn member_login(app: &axum::Router, email: &str) -> String {
     .await;
     body["token"].as_str().expect("member login").to_string()
 }
-
-/// Counts rows matching one bind in a table (ASSERTION-only helper).
-async fn count_rows(pool: &db::Db, table: &str, column: &str, value: &str) -> i64 {
-    let sql = pool.sql(&format!(
-        "SELECT COUNT(*) AS n FROM {table} WHERE {column} = ?"
-    ));
-    let row = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
-        .bind(value)
-        .fetch_one(pool.pool())
-        .await
-        .expect("count query");
-    row.get::<i64, _>("n")
-}
-
-// ---------------------------------------------------------------------------
-// J1 — leak demo: honey key planted via API, used, detected, capped
-// ---------------------------------------------------------------------------
-
-#[tokio::test]
-async fn j1_honey_key_journey() {
-    for test_db in test_dbs().await {
-        let mock = spawn_mock(MockMode::NonStream).await;
-        let app = test_app(test_db.pool.clone(), &mock).await;
-        let token = bootstrap_admin_and_login(&test_db.pool, &app).await;
-        let stack = provision_stack(&app, &token, &mock).await;
-
-        // -- Plant a honey key through the admin API (raw shown ONCE). -----
-        let (_, planted) = call(
-            &app,
-            api(
-                "POST",
-                &format!("/api/v1/pools/{}/canary-keys", stack.pool_id),
-                &token,
-                Some(&json!({"count": 1})),
-            ),
-        )
-        .await;
-        let honey_raw = planted["keys"][0]["raw"].as_str().unwrap().to_string();
-        let honey_prefix = planted["keys"][0]["key_prefix"]
-            .as_str()
-            .unwrap()
-            .to_string();
-        assert!(!honey_raw.is_empty());
-
-        // -- The shared listing carries it shape-identically (directive). --
-        let (_, listing) = call(
-            &app,
-            api(
-                "GET",
-                &format!("/api/v1/pools/{}/keys", stack.pool_id),
-                &token,
-                None,
-            ),
-        )
-        .await;
-        let rows = listing.as_array().expect("listing array");
-        assert_eq!(rows.len(), 2, "one live + one canary");
-        for row in rows {
-            let mut keys: Vec<&str> = row
-                .as_object()
-                .unwrap()
-                .keys()
-                .map(String::as_str)
-                .collect();
-            keys.sort();
-            assert_eq!(
-                keys,
-                vec!["created_at", "id", "key_prefix", "pool_id", "status"],
-                "shared listing rows are exactly the uniform five fields"
-            );
-        }
-        let listed_canary = rows
-            .iter()
-            .find(|r| r["key_prefix"].as_str() == Some(&honey_prefix))
-            .expect("honey row is present in the shared listing");
-        assert_eq!(listed_canary["status"], "active");
-        // Ordering tell: rows come back in created_at order (canaries are
-        // backdated into that same ordering at plant time).
-        let times: Vec<i64> = rows
-            .iter()
-            .map(|r| r["created_at"].as_i64().unwrap())
-            .collect();
-        let mut sorted = times.clone();
-        sorted.sort();
-        assert_eq!(times, sorted, "listing is ordered by created_at");
-
-        // -- Use the honey key at the gateway: generic 401, byte-identical. -
-        let before_upstream = mock.captured_count();
-        let (honey_status, honey_bytes) = call_raw(
-            &app,
-            chat_req(&honey_raw, Some("203.0.113.9"), &chat_body()),
-        )
-        .await;
-        assert_eq!(honey_status, StatusCode::UNAUTHORIZED);
-        // The control case: a well-formed key that matches NO row.
-        let unknown = keys::generate_key().raw;
-        let (unknown_status, unknown_bytes) =
-            call_raw(&app, chat_req(&unknown, Some("203.0.113.9"), &chat_body())).await;
-        assert_eq!(unknown_status, StatusCode::UNAUTHORIZED);
-        assert_eq!(
-            honey_bytes, unknown_bytes,
-            "honey-key 401 is byte-identical to the unknown-key 401"
-        );
-
-        // -- Capped: it never served traffic (no upstream call, no usage). --
-        assert_eq!(
-            mock.captured_count(),
-            before_upstream,
-            "honey key never reaches upstream"
-        );
-        let usage =
-            db::usage_events_for_key(&test_db.pool, planted["keys"][0]["id"].as_str().unwrap())
-                .await
-                .expect("usage read");
-        assert!(
-            usage.is_empty(),
-            "no usage row is ever written for a canary"
-        );
-
-        // -- Review flag lands in the admin queue with the masked prefix. --
-        let honey_prefix_ref = honey_prefix.clone();
-        wait_for("honey_key_used review flag", || {
-            let app = app.clone();
-            let token = token.clone();
-            let honey_prefix = honey_prefix_ref.clone();
-            async move {
-                let (_, flags) = call(
-                    &app,
-                    api("GET", "/api/v1/review-flags?status=open", &token, None),
-                )
-                .await;
-                flags.as_array().is_some_and(|f| {
-                    f.iter().any(|r| {
-                        r["kind"] == "honey_key_used"
-                            && r["detail_json"]["key_prefix"] == honey_prefix.as_str()
-                    })
-                })
-            }
-        })
-        .await;
-
-        // -- Email alert: outbox row exists (log-fallback path — SMTP is --
-        // unconfigured in tests; the founder's manual journey proves the
-        // SMTP leg).
-        wait_for("honey-key email alert row", || {
-            let pool = test_db.pool.clone();
-            let org = stack.org_id.clone();
-            async move { count_rows(&pool, "email_alerts", "org_id", &org).await > 0 }
-        })
-        .await;
-
-        // -- Audit row via the public audit API. ----------------------------
-        wait_for("security.honey_key_used audit row", || {
-            let app = app.clone();
-            let token = token.clone();
-            async move {
-                let (_, audit) =
-                    call(&app, api("GET", "/api/v1/audit?limit=200", &token, None)).await;
-                audit.as_array().is_some_and(|rows| {
-                    rows.iter()
-                        .any(|r| r["action"] == "security.honey_key_used")
-                })
-            }
-        })
-        .await;
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Directive-1 test: byte-shape indistinguishability of the shared listing
-// ---------------------------------------------------------------------------
-
-#[tokio::test]
-async fn shared_listing_shape_identity_across_kinds() {
-    for test_db in test_dbs().await {
-        let mock = spawn_mock(MockMode::NonStream).await;
-        let app = test_app(test_db.pool.clone(), &mock).await;
-        let token = bootstrap_admin_and_login(&test_db.pool, &app).await;
-        let stack = provision_stack(&app, &token, &mock).await;
-
-        // A second live key + three canaries: a scraper's-eye mix. The
-        // 60 ms gap between the two live keys dominates the canaries'
-        // backdate window [pool.created_at, plant-time], making
-        // "at least one live row after a canary" deterministic enough
-        // (P(all 3 canaries inside the final few ms) ≈ 0).
-        call(
-            &app,
-            api(
-                "POST",
-                &format!("/api/v1/pools/{}/keys", stack.pool_id),
-                &token,
-                Some(&json!({"user_id": stack.member_id})),
-            ),
-        )
-        .await;
-        tokio::time::sleep(std::time::Duration::from_millis(60)).await;
-        call(
-            &app,
-            api(
-                "POST",
-                &format!("/api/v1/pools/{}/keys", stack.pool_id),
-                &token,
-                Some(&json!({"user_id": stack.member_id})),
-            ),
-        )
-        .await;
-        call(
-            &app,
-            api(
-                "POST",
-                &format!("/api/v1/pools/{}/canary-keys", stack.pool_id),
-                &token,
-                Some(&json!({"count": 3})),
-            ),
-        )
-        .await;
-
-        // The admin management view tells US (the test) which ids are canary.
-        let (_, canaries) = call(
-            &app,
-            api(
-                "GET",
-                &format!("/api/v1/pools/{}/canaries", stack.pool_id),
-                &token,
-                None,
-            ),
-        )
-        .await;
-        let canary_ids: Vec<&str> = canaries["keys"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|k| k["id"].as_str().unwrap())
-            .collect();
-        assert_eq!(canary_ids.len(), 3, "management view reveals canaries");
-
-        let (_, listing) = call(
-            &app,
-            api(
-                "GET",
-                &format!("/api/v1/pools/{}/keys", stack.pool_id),
-                &token,
-                None,
-            ),
-        )
-        .await;
-        let rows = listing.as_array().unwrap();
-        assert_eq!(rows.len(), 6, "three live + three canary in one listing");
-
-        // (a) Same field set on every row — no kind marker, no user_id.
-        let mut reference: Option<std::collections::BTreeSet<&str>> = None;
-        for row in rows {
-            let set: std::collections::BTreeSet<&str> = row
-                .as_object()
-                .unwrap()
-                .keys()
-                .map(String::as_str)
-                .collect();
-            assert!(!set.contains("kind") && !set.contains("user_id"));
-            match &reference {
-                None => reference = Some(set),
-                Some(r) => assert_eq!(&set, r, "every row carries the same fields"),
-            }
-        }
-
-        // (b) Same VALUE TYPES across kinds per field (a null-valued field
-        // on one kind only would be a filterable tell).
-        for row in rows {
-            for (field, value) in row.as_object().unwrap() {
-                let expected_str =
-                    matches!(field.as_str(), "id" | "pool_id" | "key_prefix" | "status");
-                if expected_str {
-                    assert!(value.is_string(), "{field} must be a string on every row");
-                } else {
-                    assert!(value.is_i64(), "{field} must be a number on every row");
-                }
-            }
-        }
-
-        // (c) Same ordering key for both kinds (created_at, ascending) —
-        // canaries interleave via backdating rather than clustering.
-        let times: Vec<i64> = rows
-            .iter()
-            .map(|r| r["created_at"].as_i64().unwrap())
-            .collect();
-        let mut sorted_times = times.clone();
-        sorted_times.sort();
-        assert_eq!(times, sorted_times);
-        // And the canaries are not all-at-the-end: at least one live row
-        // comes AFTER a canary row (backdating made them swim).
-        let canary_positions: Vec<usize> = rows
-            .iter()
-            .enumerate()
-            .filter(|(_, r)| canary_ids.contains(&r["id"].as_str().unwrap_or_default()))
-            .map(|(i, _)| i)
-            .collect();
-        let last_canary = *canary_positions.last().unwrap();
-        assert!(
-            last_canary < rows.len() - 1,
-            "canaries must interleave, not cluster at the end of the listing"
-        );
-    }
-}
-
-// ---------------------------------------------------------------------------
-// J2 — canary model alias journey
-// ---------------------------------------------------------------------------
-
-#[tokio::test]
-async fn j2_canary_model_journey() {
-    for test_db in test_dbs().await {
-        let mock = spawn_mock(MockMode::NonStream).await;
-        let app = test_app(test_db.pool.clone(), &mock).await;
-        let token = bootstrap_admin_and_login(&test_db.pool, &app).await;
-        let stack = provision_stack(&app, &token, &mock).await;
-
-        // Plant a per-member canary alias (SPEC §9 "per-member aliases").
-        let alias = format!("gpt-4o-mini-{}", &db::new_id()[..6]);
-        let (_, planted) = call(
-            &app,
-            api(
-                "POST",
-                &format!("/api/v1/pools/{}/canary-models", stack.pool_id),
-                &token,
-                Some(&json!({"alias": alias, "user_id": stack.member_id})),
-            ),
-        )
-        .await;
-        assert_eq!(planted["alias"], alias.as_str());
-
-        // The member's /v1/models lists it — shaped exactly like the reals.
-        let (_, models) = call(&app, api("GET", "/v1/models", &stack.key_raw, None)).await;
-        let listed = models["data"].as_array().unwrap();
-        let entry = listed
-            .iter()
-            .find(|m| m["id"] == alias.as_str())
-            .expect("canary alias appears in the member's models");
-        for real in listed.iter().filter(|m| m["id"] == "m-test") {
-            assert_eq!(
-                entry.as_object().unwrap().keys().len(),
-                real.as_object().unwrap().keys().len()
-            );
-        }
-
-        // Request targets it → denied LOCALLY with the allowlist message.
-        let before = mock.captured_count();
-        let body = json!({"model": alias, "messages": [{"role": "user", "content": "hi"}]});
-        let (status, err) = call(&app, chat_req(&stack.key_raw, None, &body)).await;
-        assert_eq!(status, StatusCode::BAD_REQUEST);
-        assert_eq!(
-            err["error"]["message"],
-            format!("Model '{alias}' is not allowed for this pool."),
-            "canary deny uses the same message as any allowlist reject"
-        );
-        assert_eq!(mock.captured_count(), before, "upstream never sees it");
-
-        // Same denial shape as a genuinely-disallowed model (envelope).
-        let other =
-            json!({"model": "not-a-real-model", "messages": [{"role": "user", "content": "hi"}]});
-        let (other_status, other_err) = call(&app, chat_req(&stack.key_raw, None, &other)).await;
-        assert_eq!(other_status, StatusCode::BAD_REQUEST);
-        assert_eq!(err["error"]["type"], other_err["error"]["type"]);
-        assert_eq!(err["error"]["code"], other_err["error"]["code"]);
-
-        // Detection: flag + audit (email asserted through the outbox).
-        let alias_ref = alias.clone();
-        wait_for("canary_model review flag", || {
-            let app = app.clone();
-            let token = token.clone();
-            let alias = alias_ref.clone();
-            async move {
-                let (_, flags) = call(
-                    &app,
-                    api("GET", "/api/v1/review-flags?status=open", &token, None),
-                )
-                .await;
-                flags.as_array().is_some_and(|f| {
-                    f.iter().any(|r| {
-                        r["kind"] == "canary_model" && r["detail_json"]["model"] == alias.as_str()
-                    })
-                })
-            }
-        })
-        .await;
-
-        // -- AUDIT A-008: probing the listing to filter canaries out is ---
-        // itself detected. First hit reads as exfiltration; hits three
-        // and later in 24 h carry the enumeration pattern explicitly.
-        let (_, first_flags) = call(
-            &app,
-            api("GET", "/api/v1/review-flags?status=open", &token, None),
-        )
-        .await;
-        let first_flag = first_flags
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|r| r["kind"] == "canary_model")
-            .expect("first canary flag present");
-        assert_eq!(first_flag["detail_json"]["enumeration_pattern"], false);
-        // Two more probes (the "clean the listing before export" pass).
-        for _ in 0..2 {
-            let (status, _) = call(&app, chat_req(&stack.key_raw, None, &body)).await;
-            assert_eq!(status, StatusCode::BAD_REQUEST);
-        }
-        wait_for("enumeration-pattern flag (3rd hit)", || {
-            let app = app.clone();
-            let token = token.clone();
-            async move {
-                let (_, flags) = call(
-                    &app,
-                    api(
-                        "GET",
-                        "/api/v1/review-flags?status=open&limit=100",
-                        &token,
-                        None,
-                    ),
-                )
-                .await;
-                flags.as_array().is_some_and(|f| {
-                    f.iter().any(|r| {
-                        r["kind"] == "canary_model"
-                            && r["detail_json"]["enumeration_pattern"] == true
-                            && r["detail_json"]["prior_hits_24h"].as_i64().unwrap_or(0) >= 2
-                            && r["detail_json"]["note"]
-                                .as_str()
-                                .unwrap()
-                                .contains("enumeration")
-                    })
-                })
-            }
-        })
-        .await;
-        // The prober still sees the SAME 400 — the enrichment never
-        // leaks to the person being detected.
-        let (status, _) = call(&app, chat_req(&stack.key_raw, None, &body)).await;
-        assert_eq!(status, StatusCode::BAD_REQUEST);
-
-        wait_for("canary email alert", || {
-            let pool = test_db.pool.clone();
-            let org = stack.org_id.clone();
-            async move { count_rows(&pool, "email_alerts", "org_id", &org).await > 0 }
-        })
-        .await;
-        wait_for("security.canary_model_hit audit row", || {
-            let app = app.clone();
-            let token = token.clone();
-            async move {
-                let (_, audit) =
-                    call(&app, api("GET", "/api/v1/audit?limit=200", &token, None)).await;
-                audit.as_array().is_some_and(|rows| {
-                    rows.iter()
-                        .any(|r| r["action"] == "security.canary_model_hit")
-                })
-            }
-        })
-        .await;
-    }
-}
-
-// ---------------------------------------------------------------------------
-// J3 — classifier journey: alert mode → shadow auto-block → live → unblock
-// ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn j3_classifier_journey() {
@@ -1166,5 +699,61 @@ async fn j4_ip_allowlist_journey() {
         )
         .await;
         assert_eq!(status, StatusCode::OK, "empty allowlist is dormant again");
+    }
+}
+
+/// Amended M4 done-when (D31): "quota cap demonstrated in audit log".
+/// A cap that fires invisibly is indistinguishable from an outage — the
+/// 429 must leave an audit row (no flag, no email: a cap working is house
+/// rules, not a leak signal). Everything below is public-API provisioning.
+#[tokio::test]
+async fn j5_quota_cap_audited() {
+    for test_db in test_dbs().await {
+        let mock = spawn_mock(MockMode::NonStream).await;
+        let app = test_app(test_db.pool.clone(), &mock).await;
+        let token = bootstrap_admin_and_login(&test_db.pool, &app).await;
+        let stack = provision_stack(&app, &token, &mock).await;
+
+        // A day cap tighter than the mock's per-request usage (11+7 tokens).
+        let (status, _) = call(
+            &app,
+            api(
+                "POST",
+                "/api/v1/quota-rules",
+                &token,
+                Some(&json!({
+                    "subject_kind": "pool",
+                    "subject_id": stack.pool_id,
+                    "period": "day",
+                    "limit_tokens": 10
+                })),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+
+        let body = json!({"model": "m-test", "messages": [{"role": "user", "content": "hi"}]});
+        // First request passes the check (0 used), burns 18 tokens.
+        let (status, _) = call(&app, chat_req(&stack.key_raw, None, &body)).await;
+        assert_eq!(status, StatusCode::OK);
+        // Second request: over the cap → 429 BEFORE any upstream call.
+        let before = mock.captured_count();
+        let (status, err) = call(&app, chat_req(&stack.key_raw, None, &body)).await;
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{err}");
+        assert_eq!(mock.captured_count(), before, "denied before upstream");
+
+        // The audit trail shows the cap firing.
+        wait_for("security.quota_denied audit row", || {
+            let app = app.clone();
+            let token = token.clone();
+            async move {
+                let (_, audit) =
+                    call(&app, api("GET", "/api/v1/audit?limit=200", &token, None)).await;
+                audit
+                    .as_array()
+                    .is_some_and(|rows| rows.iter().any(|r| r["action"] == "security.quota_denied"))
+            }
+        })
+        .await;
     }
 }

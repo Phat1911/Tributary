@@ -39,9 +39,8 @@ struct Admission {
     provider_key_id: String,
 }
 
-/// The canary-model local deny: BYTE-IDENTICAL to the plain allowlist
-/// rejection. A scraper probing models cannot distinguish "canary" from
-/// "not allowed here" — both are the same 400 with the same body.
+/// The model-not-allowed reject: one shared 400 for every locally denied
+/// model (allowlist or otherwise).
 fn model_not_allowed(model: &str) -> ApiError {
     ApiError::BadRequest(format!("Model '{model}' is not allowed for this pool."))
 }
@@ -70,56 +69,9 @@ pub async fn chat_completions(
         .unwrap_or("unknown")
         .to_string();
 
-    // --- M4 canary model check (SPEC §9): BEFORE the allowlist logic, ----
-    // so an alias planted inside the allowlist still trips detection. The
-    // response is the SAME local 400 an allowlist reject gets — upstream
-    // never sees the request, and the attacker learns nothing.
+    // Client source IP: used by the IP allowlist, the per-key IP
+    // history, and (when geoip is compiled in) the travel check.
     let client_ip = tributary_common::net::client_ip(&headers);
-    if db::is_canary_model(&state.db, &auth.pool_id, &requested_model)
-        .await
-        .map_err(|e| ApiError::Internal(anyhow::anyhow!("canary model lookup failed: {e}")))?
-    {
-        // Enumeration-pattern enrichment (AUDIT A-008): a member CAN map
-        // the canaries by probing (listed-but-rejected = canary). One hit
-        // is curiosity; a third hit in 24 h says someone is filtering the
-        // listing for export — the flag says so explicitly. Counts prior
-        // hits only (this hit's flag inserts just below), and this query
-        // runs ONLY on the already-denied canary path, never the hot path.
-        const ENUMERATION_WINDOW_MS: i64 = 24 * 60 * 60 * 1000;
-        const ENUMERATION_THRESHOLD: i64 = 2; // third+ hit ⇒ pattern
-        let prior_hits =
-            db::canary_hits_for_key(&state.db, &auth.id, db::now_ms() - ENUMERATION_WINDOW_MS)
-                .await
-                .unwrap_or(0);
-        tributary_control::security::detect(
-            &state.db,
-            state.config.smtp.as_ref(),
-            &tributary_control::security::Detection {
-                org_id: &pool.org_id,
-                pool_id: Some(&auth.pool_id),
-                pool_key_id: Some(&auth.id),
-                user_id: auth.user_id.as_deref(),
-                kind: tributary_control::security::DetectionKind::CanaryModel,
-                severity: None,
-                score_bp: None,
-                detail: json!({
-                    "model": requested_model,
-                    "key_prefix": auth.key_prefix,
-                    "ip": client_ip,
-                    "prior_hits_24h": prior_hits,
-                    "enumeration_pattern": prior_hits >= ENUMERATION_THRESHOLD,
-                    "note": if prior_hits >= ENUMERATION_THRESHOLD {
-                        "canary model alias requested — REPEATED hits: likely listing enumeration to filter canaries"
-                    } else {
-                        "canary model alias requested — model list was exfiltrated"
-                    },
-                }),
-                email: true,
-            },
-        )
-        .await;
-        return Err(model_not_allowed(&requested_model));
-    }
 
     if !pool.allowlist.is_empty() && !pool.allowlist.iter().any(|m| m == &requested_model) {
         // House rule (SPEC §3.1 "model allowlists") — rejected locally,
@@ -182,6 +134,29 @@ pub async fn chat_completions(
         .map_err(|e| ApiError::Internal(anyhow::anyhow!("quota check failed: {e}")))?
     {
         let retry_after_secs = ((reset_at_ms - now) / 1000).max(1);
+        // Amended M4 done-when (D31): a quota cap must be demonstrable in
+        // the audit log — a cap with no trace is indistinguishable from an
+        // outage. Audit row only: a cap firing is house rules working, not
+        // a leak signal, so no review flag and no email.
+        tributary_control::audit::record(
+            &state.db,
+            tributary_control::audit::AuditEntry {
+                org_id: Some(&pool.org_id),
+                actor_id: "system",
+                actor_email: "system@tributary.internal",
+                action: "security.quota_denied",
+                target_kind: tributary_control::audit::TargetKind::PoolKey,
+                target_id: &auth.id,
+                before: None,
+                after: Some(json!({
+                    "key_prefix": auth.key_prefix,
+                    "message": message,
+                    "reset_at_ms": reset_at_ms,
+                })),
+                ip: Some(&client_ip),
+            },
+        )
+        .await;
         return Err(ApiError::TooManyRequests {
             message,
             retry_after_secs,

@@ -178,56 +178,8 @@ pub async fn usage_events_for_key(db: &Db, pool_key_id: &str) -> sqlx::Result<Ve
 }
 
 // ---------------------------------------------------------------------------
-// M4: leak prevention — canary lookups, IP allowlists, per-key IP history
+// M4: leak prevention — IP allowlists, per-key IP history
 // ---------------------------------------------------------------------------
-
-/// True when `alias` is a canary model alias planted on this pool (any
-/// member attribution — detection trips regardless of who asks; a STOLEN
-/// model list is the threat being detected).
-pub async fn is_canary_model(db: &Db, pool_id: &str, alias: &str) -> sqlx::Result<bool> {
-    let sql = db.sql("SELECT id FROM canary_models WHERE pool_id = ? AND alias = ?");
-    let row = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
-        .bind(pool_id)
-        .bind(alias)
-        .fetch_optional(db.pool())
-        .await?;
-    Ok(row.is_some())
-}
-
-/// The canary aliases visible to ONE member in `GET /v1/models`: pool-wide
-/// rows (user_id NULL) plus that member's own scoped aliases.
-pub async fn canary_models_for_member(
-    db: &Db,
-    pool_id: &str,
-    user_id: Option<&str>,
-) -> sqlx::Result<Vec<String>> {
-    let sql = db.sql(
-        "SELECT alias FROM canary_models WHERE pool_id = ? AND (user_id IS NULL OR user_id = ?)",
-    );
-    let rows = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
-        .bind(pool_id)
-        .bind(user_id)
-        .fetch_all(db.pool())
-        .await?;
-    Ok(rows.iter().map(|r| r.get("alias")).collect())
-}
-
-/// How many canary-model hits this key already raised in the window —
-/// the ENUMERATION-pattern signal: one hit can be innocent curiosity,
-/// several in a day is someone probing the listing to filter canaries
-/// out of it (AUDIT A-008). Counted from review_flags, so no new table.
-pub async fn canary_hits_for_key(db: &Db, pool_key_id: &str, since_ms: i64) -> sqlx::Result<i64> {
-    let sql = db.sql(
-        "SELECT COUNT(*) AS n FROM review_flags \
-         WHERE pool_key_id = ? AND kind = 'canary_model' AND created_at >= ?",
-    );
-    let row = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
-        .bind(pool_key_id)
-        .bind(since_ms)
-        .fetch_one(db.pool())
-        .await?;
-    Ok(row.get("n"))
-}
 
 /// The CIDR strings pinned to one key (empty = unrestricted/dormant).
 /// Raw strings suffice — the caller parses once per request for matching.

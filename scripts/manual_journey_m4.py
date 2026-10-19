@@ -305,58 +305,12 @@ def journey(gateway_url: str, token: str, mock_url: str) -> None:
     )
     _, key = api("POST", f"/pools/{pool['id']}/keys", {"user_id": member["id"]}, token)
     raw_key = key["raw"]
-
-    # ---- J1: honey key ----------------------------------------------------
-    say("J1", "plant a honey key, then USE it like a leaker would")
-    _, planted = api("POST", f"/pools/{pool['id']}/canary-keys", {"count": 1}, token)
-    honey = planted["keys"][0]
-    print(f"  honey key (copy it somewhere a scraper would find): {honey['raw']}")
-
     _, member_login = api(
         "POST", "/auth/login", {"email": f"founder-{unique}@example.com", "password": "password123"}
     )
     member_token = member_login["token"]
     _, models = req("GET", f"{GATEWAY}/v1/models", token=raw_key)
     check("member /v1/models works", any(m["id"] == "m-test" for m in models["data"]))
-
-    honey_status, honey_body = chat(honey["raw"], "m-test", "leak test")
-    rand_status, rand_body = chat("sk-pool-" + secrets.token_hex(32), "m-test", "leak test")
-    check("honey key gets 401", honey_status == 401)
-    check(
-        "byte-identical to an unknown key's 401",
-        honey_status == rand_status and honey_body == rand_body,
-    )
-    wait_for(
-        "honey_key_used flag in the review queue",
-        lambda: any(
-            f["kind"] == "honey_key_used"
-            for f in api("GET", "/review-flags?status=open", token=token)[1] or []
-        ),
-    )
-    check("review flag raised", True)
-    print("  📧 an alert email was queued — with SMTP configured it lands in")
-    print("     the org admin's inbox; without it the outbox logs a fallback line.")
-
-    # ---- J2: canary model -------------------------------------------------
-    say("J2", "arm a canary model alias and request it")
-    alias = f"gpt-5-turbo-{unique}"
-    api("POST", f"/pools/{pool['id']}/canary-models", {"alias": alias, "user_id": member["id"]}, token)
-    _, models = req("GET", f"{GATEWAY}/v1/models", token=raw_key)
-    check("alias rides the models listing", any(m["id"] == alias for m in models["data"]))
-    status, err = chat(raw_key, alias, "hello")
-    check("denied locally with 400", status == 400)
-    check(
-        "same message as any allowlist reject",
-        err["error"]["message"] == f"Model '{alias}' is not allowed for this pool.",
-    )
-    wait_for(
-        "canary_model flag",
-        lambda: any(
-            f["kind"] == "canary_model"
-            for f in api("GET", "/review-flags?status=open", token=token)[1] or []
-        ),
-    )
-    check("review flag raised", True)
 
     # ---- J3: classifier ---------------------------------------------------
     say("J3", "configure the purpose classifier (probe runs at save time)")
@@ -469,14 +423,39 @@ def journey(gateway_url: str, token: str, mock_url: str) -> None:
     status, _ = chat(raw_key, "m-test", "any source again", xff="203.0.113.7")
     check("removing the CIDR returns to dormant", status == 200)
 
-    say("DONE", "all four journeys + the shape directive hold on this build")
+    # ---- J5: quota cap audited (amended M4 done-when, D31) ---------------
+    say("J5", "quota cap fires visibly: 429 + an audit row")
+    status, _ = api(
+        "POST",
+        "/quota-rules",
+        {"subject_kind": "pool", "subject_id": pool["id"], "period": "day", "limit_tokens": 10},
+        token,
+    )
+    check("day cap of 10 tokens set on the pool", status == 201)
+    # Rules are cached per subject for 5 s in-process (D9 quota design):
+    # J3/J4 just populated that cache with "no rules" — wait out the TTL
+    # so the new rule is actually consulted.
+    time.sleep(6)
+    chat(raw_key, "m-test", "first request burns 18 tokens")
+    status, err = chat(raw_key, "m-test", "this one is over the cap")
+    check("over-cap request gets 429", status == 429)
+    wait_for(
+        "security.quota_denied row in the audit log",
+        lambda: any(
+            r.get("action") == "security.quota_denied"
+            for r in api("GET", "/audit?limit=200", token=token)[1] or []
+        ),
+    )
+    check("cap firing is demonstrable in the audit log", True)
+
+    say("DONE", "amended M4 journeys hold on this build")
     print("""
 Dashboard pass (do this by hand):
   1. Log in as the org admin → Review queue: the flags you just raised.
-  2. Pool → Canaries tab: the honey key (amber row) + the alias.
-  3. Organization → Purpose classifier: shadow stats, go-live button.
-  4. Log in as founder-{uniq}@example.com / password123 → the
+  2. Organization → Purpose classifier: shadow stats, go-live button.
+  3. Log in as founder-{uniq}@example.com / password123 → the
      disclosure banner on My keys & usage.
+  4. Audit log: the security.quota_denied row from J5.
 """.replace("{uniq}", unique))
 
 
@@ -502,17 +481,21 @@ def main() -> None:
         GATEWAY = GATEWAY_DEFAULT
         email = f"root-{secrets.token_hex(3)}@tributary.dev"
         password = "hunter2hunter2"
-        _create_admin(email, password)
+        # try/finally from HERE (not just around journey()): a failure in
+        # admin bootstrap must not leak the spawned server — a leaked
+        # server holds the journey DB open and breaks the next run's
+        # DROP DATABASE (found the hard way, 2026-10-19).
+        try:
+            _create_admin(email, password)
 
-    _, login = api("POST", "/auth/login", {"email": email, "password": password})
-    token = login["token"]
+            _, login = api("POST", "/auth/login", {"email": email, "password": password})
+            token = login["token"]
 
-    try:
-        journey(GATEWAY, token, mock_url)
-    finally:
-        if proc:
-            proc.terminate()
-            proc.wait(timeout=10)
+            journey(GATEWAY, token, mock_url)
+        finally:
+            if proc:
+                proc.terminate()
+                proc.wait(timeout=10)
     if ci:
         print("CI: classifier smoke OK")
 

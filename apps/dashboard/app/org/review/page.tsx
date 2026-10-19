@@ -1,5 +1,5 @@
-// Review queue (SPEC §9): every detection lands here — honey-key trips,
-// canary-model hits, classifier flags, auto-blocks. The admin's one
+// Review queue (SPEC §9): every detection lands here — classifier flags,
+// auto-blocks, impossible travel. The admin's one
 // decision surface: unblock / revoke / dismiss. Detection is automatic;
 // the RESPONSE stays human (D17).
 "use client";
@@ -27,8 +27,6 @@ import { useApi } from "@/lib/use-api";
 
 /** Human label for a detection kind (wire value → dashboard words). */
 const KIND_LABELS: Record<string, string> = {
-  honey_key_used: "Honey key used",
-  canary_model: "Canary model hit",
   classifier_flag: "Off-purpose request",
   classifier_auto_block: "Auto-block (key suspended)",
   impossible_travel: "Country change",
@@ -61,8 +59,6 @@ function FlagRow({
     country?: string;
     note?: string;
     score?: number;
-    prior_hits_24h?: number;
-    enumeration_pattern?: boolean;
   };
 
   async function resolve(action: "unblock" | "revoke_key" | "dismiss") {
@@ -113,12 +109,6 @@ function FlagRow({
           {detail.model ? <span>model {detail.model}</span> : null}
           {detail.ip ? <span>ip {detail.ip}</span> : null}
           {detail.country ? <span>now in {detail.country}</span> : null}
-          {detail.enumeration_pattern ? (
-            <span className="font-sans font-medium text-amber-600 dark:text-amber-400">
-              ⚠ {detail.prior_hits_24h ?? "?"} canary hits / 24h — listing
-              enumeration pattern
-            </span>
-          ) : null}
         </span>
       </TableCell>
       <TableCell className="text-xs">
@@ -183,7 +173,7 @@ function QueueTable({
       title={status === "open" ? "Queue is clear" : "Nothing resolved yet"}
       hint={
         status === "open"
-          ? "Detections from honey keys, canary models and the classifier land here."
+          ? "Detections from the classifier and travel checks land here."
           : "Resolved flags stay queryable for the trail."
       }
     />

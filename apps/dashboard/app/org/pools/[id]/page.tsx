@@ -8,7 +8,6 @@ import { useState } from "react";
 import { useParams } from "next/navigation";
 import {
   CalendarClock,
-  Fingerprint,
   KeyRound,
   Plus,
   RefreshCw,
@@ -57,12 +56,9 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   api,
   ApiError,
-  type CanaryManagementView,
-  type CanaryModel,
   type IssuedKey,
   type IpAllowlistEntry,
   type ManagedPoolKey,
-  type PlantedCanaryKeys,
   type PublicMember,
   type PublicPool,
   type PublicProviderKey,
@@ -676,176 +672,6 @@ function ExpiryDialog({
   );
 }
 
-/** Plant honey keys: the raw baits are revealed exactly once. */
-function PlantCanariesDialog({
-  poolId,
-  onClose,
-  onPlanted,
-}: {
-  poolId: string;
-  onClose: () => void;
-  onPlanted: () => void;
-}) {
-  const [count, setCount] = useState("3");
-  const [planted, setPlanted] = useState<PlantedCanaryKeys | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  async function plant(e: React.FormEvent) {
-    e.preventDefault();
-    setBusy(true);
-    try {
-      setPlanted(
-        await api.post<PlantedCanaryKeys>(`/pools/${poolId}/canary-keys`, {
-          count: Number(count),
-        }),
-      );
-      onPlanted();
-    } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Planting failed");
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  return (
-    <Dialog open onOpenChange={(next: boolean) => !next && onClose()}>
-      <DialogContent>
-        {planted ? (
-          <div className="space-y-4">
-            <DialogHeader>
-              <DialogTitle className="font-display">
-                {planted.keys.length} honey key
-                {planted.keys.length === 1 ? "" : "s"} planted
-              </DialogTitle>
-              <DialogDescription>
-                Drop these wherever key lists get shared or scraped. Their
-                use anywhere fires an alert and NEVER serves traffic. The
-                raws below appear exactly once.
-              </DialogDescription>
-            </DialogHeader>
-            <div className="space-y-2">
-              {planted.keys.map((key) => (
-                <SecretReveal
-                  key={key.id}
-                  secret={key.raw}
-                  label={`Honey key ${key.key_prefix}`}
-                />
-              ))}
-            </div>
-          </div>
-        ) : (
-          <>
-            <DialogHeader>
-              <DialogTitle className="font-display">
-                Plant honey keys
-              </DialogTitle>
-              <DialogDescription>
-                Decoy keys that ride the shared listing shape-identically
-                (backdated into the pool&rsquo;s issuance history).
-              </DialogDescription>
-            </DialogHeader>
-            <form onSubmit={plant} className="space-y-4">
-              <div className="space-y-2">
-                <Label htmlFor="canary-count">How many (1–10)</Label>
-                <Input
-                  id="canary-count"
-                  type="number"
-                  min={1}
-                  max={10}
-                  value={count}
-                  onChange={(e) => setCount(e.target.value)}
-                  required
-                />
-              </div>
-              {error ? (
-                <p className="text-sm text-destructive">{error}</p>
-              ) : null}
-              <DialogFooter>
-                <Button variant="outline" onClick={onClose}>
-                  Cancel
-                </Button>
-                <Button type="submit" disabled={busy}>
-                  {busy ? "Planting…" : "Plant"}
-                </Button>
-              </DialogFooter>
-            </form>
-          </>
-        )}
-      </DialogContent>
-    </Dialog>
-  );
-}
-
-/** Add-canary-alias form row (inline, not a dialog). */
-function AddCanaryModelForm({
-  poolId,
-  members,
-  onAdded,
-}: {
-  poolId: string;
-  members: PublicMember[];
-  onAdded: () => void;
-}) {
-  const [alias, setAlias] = useState("");
-  const [scope, setScope] = useState("pool");
-  const [busy, setBusy] = useState(false);
-
-  async function submit(e: React.FormEvent) {
-    e.preventDefault();
-    setBusy(true);
-    try {
-      await api.post(`/pools/${poolId}/canary-models`, {
-        alias,
-        user_id: scope === "pool" ? null : scope,
-      });
-      toast.success(`Canary alias ${alias} armed`);
-      setAlias("");
-      onAdded();
-    } catch (err) {
-      toast.error(err instanceof ApiError ? err.message : "Failed to add");
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  return (
-    <form onSubmit={submit} className="flex items-end gap-2">
-      <div className="flex-1 space-y-1">
-        <Label htmlFor="canary-alias">Alias</Label>
-        <Input
-          id="canary-alias"
-          value={alias}
-          onChange={(e) => setAlias(e.target.value)}
-          placeholder="gpt-4o-preview-canary"
-          className="font-mono text-xs"
-          required
-        />
-      </div>
-      <div className="space-y-1">
-        <Label htmlFor="canary-scope">Visible to</Label>
-        <Select value={scope} onValueChange={setScope}>
-          <SelectTrigger id="canary-scope" className="w-44">
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="pool">Everyone in pool</SelectItem>
-            {members.map((member) => (
-              <SelectItem key={member.id} value={member.id}>
-                {member.email}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-      </div>
-      <Button type="submit" disabled={busy}>
-        <Plus className="size-4" aria-hidden />
-        Arm
-      </Button>
-    </form>
-  );
-}
-
 export default function PoolDetailPage() {
   const params = useParams<{ id: string }>();
   const poolId = params.id;
@@ -858,13 +684,9 @@ export default function PoolDetailPage() {
   // M4: the keys tab reads the MANAGEMENT view (kind/owner/expiry live
   // here, and here ONLY — the shared listing is shape-uniform by design).
   const keys = useApi<ManagedPoolKey[]>(`/pools/${poolId}/keys/manage`);
-  const canaries = useApi<CanaryManagementView>(
-    `/pools/${poolId}/canaries`,
-  );
   const [allowlistKey, setAllowlistKey] = useState<ManagedPoolKey | null>(null);
   const [rotateKey, setRotateKey] = useState<ManagedPoolKey | null>(null);
   const [expiryKey, setExpiryKey] = useState<ManagedPoolKey | null>(null);
-  const [planting, setPlanting] = useState(false);
   const providerKeys = useApi<PublicProviderKey[]>(
     `/pools/${poolId}/provider-keys`,
   );
@@ -899,7 +721,6 @@ export default function PoolDetailPage() {
       <Tabs defaultValue="keys">
         <TabsList>
           <TabsTrigger value="keys">Keys</TabsTrigger>
-          <TabsTrigger value="canaries">Canaries</TabsTrigger>
           <TabsTrigger value="provider">Provider keys</TabsTrigger>
           <TabsTrigger value="budgets">Budgets</TabsTrigger>
           <TabsTrigger value="usage">Usage</TabsTrigger>
@@ -937,17 +758,8 @@ export default function PoolDetailPage() {
               </TableHeader>
               <TableBody>
                 {(keys.data ?? []).map((key) => (
-                  <TableRow key={key.id} className={key.kind === "canary" ? "bg-amber-500/5" : undefined}>
-                    <TableCell>
-                      {key.kind === "canary" ? (
-                        <span className="inline-flex items-center gap-1.5 text-amber-600 dark:text-amber-400">
-                          <Fingerprint className="size-3" aria-hidden />
-                          honey (no owner)
-                        </span>
-                      ) : (
-                        memberName(key.user_id)
-                      )}
-                    </TableCell>
+                  <TableRow key={key.id}>
+                    <TableCell>{memberName(key.user_id)}</TableCell>
                     <TableCell className="font-mono text-xs">
                       <span className="inline-flex items-center gap-1.5">
                         <KeyRound className="size-3 text-muted-foreground" aria-hidden />
@@ -981,37 +793,33 @@ export default function PoolDetailPage() {
                     <TableCell>
                       {key.status === "active" || key.status === "suspended" ? (
                         <div className="flex gap-1">
-                          {key.kind === "live" ? (
-                            <>
-                              <Button
-                                variant="ghost"
-                                size="icon"
-                                aria-label="Rotate key"
-                                title="Rotate"
-                                onClick={() => setRotateKey(key)}
-                              >
-                                <RotateCcw className="size-4" />
-                              </Button>
-                              <Button
-                                variant="ghost"
-                                size="icon"
-                                aria-label="Set expiry"
-                                title="Expiry"
-                                onClick={() => setExpiryKey(key)}
-                              >
-                                <CalendarClock className="size-4" />
-                              </Button>
-                              <Button
-                                variant="ghost"
-                                size="icon"
-                                aria-label="IP allowlist"
-                                title="IP allowlist"
-                                onClick={() => setAllowlistKey(key)}
-                              >
-                                <ShieldCheck className="size-4" />
-                              </Button>
-                            </>
-                          ) : null}
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            aria-label="Rotate key"
+                            title="Rotate"
+                            onClick={() => setRotateKey(key)}
+                          >
+                            <RotateCcw className="size-4" />
+                          </Button>
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            aria-label="Set expiry"
+                            title="Expiry"
+                            onClick={() => setExpiryKey(key)}
+                          >
+                            <CalendarClock className="size-4" />
+                          </Button>
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            aria-label="IP allowlist"
+                            title="IP allowlist"
+                            onClick={() => setAllowlistKey(key)}
+                          >
+                            <ShieldCheck className="size-4" />
+                          </Button>
                           <Button
                             variant="ghost"
                             size="icon"
@@ -1057,169 +865,6 @@ export default function PoolDetailPage() {
               onSaved={keys.reload}
             />
           ) : null}
-        </TabsContent>
-
-        {/* ---- Canaries (honey keys + model aliases) ---- */}
-        <TabsContent value="canaries" className="space-y-6">
-          <Card>
-            <CardHeader>
-              <CardTitle className="flex items-center gap-2 font-display text-base">
-                <Fingerprint className="size-4 text-amber-600 dark:text-amber-400" aria-hidden />
-                Honey keys
-              </CardTitle>
-            </CardHeader>
-            <CardContent className="space-y-4">
-              <p className="text-sm text-muted-foreground">
-                Decoy keys shaped exactly like real ones in every listing.
-                Anyone using one anywhere trips an instant alert — and they
-                never serve a single request. This admin view is the only
-                place that can tell them apart.
-              </p>
-              <div className="flex justify-end">
-                <Button variant="outline" onClick={() => setPlanting(true)}>
-                  <Plus className="size-4" aria-hidden />
-                  Plant honey keys
-                </Button>
-              </div>
-              {(canaries.data?.keys ?? []).length === 0 ? (
-                <EmptyState
-                  title="No honey keys planted"
-                  hint="Plant a few and leak one on purpose — the alert proves the tripwire."
-                />
-              ) : (
-                <Table>
-                  <TableHeader>
-                    <TableRow>
-                      <TableHead>Key</TableHead>
-                      <TableHead>Status</TableHead>
-                      <TableHead>Backdated to</TableHead>
-                      <TableHead className="w-12" aria-label="Actions" />
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {(canaries.data?.keys ?? []).map((key) => (
-                      <TableRow key={key.id}>
-                        <TableCell className="font-mono text-xs">
-                          <span className="inline-flex items-center gap-1.5">
-                            <KeyRound className="size-3 text-muted-foreground" aria-hidden />
-                            {key.key_prefix}
-                          </span>
-                        </TableCell>
-                        <TableCell>
-                          <Badge
-                            variant={key.status === "active" ? "default" : "secondary"}
-                          >
-                            {key.status}
-                          </Badge>
-                        </TableCell>
-                        <TableCell>{formatDateTime(key.created_at)}</TableCell>
-                        <TableCell>
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            aria-label="Revoke honey key"
-                            onClick={() =>
-                              run(
-                                () => api.del(`/pools/${poolId}/keys/${key.id}`),
-                                `Honey key ${key.key_prefix} revoked`,
-                                () => {
-                                  keys.reload();
-                                  canaries.reload();
-                                },
-                              )
-                            }
-                          >
-                            <Trash2 className="size-4 text-destructive" />
-                          </Button>
-                        </TableCell>
-                      </TableRow>
-                    ))}
-                  </TableBody>
-                </Table>
-              )}
-              {planting ? (
-                <PlantCanariesDialog
-                  poolId={poolId}
-                  onClose={() => setPlanting(false)}
-                  onPlanted={() => {
-                    keys.reload();
-                    canaries.reload();
-                  }}
-                />
-              ) : null}
-            </CardContent>
-          </Card>
-          <Card>
-            <CardHeader>
-              <CardTitle className="font-display text-base">
-                Canary model aliases
-              </CardTitle>
-            </CardHeader>
-            <CardContent className="space-y-4">
-              <p className="text-sm text-muted-foreground">
-                Fake model names that ride the member&rsquo;s /v1/models
-                listing. Requesting one is denied locally with the same
-                message as any disallowed model — and fires an alert: the
-                model list was exfiltrated.
-              </p>
-              <AddCanaryModelForm
-                poolId={poolId}
-                members={members.data ?? []}
-                onAdded={canaries.reload}
-              />
-              {(canaries.data?.models ?? []).length === 0 ? (
-                <EmptyState
-                  title="No canary aliases"
-                  hint="Arm one that looks like a tempting unreleased model."
-                />
-              ) : (
-                <Table>
-                  <TableHeader>
-                    <TableRow>
-                      <TableHead>Alias</TableHead>
-                      <TableHead>Visible to</TableHead>
-                      <TableHead>Armed</TableHead>
-                      <TableHead className="w-12" aria-label="Actions" />
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {(canaries.data?.models ?? []).map((model: CanaryModel) => (
-                      <TableRow key={model.id}>
-                        <TableCell className="font-mono text-xs">
-                          {model.alias}
-                        </TableCell>
-                        <TableCell className="text-xs">
-                          {model.user_id
-                            ? memberName(model.user_id)
-                            : "Everyone in pool"}
-                        </TableCell>
-                        <TableCell>{formatDateTime(model.created_at)}</TableCell>
-                        <TableCell>
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            aria-label="Remove alias"
-                            onClick={() =>
-                              run(
-                                () =>
-                                  api.del(
-                                    `/pools/${poolId}/canary-models/${model.id}`,
-                                  ),
-                                `Alias ${model.alias} removed`,
-                                canaries.reload,
-                              )
-                            }
-                          >
-                            <Trash2 className="size-4 text-destructive" />
-                          </Button>
-                        </TableCell>
-                      </TableRow>
-                    ))}
-                  </TableBody>
-                </Table>
-              )}
-            </CardContent>
-          </Card>
         </TabsContent>
 
         {/* ---- Provider keys ---- */}

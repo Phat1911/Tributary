@@ -175,12 +175,11 @@ export interface AuditRow {
 
 // ---- M4: leak prevention (SPEC §9) ----
 
-/** Admin management view of a pool key — the ONLY surface carrying kind. */
+/** Admin management view of a pool key — the only surface carrying owner. */
 export interface ManagedPoolKey {
   id: string;
   pool_id: string;
   key_prefix: string;
-  kind: "live" | "canary";
   user_id: string | null;
   status: string; // active | revoked | suspended | rotated
   expires_at: number | null;
@@ -192,23 +191,6 @@ export interface RotatedKey {
   id: string;
   raw: string;
   key_prefix: string;
-}
-
-export interface PlantedCanaryKeys {
-  keys: { id: string; raw: string; key_prefix: string; listed_at: number }[];
-}
-
-export interface CanaryModel {
-  id: string;
-  pool_id: string;
-  alias: string;
-  user_id: string | null;
-  created_at: number;
-}
-
-export interface CanaryManagementView {
-  keys: ManagedPoolKey[];
-  models: CanaryModel[];
 }
 
 export interface IpAllowlistEntry {
@@ -225,7 +207,7 @@ export interface ReviewFlag {
   pool_id: string | null;
   pool_key_id: string | null;
   user_id: string | null;
-  kind: string; // honey_key_used | canary_model | classifier_flag | classifier_auto_block | impossible_travel
+  kind: string; // classifier_flag | classifier_auto_block | impossible_travel
   severity: string;
   score_bp: number | null;
   detail_json: Record<string, unknown>;

@@ -10,7 +10,7 @@
 //! single gateway binary (SPEC §13 "modular monolith").
 //!
 //! M4 adds the leak-prevention surfaces (SPEC §9): key governance
-//! (rotation, expiry, IP allowlists), canary management, the admin review
+//! (rotation, expiry, IP allowlists), the admin review
 //! queue, email alerts (outbox + async SMTP/log-fallback), the detection
 //! pipeline shared with the gateway, and the BYOK classifier config (D28).
 
@@ -126,19 +126,6 @@ pub fn router(state: ControlState) -> Router {
         .route(
             "/api/v1/pools/{id}/keys/{key_id}/allowlists/{entry_id}",
             axum::routing::delete(api::remove_key_allowlist),
-        )
-        .route(
-            "/api/v1/pools/{id}/canary-keys",
-            post(api::plant_canary_keys),
-        )
-        .route("/api/v1/pools/{id}/canaries", get(api::list_canaries))
-        .route(
-            "/api/v1/pools/{id}/canary-models",
-            post(api::add_canary_model),
-        )
-        .route(
-            "/api/v1/pools/{id}/canary-models/{model_id}",
-            axum::routing::delete(api::remove_canary_model),
         )
         .route(
             "/api/v1/pools/{id}/provider-keys",

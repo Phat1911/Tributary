@@ -800,9 +800,9 @@ pub async fn issue_pool_key(
 }
 
 /// Lists a pool's keys in the SHARED export shape (M4): every row — live
-/// AND canary — rendered with the same five fields and no ownership or kind
+/// — rendered with the same five fields and no ownership
 /// marker, ordered by `created_at` (canaries are backdated at plant time so
-/// they interleave with issuance history). Ownership and canary identity
+/// they interleave with issuance history). Ownership
 /// are served only by [`manage_pool_keys`]. Director directive, M4
 /// kickoff: an insider scraping this payload must not be able to filter
 /// out the canaries.
@@ -1312,8 +1312,7 @@ async fn load_scoped_key(
 }
 
 /// GET /api/v1/pools/{id}/keys/manage — the admin management view: kind,
-/// owner, expiry, status. The ONLY surface (with the canary view) where
-/// canary identity is visible; the dashboard consumes this, not the
+/// owner, expiry, status. The dashboard consumes this, not the
 /// shared export listing.
 pub async fn manage_pool_keys(
     State(state): State<ControlState>,
@@ -1351,11 +1350,6 @@ pub async fn rotate_pool_key(
     Path((pool_id, key_id)): Path<(String, String)>,
 ) -> ApiResult<(StatusCode, Json<RotatedKeyResponse>)> {
     let (pool, old) = load_scoped_key(&state, &admin, &pool_id, &key_id).await?;
-    if old.kind != "live" {
-        return Err(ControlError::Conflict(
-            "canary keys are not rotatable — revoke and replant instead".into(),
-        ));
-    }
     if old.status != "active" && old.status != "suspended" {
         return Err(ControlError::Conflict(format!(
             "key is {} — only active or suspended keys rotate",
@@ -1482,11 +1476,6 @@ pub async fn add_key_allowlist(
     Json(body): Json<AddAllowlistRequest>,
 ) -> ApiResult<(StatusCode, Json<db::IpAllowlistRow>)> {
     let (pool, key) = load_scoped_key(&state, &admin, &pool_id, &key_id).await?;
-    if key.kind != "live" {
-        return Err(ControlError::Conflict(
-            "canary keys never serve traffic — allowlists do not apply".into(),
-        ));
-    }
     // Parse-validate BEFORE storing: garbage CIDRs would silently become
     // deny-everything rows at the gateway (fail-closed matching).
     if tributary_common::net::Cidr::parse(&body.cidr).is_none() {
@@ -1595,263 +1584,6 @@ pub async fn remove_key_allowlist(
 }
 
 // ---------------------------------------------------------------------------
-// M4: canaries — honey keys + canary model aliases (admin management)
-// ---------------------------------------------------------------------------
-
-/// POST /api/v1/pools/{id}/canary-keys body.
-#[derive(Deserialize)]
-pub struct PlantCanaryKeysRequest {
-    /// How many honey keys to plant (1–10 per call).
-    pub count: Option<i64>,
-}
-
-/// Response: the raw honey keys, revealed exactly ONCE (plant them
-/// wherever listings/exports get scraped from — that surface is the bait).
-#[derive(Serialize)]
-pub struct PlantedCanaryKeysResponse {
-    pub keys: Vec<PlantedCanaryKey>,
-}
-
-/// One planted honey key with its backdated listing position.
-#[derive(Serialize)]
-pub struct PlantedCanaryKey {
-    pub id: String,
-    pub pool_id: String,
-    pub raw: String,
-    pub key_prefix: String,
-    /// The backdated epoch-ms the shared listing will show — planting
-    /// interleaves canaries into the pool's real issuance history instead
-    /// of clustering them at the end (the "ordering tell" the director
-    /// directive bans).
-    pub listed_at: i64,
-}
-
-/// Plants honey keys: real pool-key rows (kind 'canary', no owner) whose
-/// use at the gateway fires the detection pipeline and dies with the
-/// generic 401. Created_at is backdated uniformly into [pool creation,
-/// now] — a uniform-random position is statistically indistinguishable
-/// from real issuance timing at the listing level.
-pub async fn plant_canary_keys(
-    State(state): State<ControlState>,
-    admin: AuthedAdmin,
-    headers: axum::http::HeaderMap,
-    Path(pool_id): Path<String>,
-    Json(body): Json<PlantCanaryKeysRequest>,
-) -> ApiResult<(StatusCode, Json<PlantedCanaryKeysResponse>)> {
-    use rand::Rng;
-    let pool = load_scoped_pool(&state, &admin, &pool_id).await?;
-    let count = body.count.unwrap_or(1).clamp(1, 10);
-    let now = now_ms();
-    let mut planted = Vec::new();
-    for _ in 0..count {
-        let generated = generate_key();
-        let id = new_id();
-        // Backdate: uniform in [pool.created_at, now] — the same range real
-        // issuance timestamps live in.
-        let listed_at = if now > pool.created_at {
-            rand::rng().random_range(pool.created_at..=now)
-        } else {
-            pool.created_at
-        };
-        db::insert_canary_pool_key(
-            &state.db,
-            &db::NewCanaryKey {
-                id: id.clone(),
-                pool_id: pool.id.clone(),
-                key_hash: generated.key_hash,
-                key_prefix: generated.key_prefix.clone(),
-                created_at: listed_at,
-            },
-        )
-        .await
-        .map_err(|e| ControlError::Internal(e.into()))?;
-        planted.push(PlantedCanaryKey {
-            id,
-            pool_id: pool.id.clone(),
-            raw: generated.raw,
-            key_prefix: generated.key_prefix,
-            listed_at,
-        });
-    }
-    let ip = client_ip(&headers);
-    audit::record(
-        &state.db,
-        AuditEntry {
-            org_id: Some(&pool.org_id),
-            actor_id: &admin.user_id,
-            actor_email: &admin.email,
-            action: "canary_keys.planted",
-            target_kind: TargetKind::Pool,
-            target_id: &pool.id,
-            before: None,
-            // Count + masked prefixes only — raw keys live in the HTTP
-            // response exactly once, never in the audit trail.
-            after: Some(serde_json::json!({
-                "count": planted.len(),
-                "key_prefixes": planted.iter().map(|k| &k.key_prefix).collect::<Vec<_>>(),
-            })),
-            ip: Some(&ip),
-        },
-    )
-    .await;
-    Ok((
-        StatusCode::CREATED,
-        Json(PlantedCanaryKeysResponse { keys: planted }),
-    ))
-}
-
-/// GET /api/v1/pools/{id}/canaries — the canary MANAGEMENT view: honey-key
-/// rows (identity + masked prefix) and model aliases with attribution.
-/// This is the only place canary identity is exposed (director directive).
-pub async fn list_canaries(
-    State(state): State<ControlState>,
-    admin: AuthedAdmin,
-    Path(pool_id): Path<String>,
-) -> ApiResult<Json<CanaryManagementView>> {
-    let pool = load_scoped_pool(&state, &admin, &pool_id).await?;
-    let keys = db::managed_pool_keys_by_pool(&state.db, &pool.id)
-        .await
-        .map_err(|e| ControlError::Internal(e.into()))?
-        .into_iter()
-        .filter(|k| k.kind == "canary")
-        .collect::<Vec<_>>();
-    let models = db::canary_models_by_pool(&state.db, &pool.id)
-        .await
-        .map_err(|e| ControlError::Internal(e.into()))?;
-    Ok(Json(CanaryManagementView { keys, models }))
-}
-
-/// The canary management view payload.
-#[derive(Serialize)]
-pub struct CanaryManagementView {
-    pub keys: Vec<db::ManagedPoolKey>,
-    pub models: Vec<db::CanaryModelRow>,
-}
-
-/// POST /api/v1/pools/{id}/canary-models body.
-#[derive(Deserialize)]
-pub struct AddCanaryModelRequest {
-    pub alias: String,
-    /// Optional member id: the alias appears only in THAT member's
-    /// /v1/models listing (per-member canary, SPEC §9). Detection trips
-    /// for ANY requester — the stolen list is the threat.
-    pub user_id: Option<String>,
-}
-
-/// Adds a canary model alias. It surfaces in GET /v1/models exactly like a
-/// real model; any chat request targeting it is denied locally and fires
-/// the detection pipeline.
-pub async fn add_canary_model(
-    State(state): State<ControlState>,
-    admin: AuthedAdmin,
-    headers: axum::http::HeaderMap,
-    Path(pool_id): Path<String>,
-    Json(body): Json<AddCanaryModelRequest>,
-) -> ApiResult<(StatusCode, Json<db::CanaryModelRow>)> {
-    let pool = load_scoped_pool(&state, &admin, &pool_id).await?;
-    let alias = body.alias.trim();
-    if alias.is_empty() || alias.len() > 200 {
-        return Err(ControlError::BadRequest(
-            "alias must be 1-200 characters".into(),
-        ));
-    }
-    // Model-like charset: letters, digits, dot, dash, underscore, colon —
-    // anything else would look off in a models listing (the bait must swim).
-    if !alias
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | ':'))
-    {
-        return Err(ControlError::BadRequest(
-            "alias may contain only alphanumerics, dot, dash, underscore, colon".into(),
-        ));
-    }
-    if let Some(member_id) = &body.user_id {
-        let member = db::user_by_id(&state.db, member_id)
-            .await
-            .map_err(|e| ControlError::Internal(e.into()))?
-            .ok_or(ControlError::NotFound)?;
-        if member.org_id.as_deref() != Some(pool.org_id.as_str()) {
-            return Err(ControlError::BadRequest(
-                "member does not belong to the pool's org".into(),
-            ));
-        }
-    }
-    let id = new_id();
-    db::insert_canary_model(
-        &state.db,
-        &id,
-        &pool.id,
-        alias,
-        body.user_id.as_deref(),
-        now_ms(),
-    )
-    .await
-    .map_err(|e| ControlError::Conflict(format!("alias already planted: {e}")))?;
-    let ip = client_ip(&headers);
-    audit::record(
-        &state.db,
-        AuditEntry {
-            org_id: Some(&pool.org_id),
-            actor_id: &admin.user_id,
-            actor_email: &admin.email,
-            action: "canary_model.created",
-            target_kind: TargetKind::Pool,
-            target_id: &pool.id,
-            before: None,
-            after: Some(serde_json::json!({ "alias": alias, "user_id": body.user_id })),
-            ip: Some(&ip),
-        },
-    )
-    .await;
-    let row = db::canary_models_by_pool(&state.db, &pool.id)
-        .await
-        .map_err(|e| ControlError::Internal(e.into()))?
-        .into_iter()
-        .find(|m| m.id == id)
-        .ok_or(ControlError::Internal(anyhow::anyhow!(
-            "canary row vanished"
-        )))?;
-    Ok((StatusCode::CREATED, Json(row)))
-}
-
-/// Removes one canary model alias.
-pub async fn remove_canary_model(
-    State(state): State<ControlState>,
-    admin: AuthedAdmin,
-    headers: axum::http::HeaderMap,
-    Path((pool_id, model_id)): Path<(String, String)>,
-) -> ApiResult<StatusCode> {
-    let pool = load_scoped_pool(&state, &admin, &pool_id).await?;
-    let models = db::canary_models_by_pool(&state.db, &pool.id)
-        .await
-        .map_err(|e| ControlError::Internal(e.into()))?;
-    let model = models
-        .iter()
-        .find(|m| m.id == model_id)
-        .ok_or(ControlError::NotFound)?;
-    let removed = model.clone();
-    db::delete_canary_model(&state.db, &model.id)
-        .await
-        .map_err(|e| ControlError::Internal(e.into()))?;
-    let ip = client_ip(&headers);
-    audit::record(
-        &state.db,
-        AuditEntry {
-            org_id: Some(&pool.org_id),
-            actor_id: &admin.user_id,
-            actor_email: &admin.email,
-            action: "canary_model.removed",
-            target_kind: TargetKind::Pool,
-            target_id: &pool.id,
-            before: Some(serde_json::json!({ "alias": removed.alias })),
-            after: None,
-            ip: Some(&ip),
-        },
-    )
-    .await;
-    Ok(StatusCode::NO_CONTENT)
-}
-
 // ---------------------------------------------------------------------------
 // M4: review queue (admin) — the free-tier response surface
 // ---------------------------------------------------------------------------
