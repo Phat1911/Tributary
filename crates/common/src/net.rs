@@ -36,7 +36,7 @@ pub fn client_ip(headers: &HeaderMap) -> String {
 /// host.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Cidr {
-    network: IpAddr, 
+    network: IpAddr,
     prefix_len: u8,
 }
 
