@@ -212,6 +212,23 @@ pub async fn canary_models_for_member(
     Ok(rows.iter().map(|r| r.get("alias")).collect())
 }
 
+/// How many canary-model hits this key already raised in the window —
+/// the ENUMERATION-pattern signal: one hit can be innocent curiosity,
+/// several in a day is someone probing the listing to filter canaries
+/// out of it (AUDIT A-008). Counted from review_flags, so no new table.
+pub async fn canary_hits_for_key(db: &Db, pool_key_id: &str, since_ms: i64) -> sqlx::Result<i64> {
+    let sql = db.sql(
+        "SELECT COUNT(*) AS n FROM review_flags \
+         WHERE pool_key_id = ? AND kind = 'canary_model' AND created_at >= ?",
+    );
+    let row = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
+        .bind(pool_key_id)
+        .bind(since_ms)
+        .fetch_one(db.pool())
+        .await?;
+    Ok(row.get("n"))
+}
+
 /// The CIDR strings pinned to one key (empty = unrestricted/dormant).
 /// Raw strings suffice — the caller parses once per request for matching.
 pub async fn ip_allowlist_cidrs(db: &Db, pool_key_id: &str) -> sqlx::Result<Vec<String>> {

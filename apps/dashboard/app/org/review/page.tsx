@@ -61,6 +61,8 @@ function FlagRow({
     country?: string;
     note?: string;
     score?: number;
+    prior_hits_24h?: number;
+    enumeration_pattern?: boolean;
   };
 
   async function resolve(action: "unblock" | "revoke_key" | "dismiss") {
@@ -111,6 +113,12 @@ function FlagRow({
           {detail.model ? <span>model {detail.model}</span> : null}
           {detail.ip ? <span>ip {detail.ip}</span> : null}
           {detail.country ? <span>now in {detail.country}</span> : null}
+          {detail.enumeration_pattern ? (
+            <span className="font-sans font-medium text-amber-600 dark:text-amber-400">
+              ⚠ {detail.prior_hits_24h ?? "?"} canary hits / 24h — listing
+              enumeration pattern
+            </span>
+          ) : null}
         </span>
       </TableCell>
       <TableCell className="text-xs">

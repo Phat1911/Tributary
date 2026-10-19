@@ -656,6 +656,60 @@ async fn j2_canary_model_journey() {
             }
         })
         .await;
+
+        // -- AUDIT A-008: probing the listing to filter canaries out is ---
+        // itself detected. First hit reads as exfiltration; hits three
+        // and later in 24 h carry the enumeration pattern explicitly.
+        let (_, first_flags) = call(
+            &app,
+            api("GET", "/api/v1/review-flags?status=open", &token, None),
+        )
+        .await;
+        let first_flag = first_flags
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["kind"] == "canary_model")
+            .expect("first canary flag present");
+        assert_eq!(first_flag["detail_json"]["enumeration_pattern"], false);
+        // Two more probes (the "clean the listing before export" pass).
+        for _ in 0..2 {
+            let (status, _) = call(&app, chat_req(&stack.key_raw, None, &body)).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+        }
+        wait_for("enumeration-pattern flag (3rd hit)", || {
+            let app = app.clone();
+            let token = token.clone();
+            async move {
+                let (_, flags) = call(
+                    &app,
+                    api(
+                        "GET",
+                        "/api/v1/review-flags?status=open&limit=100",
+                        &token,
+                        None,
+                    ),
+                )
+                .await;
+                flags.as_array().is_some_and(|f| {
+                    f.iter().any(|r| {
+                        r["kind"] == "canary_model"
+                            && r["detail_json"]["enumeration_pattern"] == true
+                            && r["detail_json"]["prior_hits_24h"].as_i64().unwrap_or(0) >= 2
+                            && r["detail_json"]["note"]
+                                .as_str()
+                                .unwrap()
+                                .contains("enumeration")
+                    })
+                })
+            }
+        })
+        .await;
+        // The prober still sees the SAME 400 — the enrichment never
+        // leaks to the person being detected.
+        let (status, _) = call(&app, chat_req(&stack.key_raw, None, &body)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+
         wait_for("canary email alert", || {
             let pool = test_db.pool.clone();
             let org = stack.org_id.clone();

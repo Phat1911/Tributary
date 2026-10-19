@@ -79,6 +79,18 @@ pub async fn chat_completions(
         .await
         .map_err(|e| ApiError::Internal(anyhow::anyhow!("canary model lookup failed: {e}")))?
     {
+        // Enumeration-pattern enrichment (AUDIT A-008): a member CAN map
+        // the canaries by probing (listed-but-rejected = canary). One hit
+        // is curiosity; a third hit in 24 h says someone is filtering the
+        // listing for export — the flag says so explicitly. Counts prior
+        // hits only (this hit's flag inserts just below), and this query
+        // runs ONLY on the already-denied canary path, never the hot path.
+        const ENUMERATION_WINDOW_MS: i64 = 24 * 60 * 60 * 1000;
+        const ENUMERATION_THRESHOLD: i64 = 2; // third+ hit ⇒ pattern
+        let prior_hits =
+            db::canary_hits_for_key(&state.db, &auth.id, db::now_ms() - ENUMERATION_WINDOW_MS)
+                .await
+                .unwrap_or(0);
         tributary_control::security::detect(
             &state.db,
             state.config.smtp.as_ref(),
@@ -94,7 +106,13 @@ pub async fn chat_completions(
                     "model": requested_model,
                     "key_prefix": auth.key_prefix,
                     "ip": client_ip,
-                    "note": "canary model alias requested — model list was exfiltrated",
+                    "prior_hits_24h": prior_hits,
+                    "enumeration_pattern": prior_hits >= ENUMERATION_THRESHOLD,
+                    "note": if prior_hits >= ENUMERATION_THRESHOLD {
+                        "canary model alias requested — REPEATED hits: likely listing enumeration to filter canaries"
+                    } else {
+                        "canary model alias requested — model list was exfiltrated"
+                    },
                 }),
                 email: true,
             },
