@@ -164,6 +164,10 @@ pub fn router(state: ControlState) -> Router {
             post(api::resolve_review_flag),
         )
         .route(
+            "/api/v1/orgs/{id}/settings",
+            get(api::get_org_settings).put(api::put_org_settings),
+        )
+        .route(
             "/api/v1/orgs/{id}/classifier",
             get(api::get_classifier)
                 .put(api::put_classifier)

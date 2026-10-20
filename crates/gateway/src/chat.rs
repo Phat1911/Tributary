@@ -200,6 +200,64 @@ pub async fn chat_completions(
         .await;
     }
 
+    // --- D32: distinct-IP concurrency (alert-only). -------------------------
+    // One key seen from ≥2 distinct shared networks (/24 v4, /64 v6)
+    // inside the org's sliding window = the credential-sharing signal.
+    // Runs AFTER this request's IP upsert so "now" counts; one row per
+    // (key, ip) keeps the query the size of the active source set.
+    // ALERT-ONLY by director directive: detection never denies here.
+    {
+        let window_secs = state
+            .org_settings
+            .concurrency_window_secs(&state.db, &pool.org_id)
+            .await;
+        let window_ms = window_secs * 1000;
+        let active = db::active_ips_for_key(&state.db, &auth.id, now - window_ms)
+            .await
+            .unwrap_or_default();
+        // Collapse each source to its shared network; unparseable sources
+        // ("local", garbage XFF) are skipped, never guessed.
+        let mut networks: Vec<std::net::IpAddr> = active
+            .iter()
+            .filter_map(|ip| tributary_common::net::parse_shared_network(ip))
+            .collect();
+        networks.sort();
+        networks.dedup();
+        // De-duplication: one alert per key per window. A shared key can
+        // fire hundreds of requests in 5 minutes — the queue gets ONE
+        // row, not one per request. A DB count (not in-proc state) is the
+        // gate, so the dedupe survives a restart.
+        let dedupe =
+            tributary_control::db::concurrency_flags_for_key(&state.db, &auth.id, now - window_ms)
+                .await;
+        if networks.len() >= 2 && dedupe.unwrap_or(0) == 0 {
+            tributary_control::security::detect(
+                &state.db,
+                state.config.smtp.as_ref(),
+                &tributary_control::security::Detection {
+                    org_id: &pool.org_id,
+                    pool_id: Some(&auth.pool_id),
+                    pool_key_id: Some(&auth.id),
+                    user_id: auth.user_id.as_deref(),
+                    kind: tributary_control::security::DetectionKind::DistinctIpConcurrency,
+                    severity: None,
+                    score_bp: None,
+                    detail: json!({
+                        "key_prefix": auth.key_prefix,
+                        "ip": client_ip,
+                        "shared_networks": networks.iter()
+                            .map(|n| n.to_string())
+                            .collect::<Vec<_>>(),
+                        "window_secs": window_secs,
+                        "note": "same pool key used from multiple networks — likely credential sharing (alert-only)",
+                    }),
+                    email: true,
+                },
+            )
+            .await;
+        }
+    }
+
     // --- M4 classifier scoring (D28): async off-hot-path. The spawn only ----
     // acts when the org configured a classifier; the prompt text leaves
     // this scope exclusively inside the scoring task (never stored).

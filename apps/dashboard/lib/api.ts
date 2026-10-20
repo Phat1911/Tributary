@@ -207,7 +207,7 @@ export interface ReviewFlag {
   pool_id: string | null;
   pool_key_id: string | null;
   user_id: string | null;
-  kind: string; // classifier_flag | classifier_auto_block | impossible_travel
+  kind: string; // classifier_flag | classifier_auto_block | impossible_travel | distinct_ip_concurrency
   severity: string;
   score_bp: number | null;
   detail_json: Record<string, unknown>;

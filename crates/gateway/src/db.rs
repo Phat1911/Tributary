@@ -181,6 +181,24 @@ pub async fn usage_events_for_key(db: &Db, pool_key_id: &str) -> sqlx::Result<Ve
 // M4: leak prevention — IP allowlists, per-key IP history
 // ---------------------------------------------------------------------------
 
+/// Source IPs whose `last_seen` for this key falls inside the window —
+/// the "currently active" set the D32 concurrency detector collapses into
+/// shared networks. The upsert in `record_key_ip` keeps one row per
+/// (key, ip), so this stays O(active sources), not O(history).
+pub async fn active_ips_for_key(
+    db: &Db,
+    pool_key_id: &str,
+    since_ms: i64,
+) -> sqlx::Result<Vec<String>> {
+    let sql = db.sql("SELECT ip FROM pool_key_ips WHERE pool_key_id = ? AND last_seen >= ?");
+    let rows = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
+        .bind(pool_key_id)
+        .bind(since_ms)
+        .fetch_all(db.pool())
+        .await?;
+    Ok(rows.iter().map(|r| r.get::<String, _>("ip")).collect())
+}
+
 /// The CIDR strings pinned to one key (empty = unrestricted/dormant).
 /// Raw strings suffice — the caller parses once per request for matching.
 pub async fn ip_allowlist_cidrs(db: &Db, pool_key_id: &str) -> sqlx::Result<Vec<String>> {

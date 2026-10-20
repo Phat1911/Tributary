@@ -116,3 +116,22 @@ pool → provider key (base URL `http://127.0.0.1:8098`, key `sk-mock`)
 - Impossible travel — needs the geoip feature (off) + a GeoLite2 db.
 - Concurrent-IP check — not built (PLAN gap, M5 candidate).
 - SMTP failure modes beyond fallback logging.
+
+## T5 — distinct-IP concurrency alert (D32, new)
+
+One key, two networks, inside the window → one flag, key keeps working.
+
+- **T5.1 Same network stays quiet**: with your member key, send a request
+  with `-H "x-forwarded-for: 91.207.174.9"`, then another with
+  `-H "x-forwarded-for: 91.207.174.250"` — SAME /24, different hosts.
+  Expect: both 200, NO new flag in the review queue.
+- **T5.2 Second network fires it**: now send one with
+  `-H "x-forwarded-for: 203.0.113.7"` (a different /24). Expect: **200**
+  (alert-only — the request is served), and the review queue gains
+  *"Key used from multiple networks"* with the key prefix and the two
+  collapsed networks listed.
+- **T5.3 No spam**: send more requests from further networks
+  (198.51.100.5, ...). Expect: still 200, still exactly ONE such flag
+  within the 5-minute window.
+- **T5.4 (optional) Tuning**: `PUT /api/v1/orgs/<org>/settings` with
+  `{"concurrency_window_secs": 60}` as admin shrinks the window.

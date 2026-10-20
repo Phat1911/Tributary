@@ -31,6 +31,33 @@ pub fn client_ip(headers: &HeaderMap) -> String {
         .to_string()
 }
 
+/// The "shared network" an address belongs to, for concurrency grouping
+/// (D32): IPv4 collapses to its /24 (the classic ISP/office block), IPv6
+/// to its /64 (the standard customer site delegation). Two addresses in
+/// the same shared network are ONE source as far as key-sharing detection
+/// is concerned — a laptop hopping .9 → .11 inside one /24 is not news.
+pub fn shared_network_of(ip: IpAddr) -> IpAddr {
+    match ip {
+        IpAddr::V4(v4) => {
+            let o = v4.octets();
+            IpAddr::V4(std::net::Ipv4Addr::new(o[0], o[1], o[2], 0))
+        }
+        IpAddr::V6(v6) => {
+            let o = v6.octets();
+            let mut collapsed = [0u8; 16];
+            collapsed[..8].copy_from_slice(&o[..8]);
+            IpAddr::V6(std::net::Ipv6Addr::from(collapsed))
+        }
+    }
+}
+
+/// Convenience: parse a client-IP string to its shared network. `None`
+/// covers "local", garbage, or empty values — callers skip those sources
+/// rather than guess (the fail-closed house style).
+pub fn parse_shared_network(raw: &str) -> Option<IpAddr> {
+    raw.parse::<IpAddr>().ok().map(shared_network_of)
+}
+
 /// One allowlist entry: an IP network. A bare IP means a /32 (v4) or /128
 /// (v6) network — admins shouldn't have to type the suffix for a single
 /// host.
@@ -153,6 +180,37 @@ mod tests {
         assert!(Cidr::parse("nonsense").is_none());
         assert!(Cidr::parse("").is_none());
         assert!(Cidr::parse("10.0.0.0/-1").is_none());
+    }
+
+    #[test]
+    fn shared_network_collapses_v4_to_24_and_v6_to_64() {
+        use std::net::IpAddr;
+        // Same /24 = one source, regardless of host part.
+        assert_eq!(
+            parse_shared_network("91.207.174.9"),
+            Some("91.207.174.0".parse::<IpAddr>().unwrap())
+        );
+        assert_eq!(
+            parse_shared_network("91.207.174.254"),
+            Some("91.207.174.0".parse::<IpAddr>().unwrap())
+        );
+        // Different /24 = two sources.
+        assert_ne!(
+            parse_shared_network("91.207.174.9"),
+            parse_shared_network("203.0.113.7")
+        );
+        // v6 collapses at /64 (customer site), not /128.
+        assert_eq!(
+            parse_shared_network("2001:db8:1:2:3:4:5:6"),
+            parse_shared_network("2001:db8:1:2:ffff::1")
+        );
+        assert_ne!(
+            parse_shared_network("2001:db8:1:2::1"),
+            parse_shared_network("2001:db8:1:3::1")
+        );
+        // "local"/garbage → None: skip, never guess.
+        assert_eq!(parse_shared_network("local"), None);
+        assert_eq!(parse_shared_network(""), None);
     }
 
     #[test]

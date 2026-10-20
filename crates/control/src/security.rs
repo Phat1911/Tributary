@@ -31,6 +31,10 @@ pub enum DetectionKind {
     /// Auto-block (live mode) suspended a key pending review (D28: suspends
     /// the KEY only — never bans the person; one-click unblock).
     ClassifierAutoBlock,
+    /// One pool key was used from ≥2 distinct shared networks (/24 v4,
+    /// /64 v6) inside the sliding window (D32) — the classic credential-
+    /// sharing signal. Alert-only: never blocks, never suspends.
+    DistinctIpConcurrency,
     /// The same key appeared from two different countries faster than
     /// travel allows (dormant unless a GeoLite2 db is configured).
     ImpossibleTravel,
@@ -42,6 +46,7 @@ impl DetectionKind {
         match self {
             Self::ClassifierFlag => "classifier_flag",
             Self::ClassifierAutoBlock => "classifier_auto_block",
+            Self::DistinctIpConcurrency => "distinct_ip_concurrency",
             Self::ImpossibleTravel => "impossible_travel",
         }
     }
@@ -51,6 +56,7 @@ impl DetectionKind {
         match self {
             Self::ClassifierFlag => "security.classifier_flag",
             Self::ClassifierAutoBlock => "security.classifier_auto_block",
+            Self::DistinctIpConcurrency => "security.distinct_ip_concurrency",
             Self::ImpossibleTravel => "security.impossible_travel",
         }
     }
@@ -60,6 +66,7 @@ impl DetectionKind {
         match self {
             Self::ClassifierFlag => "medium",
             Self::ClassifierAutoBlock => "high",
+            Self::DistinctIpConcurrency => "medium",
             Self::ImpossibleTravel => "medium",
         }
     }
@@ -69,6 +76,7 @@ impl DetectionKind {
         match self {
             Self::ClassifierFlag => "off-purpose request flagged",
             Self::ClassifierAutoBlock => "off-purpose request auto-blocked (key suspended)",
+            Self::DistinctIpConcurrency => "same key used from multiple networks",
             Self::ImpossibleTravel => "impossible travel between countries",
         }
     }
@@ -290,6 +298,10 @@ mod tests {
         assert_eq!(
             DetectionKind::ImpossibleTravel.as_str(),
             "impossible_travel"
+        );
+        assert_eq!(
+            DetectionKind::DistinctIpConcurrency.as_str(),
+            "distinct_ip_concurrency"
         );
         assert_eq!(DetectionKind::ClassifierFlag.default_severity(), "medium");
     }

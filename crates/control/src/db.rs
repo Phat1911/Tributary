@@ -1250,6 +1250,91 @@ pub async fn delete_ip_allowlist(db: &Db, id: &str) -> sqlx::Result<u64> {
     Ok(res.rows_affected())
 }
 
+// --- Org settings (D32 detector knobs) -----------------------------------------
+
+/// The org-level knobs this deployment exposes. Absent row = compiled
+/// defaults, so most orgs never touch this table.
+#[derive(Debug, Clone, Serialize)] // serde: this struct → JSON — admin settings view
+pub struct OrgSettings {
+    /// Distinct-IP concurrency window in seconds (D32). 300 (5 min) by
+    /// default; clamped at the API on write.
+    pub concurrency_window_secs: i64,
+    pub updated_at: i64,
+}
+
+/// The compiled default window — also what `org_settings` returns when the
+/// org has never tuned anything (no row is created for reads).
+pub const DEFAULT_CONCURRENCY_WINDOW_SECS: i64 = 300;
+
+/// Reads an org's settings, falling back to defaults without inserting.
+pub async fn org_settings(db: &Db, org_id: &str) -> sqlx::Result<OrgSettings> {
+    let sql =
+        db.sql("SELECT concurrency_window_secs, updated_at FROM org_settings WHERE org_id = ?");
+    match sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
+        .bind(org_id)
+        .fetch_optional(db.pool())
+        .await?
+    {
+        Some(row) => Ok(OrgSettings {
+            // The DEFAULT clause guarantees non-NULL; the fallback keeps
+            // honest even against a manually NULLed row.
+            concurrency_window_secs: row
+                .try_get("concurrency_window_secs")
+                .unwrap_or(DEFAULT_CONCURRENCY_WINDOW_SECS),
+            updated_at: row.get("updated_at"),
+        }),
+        None => Ok(OrgSettings {
+            concurrency_window_secs: DEFAULT_CONCURRENCY_WINDOW_SECS,
+            updated_at: 0,
+        }),
+    }
+}
+
+/// Upserts the knobs (validated at the API layer; values arrive as i64 per
+/// the dual-DB INTEGER rule).
+pub async fn upsert_org_settings(
+    db: &Db,
+    org_id: &str,
+    concurrency_window_secs: i64,
+    updated_at: i64,
+) -> sqlx::Result<()> {
+    let sql = db.sql(
+        "INSERT INTO org_settings (org_id, concurrency_window_secs, updated_at) \
+         VALUES (?, ?, ?) \
+         ON CONFLICT (org_id) DO UPDATE SET \
+             concurrency_window_secs = excluded.concurrency_window_secs, \
+             updated_at = excluded.updated_at",
+    );
+    sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
+        .bind(org_id)
+        .bind(concurrency_window_secs)
+        .bind(updated_at)
+        .execute(db.pool())
+        .await?;
+    Ok(())
+}
+
+/// How many distinct-IP concurrency flags this key already has inside the
+/// window (D32 de-duplication: one alert per key per window, not one per
+/// request — a shared key can do hundreds of requests in 5 minutes).
+pub async fn concurrency_flags_for_key(
+    db: &Db,
+    pool_key_id: &str,
+    since_ms: i64,
+) -> sqlx::Result<i64> {
+    let sql = db.sql(
+        "SELECT COUNT(*) AS n FROM review_flags \
+         WHERE pool_key_id = ? AND kind = 'distinct_ip_concurrency' AND created_at >= ?",
+    );
+    let row = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
+        .bind(pool_key_id)
+        .bind(since_ms)
+        .fetch_one(db.pool())
+        .await?;
+    let n: i64 = row.get("n");
+    Ok(n)
+}
+
 // --- Review queue --------------------------------------------------------------
 
 /// One review-queue flag as served to admins (detail already sanitized at

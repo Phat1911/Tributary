@@ -370,6 +370,9 @@ async fn j3_classifier_journey() {
         wait_for("classifier_flag review flag with score", || {
             let app = app.clone();
             let token = token.clone();
+            // Scoped like every wait in this file: only THIS key's flag
+            // proves the journey progressed.
+            let key_id = stack.key_id.clone();
             async move {
                 let (_, flags) = call(
                     &app,
@@ -379,6 +382,7 @@ async fn j3_classifier_journey() {
                 flags.as_array().is_some_and(|f| {
                     f.iter().any(|r| {
                         r["kind"] == "classifier_flag"
+                            && r["pool_key_id"] == key_id.as_str()
                             && r["score_bp"].as_i64().is_some()
                             && r["score_bp"].as_i64().unwrap() < 5000
                     })
@@ -509,15 +513,22 @@ async fn j3_classifier_journey() {
         wait_for("classifier_auto_block flag + suspension", || {
             let app = app.clone();
             let token = token.clone();
+            // Scoped to THIS key: a stale auto-block flag from an earlier
+            // run in the shared Postgres test DB must not satisfy the
+            // wait before THIS run's (async) suspension has landed —
+            // the unscoped check was a latent flake on re-run.
+            let key_id = stack.key_id.clone();
             async move {
                 let (_, flags) = call(
                     &app,
                     api("GET", "/api/v1/review-flags?status=open", &token, None),
                 )
                 .await;
-                flags
-                    .as_array()
-                    .is_some_and(|f| f.iter().any(|r| r["kind"] == "classifier_auto_block"))
+                flags.as_array().is_some_and(|f| {
+                    f.iter().any(|r| {
+                        r["kind"] == "classifier_auto_block" && r["pool_key_id"] == key_id.as_str()
+                    })
+                })
             }
         })
         .await;
@@ -541,7 +552,7 @@ async fn j3_classifier_journey() {
             .as_array()
             .unwrap()
             .iter()
-            .find(|r| r["kind"] == "classifier_auto_block")
+            .find(|r| r["kind"] == "classifier_auto_block" && r["pool_key_id"] == stack.key_id)
             .unwrap()["id"]
             .as_str()
             .unwrap()
@@ -755,5 +766,123 @@ async fn j5_quota_cap_audited() {
             }
         })
         .await;
+    }
+}
+
+/// D32: distinct-IP concurrency — same key from two different /24s inside
+/// the window fires ONE alert-only flag (queue + audit + email), never
+/// blocks the key. Director-directed founder feature; replaces the removed
+/// canary sensors as the credential-sharing tripwire. Everything below is
+/// public-API provisioning (workflow step 12).
+#[tokio::test]
+async fn j6_distinct_ip_concurrency() {
+    for test_db in test_dbs().await {
+        let mock = spawn_mock(MockMode::NonStream).await;
+        let app = test_app(test_db.pool.clone(), &mock).await;
+        let token = bootstrap_admin_and_login(&test_db.pool, &app).await;
+        let stack = provision_stack(&app, &token, &mock).await;
+
+        let body = json!({"model": "m-test", "messages": [{"role": "user", "content": "hi"}]});
+
+        // Two sources in DIFFERENT /24s (91.207.174.x vs 203.0.113.x).
+        // Same-network hosts must NOT trip it, so prove that first: two
+        // requests from one /24 stay quiet.
+        let (status, _) = call(&app, chat_req(&stack.key_raw, Some("91.207.174.9"), &body)).await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, _) = call(
+            &app,
+            chat_req(&stack.key_raw, Some("91.207.174.254"), &body),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "same-/24 hosts are one source");
+
+        // No flag yet.
+        let (_, flags) = call(
+            &app,
+            api("GET", "/api/v1/review-flags?status=open", &token, None),
+        )
+        .await;
+        // Scoped to THIS key: the shared Postgres test DB carries flags
+        // from earlier runs (other orgs), and those must never fail a
+        // fresh run — only this key's behavior is under test here.
+        assert!(
+            !flags.as_array().is_some_and(|f| {
+                f.iter().any(|r| {
+                    r["kind"] == "distinct_ip_concurrency"
+                        && r["pool_key_id"] == stack.key_id.as_str()
+                })
+            }),
+            "one network alone must not flag"
+        );
+
+        // Second network → flag fires, request still SUCCEEDS (alert-only).
+        let (status, _) = call(&app, chat_req(&stack.key_raw, Some("203.0.113.7"), &body)).await;
+        assert_eq!(status, StatusCode::OK, "D32 is alert-only, never blocks");
+
+        wait_for("distinct_ip_concurrency flag", || {
+            let app = app.clone();
+            let token = token.clone();
+            // Clone (not move): `stack` is borrowed again after the
+            // closure, so only the one String rides along.
+            let key_id = stack.key_id.clone();
+            async move {
+                let (_, flags) = call(
+                    &app,
+                    api("GET", "/api/v1/review-flags?status=open", &token, None),
+                )
+                .await;
+                flags.as_array().is_some_and(|f| {
+                    f.iter().any(|r| {
+                        r["kind"] == "distinct_ip_concurrency"
+                            && r["pool_key_id"] == key_id.as_str()
+                            && r["detail_json"]["shared_networks"]
+                                .as_array()
+                                .is_some_and(|n| n.len() >= 2)
+                    })
+                })
+            }
+        })
+        .await;
+
+        // De-duplication: MORE shared-key traffic inside the window does
+        // not add a second flag (one alert per key per window).
+        let (_, flags_before) = call(
+            &app,
+            api("GET", "/api/v1/review-flags?status=open", &token, None),
+        )
+        .await;
+        let count_before = flags_before
+            .as_array()
+            .map(|f| {
+                f.iter()
+                    .filter(|r| {
+                        r["kind"] == "distinct_ip_concurrency"
+                            && r["pool_key_id"] == stack.key_id.as_str()
+                    })
+                    .count()
+            })
+            .unwrap_or(0);
+        let (status, _) = call(&app, chat_req(&stack.key_raw, Some("198.51.100.5"), &body)).await;
+        assert_eq!(status, StatusCode::OK);
+        let (_, flags_after) = call(
+            &app,
+            api("GET", "/api/v1/review-flags?status=open", &token, None),
+        )
+        .await;
+        let count_after = flags_after
+            .as_array()
+            .map(|f| {
+                f.iter()
+                    .filter(|r| {
+                        r["kind"] == "distinct_ip_concurrency"
+                            && r["pool_key_id"] == stack.key_id.as_str()
+                    })
+                    .count()
+            })
+            .unwrap_or(0);
+        assert_eq!(
+            count_before, count_after,
+            "one alert per key per window, not one per request"
+        );
     }
 }

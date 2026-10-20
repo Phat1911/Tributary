@@ -30,6 +30,7 @@ const KIND_LABELS: Record<string, string> = {
   classifier_flag: "Off-purpose request",
   classifier_auto_block: "Auto-block (key suspended)",
   impossible_travel: "Country change",
+  distinct_ip_concurrency: "Key used from multiple networks",
 };
 
 /** The score detail line for classifier kinds (bp → 0–1 alignment). */
@@ -57,6 +58,7 @@ function FlagRow({
     model?: string;
     ip?: string;
     country?: string;
+    shared_networks?: string[];
     note?: string;
     score?: number;
   };
@@ -109,6 +111,9 @@ function FlagRow({
           {detail.model ? <span>model {detail.model}</span> : null}
           {detail.ip ? <span>ip {detail.ip}</span> : null}
           {detail.country ? <span>now in {detail.country}</span> : null}
+          {detail.shared_networks?.length
+            ? <span>networks {detail.shared_networks.join(", ")}</span>
+            : null}
         </span>
       </TableCell>
       <TableCell className="text-xs">

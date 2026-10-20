@@ -1763,6 +1763,81 @@ pub struct PutClassifierRequest {
     pub acknowledge_auto_block: Option<bool>,
 }
 
+/// PUT /api/v1/orgs/{id}/settings body (D32 knobs).
+#[derive(Deserialize)]
+pub struct PutOrgSettingsRequest {
+    /// Sliding window for the distinct-IP concurrency detector, seconds.
+    /// Clamped to 60–86400: below a minute is alert spam, above a day the
+    /// "concurrent" claim stops being honest.
+    pub concurrency_window_secs: i64,
+}
+
+/// GET /api/v1/orgs/{id}/settings — defaults are returned even when the
+/// org never tuned anything (no row exists).
+pub async fn get_org_settings(
+    State(state): State<ControlState>,
+    admin: AuthedAdmin,
+    Path(org_id): Path<String>,
+) -> ApiResult<Json<db::OrgSettings>> {
+    let org = db::org_by_id(&state.db, &org_id)
+        .await
+        .map_err(|e| ControlError::Internal(e.into()))?
+        .ok_or(ControlError::NotFound)?;
+    admin.ensure_org_scope(&org.id)?;
+    let settings = db::org_settings(&state.db, &org.id)
+        .await
+        .map_err(|e| ControlError::Internal(e.into()))?;
+    Ok(Json(settings))
+}
+
+/// PUT /api/v1/orgs/{id}/settings — tune the D32 window. Takes effect on
+/// the next request (the gateway caches settings for 5 s, D9 pattern).
+pub async fn put_org_settings(
+    State(state): State<ControlState>,
+    admin: AuthedAdmin,
+    headers: axum::http::HeaderMap,
+    Path(org_id): Path<String>,
+    Json(body): Json<PutOrgSettingsRequest>,
+) -> ApiResult<Json<db::OrgSettings>> {
+    let org = db::org_by_id(&state.db, &org_id)
+        .await
+        .map_err(|e| ControlError::Internal(e.into()))?
+        .ok_or(ControlError::NotFound)?;
+    admin.ensure_org_scope(&org.id)?;
+    if !(60..=86400).contains(&body.concurrency_window_secs) {
+        return Err(ControlError::BadRequest(format!(
+            "concurrency_window_secs must be within 60–86400 (got {})",
+            body.concurrency_window_secs
+        )));
+    }
+    let client_ip = tributary_common::net::client_ip(&headers);
+    let updated_at = tributary_common::db::now_ms();
+    db::upsert_org_settings(&state.db, &org.id, body.concurrency_window_secs, updated_at)
+        .await
+        .map_err(|e| ControlError::Internal(e.into()))?;
+    audit::record(
+        &state.db,
+        audit::AuditEntry {
+            org_id: Some(&org.id),
+            actor_id: &admin.user_id,
+            actor_email: &admin.email,
+            action: "org.settings_updated",
+            target_kind: audit::TargetKind::Org,
+            target_id: &org.id,
+            before: None,
+            after: Some(serde_json::json!({
+                "concurrency_window_secs": body.concurrency_window_secs
+            })),
+            ip: Some(&client_ip),
+        },
+    )
+    .await;
+    let settings = db::org_settings(&state.db, &org.id)
+        .await
+        .map_err(|e| ControlError::Internal(e.into()))?;
+    Ok(Json(settings))
+}
+
 /// GET /api/v1/orgs/{id}/classifier — the masked config + shadow stats.
 /// 404 when unconfigured (dormant is the absence of a row, D28).
 pub async fn get_classifier(
