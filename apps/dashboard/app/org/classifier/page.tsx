@@ -169,9 +169,16 @@ function ClassifierForm({
             className="mt-1 size-4 accent-primary"
           />
           <Label htmlFor="clf-ack" className="font-normal leading-relaxed">
-            I understand: going live later will <strong>suspend</strong> the
-            keys of off-purpose requests pending review (one-click unblock,
-            never auto-ban). Auto-block always starts in shadow mode.
+            {/* The shadcn Label is a flex row — bare text + <strong> +
+                text would lay out as three separate COLUMNS (the
+                "floating suspend" bug). One block span makes the
+                sentence a single flex child with normal inline flow. */}
+            <span className="block">
+              I understand: going live later will <strong>suspend</strong>{" "}
+              the keys of off-purpose requests pending review (one-click
+              unblock, never auto-ban). Auto-block always starts in shadow
+              mode.
+            </span>
           </Label>
         </div>
       ) : null}
