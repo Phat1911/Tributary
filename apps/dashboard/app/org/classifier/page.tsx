@@ -53,7 +53,11 @@ function ClassifierForm({
   const [mode, setMode] = useState<"alert" | "auto_block">(
     existing?.mode ?? "alert",
   );
-  const [ack, setAck] = useState(false);
+  // Acknowledgement is PERSISTED server-side once auto_block is saved —
+  // re-asking on every visit made it look like the save never took
+  // (founder UX report). Pre-check it and lock it once recorded.
+  const alreadyAcked = existing?.mode === "auto_block";
+  const [ack, setAck] = useState(alreadyAcked);
   const [busy, setBusy] = useState(false);
 
   async function save(e: React.FormEvent) {
@@ -166,6 +170,7 @@ function ClassifierForm({
             type="checkbox"
             checked={ack}
             onChange={(e) => setAck(e.target.checked)}
+            disabled={alreadyAcked}
             className="mt-1 size-4 accent-primary"
           />
           <Label htmlFor="clf-ack" className="font-normal leading-relaxed">
@@ -174,7 +179,8 @@ function ClassifierForm({
                 "floating suspend" bug). One block span makes the
                 sentence a single flex child with normal inline flow. */}
             <span className="block">
-              I understand: going live later will <strong>suspend</strong>{" "}
+              {alreadyAcked ? "Acknowledged ✓ " : "I understand: "}
+              going live later will <strong>suspend</strong>{" "}
               the keys of off-purpose requests pending review (one-click
               unblock, never auto-ban). Auto-block always starts in shadow
               mode.
