@@ -9,7 +9,9 @@
 use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
-use axum::response::AppendHeaders;
+// IntoResponse: lets a handler return DIFFERENT response shapes (the
+// D33 gated paths answer 202+JSON when deferred, plain status otherwise).
+use axum::response::{AppendHeaders, IntoResponse};
 use serde::Deserialize;
 use serde::Serialize;
 use zeroize::Zeroizing;
@@ -664,28 +666,49 @@ pub async fn disable_pool(
     admin: AuthedAdmin,
     headers: axum::http::HeaderMap,
     Path(id): Path<String>,
-) -> ApiResult<StatusCode> {
+) -> ApiResult<axum::response::Response> {
     let pool = load_scoped_pool(&state, &admin, &id).await?;
-    db::disable_pool(&state.db, &pool.id)
-        .await
-        .map_err(|e| ControlError::Internal(e.into()))?;
-    let ip = client_ip(&headers);
-    audit::record(
-        &state.db,
-        AuditEntry {
-            org_id: Some(&pool.org_id),
-            actor_id: &admin.user_id,
-            actor_email: &admin.email,
-            action: "pool.disabled",
-            target_kind: TargetKind::Pool,
-            target_id: &pool.id,
-            before: Some(serde_json::json!({ "status": pool.status, "name": pool.name })),
-            after: Some(serde_json::json!({ "status": "disabled" })),
-            ip: Some(&ip),
-        },
+    // D33: pool deletion is org-wide policy — deferred in dual-admin orgs.
+    match gate_sensitive(
+        &state,
+        &admin,
+        &headers,
+        &pool.org_id,
+        crate::approvals::SensitiveKind::PoolDisable,
+        &pool.id,
+        serde_json::json!({ "pool_id": pool.id, "name": pool.name }),
     )
-    .await;
-    Ok(StatusCode::NO_CONTENT)
+    .await?
+    {
+        SensitiveOutcome::Deferred(pending) => {
+            Ok((StatusCode::ACCEPTED, Json(pending)).into_response())
+        }
+        SensitiveOutcome::Proceed { solo, alert } => {
+            db::disable_pool(&state.db, &pool.id)
+                .await
+                .map_err(|e| ControlError::Internal(e.into()))?;
+            let ip = client_ip(&headers);
+            audit::record(
+                &state.db,
+                AuditEntry {
+                    org_id: Some(&pool.org_id),
+                    actor_id: &admin.user_id,
+                    actor_email: &admin.email,
+                    action: "pool.disabled",
+                    target_kind: TargetKind::Pool,
+                    target_id: &pool.id,
+                    before: Some(serde_json::json!({ "status": pool.status, "name": pool.name })),
+                    after: Some(serde_json::json!({
+                        "status": "disabled",
+                        "approval": approval_marker(solo, &alert),
+                    })),
+                    ip: Some(&ip),
+                },
+            )
+            .await;
+            Ok(StatusCode::NO_CONTENT.into_response())
+        }
+    }
 }
 
 /// Loads a pool and enforces the caller's org scope on it.
@@ -824,7 +847,7 @@ pub async fn revoke_pool_key(
     admin: AuthedAdmin,
     headers: axum::http::HeaderMap,
     Path((pool_id, key_id)): Path<(String, String)>,
-) -> ApiResult<StatusCode> {
+) -> ApiResult<axum::response::Response> {
     let pool = load_scoped_pool(&state, &admin, &pool_id).await?;
     let keys = db::pool_keys_by_pool(&state.db, &pool.id)
         .await
@@ -833,26 +856,55 @@ pub async fn revoke_pool_key(
         .iter()
         .find(|k| k.id == key_id)
         .ok_or(ControlError::NotFound)?;
-    db::revoke_pool_key(&state.db, &key_id)
-        .await
-        .map_err(|e| ControlError::Internal(e.into()))?;
-    let ip = client_ip(&headers);
-    audit::record(
-        &state.db,
-        AuditEntry {
-            org_id: Some(&pool.org_id),
-            actor_id: &admin.user_id,
-            actor_email: &admin.email,
-            action: "pool_key.revoked",
-            target_kind: TargetKind::PoolKey,
-            target_id: &key.id,
-            before: Some(serde_json::json!({ "status": key.status, "key_prefix": key.key_prefix })),
-            after: Some(serde_json::json!({ "status": "revoked", "key_prefix": key.key_prefix })),
-            ip: Some(&ip),
-        },
+    // D33 gate BEFORE revoking: another admin's key defers for approval;
+    // a key with an open alert may be revoked solo (containment).
+    match gate_sensitive_key(
+        &state,
+        &admin,
+        &headers,
+        &pool.org_id,
+        &key.id,
+        key.user_id.as_deref(),
+        crate::approvals::SensitiveKind::AdminKeyRevoke,
+        serde_json::json!({
+            "key_id": key.id,
+            "key_prefix": key.key_prefix,
+        }),
     )
-    .await;
-    Ok(StatusCode::NO_CONTENT)
+    .await?
+    {
+        SensitiveOutcome::Deferred(pending) => {
+            return Ok((StatusCode::ACCEPTED, Json(pending)).into_response());
+        }
+        SensitiveOutcome::Proceed { solo, alert } => {
+            db::revoke_pool_key(&state.db, &key_id)
+                .await
+                .map_err(|e| ControlError::Internal(e.into()))?;
+            let ip = client_ip(&headers);
+            audit::record(
+                &state.db,
+                AuditEntry {
+                    org_id: Some(&pool.org_id),
+                    actor_id: &admin.user_id,
+                    actor_email: &admin.email,
+                    action: "pool_key.revoked",
+                    target_kind: TargetKind::PoolKey,
+                    target_id: &key.id,
+                    before: Some(
+                        serde_json::json!({ "status": key.status, "key_prefix": key.key_prefix }),
+                    ),
+                    after: Some(serde_json::json!({
+                        "status": "revoked",
+                        "key_prefix": key.key_prefix,
+                        "approval": approval_marker(solo, &alert),
+                    })),
+                    ip: Some(&ip),
+                },
+            )
+            .await;
+        }
+    }
+    Ok(StatusCode::NO_CONTENT.into_response())
 }
 
 // ---------------------------------------------------------------------------
@@ -1422,13 +1474,16 @@ pub struct SetExpiryRequest {
 
 /// POST /api/v1/pools/{id}/keys/{key_id}/expiry — set or clear a key's
 /// expiry (epoch ms). The gateway already rejects expired keys at auth.
+/// D33: when the key belongs to ANOTHER ADMIN this defers for a second
+/// admin's approval (202) — unless the key has an open alert, when any
+/// single admin may act (containment, alert-linked audit).
 pub async fn set_key_expiry(
     State(state): State<ControlState>,
     admin: AuthedAdmin,
     headers: axum::http::HeaderMap,
     Path((pool_id, key_id)): Path<(String, String)>,
     Json(body): Json<SetExpiryRequest>,
-) -> ApiResult<StatusCode> {
+) -> ApiResult<axum::response::Response> {
     let (pool, key) = load_scoped_key(&state, &admin, &pool_id, &key_id).await?;
     if let Some(at) = body.expires_at
         && at <= now_ms()
@@ -1437,26 +1492,51 @@ pub async fn set_key_expiry(
             "expires_at must be in the future (revoke instead of expiring into the past)".into(),
         ));
     }
-    db::set_pool_key_expiry(&state.db, &key.id, body.expires_at)
-        .await
-        .map_err(|e| ControlError::Internal(e.into()))?;
-    let ip = client_ip(&headers);
-    audit::record(
-        &state.db,
-        AuditEntry {
-            org_id: Some(&pool.org_id),
-            actor_id: &admin.user_id,
-            actor_email: &admin.email,
-            action: "pool_key.expiry_set",
-            target_kind: TargetKind::PoolKey,
-            target_id: &key.id,
-            before: Some(serde_json::json!({ "expires_at": key.expires_at })),
-            after: Some(serde_json::json!({ "expires_at": body.expires_at })),
-            ip: Some(&ip),
-        },
+    match gate_sensitive_key(
+        &state,
+        &admin,
+        &headers,
+        &pool.org_id,
+        &key.id,
+        key.user_id.as_deref(),
+        crate::approvals::SensitiveKind::AdminKeyExpiry,
+        serde_json::json!({
+            "key_id": key.id,
+            "key_prefix": key.key_prefix,
+            "expires_at": body.expires_at,
+        }),
     )
-    .await;
-    Ok(StatusCode::NO_CONTENT)
+    .await?
+    {
+        SensitiveOutcome::Deferred(pending) => {
+            return Ok((StatusCode::ACCEPTED, Json(pending)).into_response());
+        }
+        SensitiveOutcome::Proceed { solo, alert } => {
+            db::set_pool_key_expiry(&state.db, &key.id, body.expires_at)
+                .await
+                .map_err(|e| ControlError::Internal(e.into()))?;
+            let ip = client_ip(&headers);
+            audit::record(
+                &state.db,
+                AuditEntry {
+                    org_id: Some(&pool.org_id),
+                    actor_id: &admin.user_id,
+                    actor_email: &admin.email,
+                    action: "pool_key.expiry_set",
+                    target_kind: TargetKind::PoolKey,
+                    target_id: &key.id,
+                    before: Some(serde_json::json!({ "expires_at": key.expires_at })),
+                    after: Some(serde_json::json!({
+                        "expires_at": body.expires_at,
+                        "approval": approval_marker(solo, &alert),
+                    })),
+                    ip: Some(&ip),
+                },
+            )
+            .await;
+        }
+    }
+    Ok(StatusCode::NO_CONTENT.into_response())
 }
 
 /// POST /api/v1/pools/{id}/keys/{key_id}/allowlists body.
@@ -1875,7 +1955,7 @@ pub async fn put_classifier(
     headers: axum::http::HeaderMap,
     Path(org_id): Path<String>,
     Json(body): Json<PutClassifierRequest>,
-) -> ApiResult<(StatusCode, Json<db::PublicClassifierConfig>)> {
+) -> ApiResult<axum::response::Response> {
     let org = db::org_by_id(&state.db, &org_id)
         .await
         .map_err(|e| ControlError::Internal(e.into()))?
@@ -2007,31 +2087,55 @@ pub async fn put_classifier(
         sampling_per_hour: sampling,
         updated_at: now_ms(),
     };
-    db::upsert_classifier_config(&state.db, &row)
-        .await
-        .map_err(|e| ControlError::Internal(e.into()))?;
-    let public = db::public_classifier_config(&state.db, &row)
-        .await
-        .map_err(|e| ControlError::Internal(e.into()))?;
-    let ip = client_ip(&headers);
-    audit::record(
-        &state.db,
-        AuditEntry {
-            org_id: Some(&org.id),
-            actor_id: &admin.user_id,
-            actor_email: &admin.email,
-            action: "classifier.configured",
-            target_kind: TargetKind::ClassifierConfig,
-            target_id: &org.id,
-            before: None,
-            // Masked view only — the sealed key material never crosses
-            // into the audit trail.
-            after: serde_json::to_value(&public).ok(),
-            ip: Some(&ip),
-        },
+    // D33: org-wide policy (the purpose statement + auto-block config)
+    // needs a second admin's approval in dual-admin orgs. The probe has
+    // ALREADY validated this config at request time; the SEALED row
+    // defers — the plaintext key existed only inside this request.
+    match gate_sensitive(
+        &state,
+        &admin,
+        &headers,
+        &org.id,
+        crate::approvals::SensitiveKind::OrgPolicy,
+        &org.id,
+        crate::approvals::classifier_payload(&row, "configure"),
     )
-    .await;
-    Ok((StatusCode::CREATED, Json(public)))
+    .await?
+    {
+        SensitiveOutcome::Deferred(pending) => {
+            Ok((StatusCode::ACCEPTED, Json(pending)).into_response())
+        }
+        SensitiveOutcome::Proceed { solo, alert } => {
+            db::upsert_classifier_config(&state.db, &row)
+                .await
+                .map_err(|e| ControlError::Internal(e.into()))?;
+            let public = db::public_classifier_config(&state.db, &row)
+                .await
+                .map_err(|e| ControlError::Internal(e.into()))?;
+            let ip = client_ip(&headers);
+            audit::record(
+                &state.db,
+                AuditEntry {
+                    org_id: Some(&org.id),
+                    actor_id: &admin.user_id,
+                    actor_email: &admin.email,
+                    action: "classifier.configured",
+                    target_kind: TargetKind::ClassifierConfig,
+                    target_id: &org.id,
+                    before: None,
+                    // Masked view only — the sealed key material never
+                    // crosses into the audit trail.
+                    after: serde_json::to_value(&public).ok().map(|mut v| {
+                        v["approval"] = approval_marker(solo, &alert);
+                        v
+                    }),
+                    ip: Some(&ip),
+                },
+            )
+            .await;
+            Ok((StatusCode::CREATED, Json(public)).into_response())
+        }
+    }
 }
 
 /// Validates a 0..=1 float threshold into basis points (exact integer
@@ -2046,13 +2150,14 @@ fn threshold_bp(value: f64) -> ApiResult<i64> {
 }
 
 /// DELETE /api/v1/orgs/{id}/classifier — remove the config; the feature
-/// goes dormant (no row ⇒ no classification, D28).
+/// goes dormant (no row ⇒ no classification, D28). Org-wide policy, so
+/// D33 defers it in dual-admin orgs.
 pub async fn delete_classifier(
     State(state): State<ControlState>,
     admin: AuthedAdmin,
     headers: axum::http::HeaderMap,
     Path(org_id): Path<String>,
-) -> ApiResult<StatusCode> {
+) -> ApiResult<axum::response::Response> {
     let org = db::org_by_id(&state.db, &org_id)
         .await
         .map_err(|e| ControlError::Internal(e.into()))?
@@ -2064,30 +2169,49 @@ pub async fn delete_classifier(
     let Some(existing) = existing else {
         return Err(ControlError::NotFound);
     };
-    db::delete_classifier_config(&state.db, &org.id)
-        .await
-        .map_err(|e| ControlError::Internal(e.into()))?;
-    let ip = client_ip(&headers);
-    audit::record(
-        &state.db,
-        AuditEntry {
-            org_id: Some(&org.id),
-            actor_id: &admin.user_id,
-            actor_email: &admin.email,
-            action: "classifier.deleted",
-            target_kind: TargetKind::ClassifierConfig,
-            target_id: &org.id,
-            before: Some(serde_json::json!({
-                "mode": existing.mode,
-                "auto_block_live": existing.auto_block_live,
-                "key_prefix": existing.key_prefix,
-            })),
-            after: None,
-            ip: Some(&ip),
-        },
+    match gate_sensitive(
+        &state,
+        &admin,
+        &headers,
+        &org.id,
+        crate::approvals::SensitiveKind::OrgPolicy,
+        &org.id,
+        serde_json::json!({ "policy_action": "remove" }),
     )
-    .await;
-    Ok(StatusCode::NO_CONTENT)
+    .await?
+    {
+        SensitiveOutcome::Deferred(pending) => {
+            Ok((StatusCode::ACCEPTED, Json(pending)).into_response())
+        }
+        SensitiveOutcome::Proceed { solo, alert } => {
+            db::delete_classifier_config(&state.db, &org.id)
+                .await
+                .map_err(|e| ControlError::Internal(e.into()))?;
+            let ip = client_ip(&headers);
+            audit::record(
+                &state.db,
+                AuditEntry {
+                    org_id: Some(&org.id),
+                    actor_id: &admin.user_id,
+                    actor_email: &admin.email,
+                    action: "classifier.deleted",
+                    target_kind: TargetKind::ClassifierConfig,
+                    target_id: &org.id,
+                    before: Some(serde_json::json!({
+                        "mode": existing.mode,
+                        "auto_block_live": existing.auto_block_live,
+                        "key_prefix": existing.key_prefix,
+                    })),
+                    after: Some(serde_json::json!({
+                        "approval": approval_marker(solo, &alert),
+                    })),
+                    ip: Some(&ip),
+                },
+            )
+            .await;
+            Ok(StatusCode::NO_CONTENT.into_response())
+        }
+    }
 }
 
 /// POST /api/v1/orgs/{id}/classifier/go-live — flip auto-block from shadow
@@ -2099,42 +2223,473 @@ pub async fn classifier_go_live(
     admin: AuthedAdmin,
     headers: axum::http::HeaderMap,
     Path(org_id): Path<String>,
-) -> ApiResult<Json<db::PublicClassifierConfig>> {
+) -> ApiResult<axum::response::Response> {
     let org = db::org_by_id(&state.db, &org_id)
         .await
         .map_err(|e| ControlError::Internal(e.into()))?
         .ok_or(ControlError::NotFound)?;
     admin.ensure_org_scope(&org.id)?;
-    let n = db::classifier_go_live(&state.db, &org.id, now_ms())
-        .await
-        .map_err(|e| ControlError::Internal(e.into()))?;
-    if n == 0 {
-        return Err(ControlError::Conflict(
-            "no auto_block config in shadow — configure it first (PUT with acknowledge)".into(),
-        ));
+    // D33: go-live IS auto-block config — the most sensitive policy
+    // switch the org has (D28 made it explicit; D33 makes it dual-admin).
+    // In dual-admin orgs it defers; solo orgs flip it with the marker.
+    match gate_sensitive(
+        &state,
+        &admin,
+        &headers,
+        &org.id,
+        crate::approvals::SensitiveKind::OrgPolicy,
+        &org.id,
+        serde_json::json!({ "policy_action": "go_live" }),
+    )
+    .await?
+    {
+        SensitiveOutcome::Deferred(pending) => {
+            Ok((StatusCode::ACCEPTED, Json(pending)).into_response())
+        }
+        SensitiveOutcome::Proceed { solo, alert } => {
+            let n = db::classifier_go_live(&state.db, &org.id, now_ms())
+                .await
+                .map_err(|e| ControlError::Internal(e.into()))?;
+            if n == 0 {
+                return Err(ControlError::Conflict(
+                    "no auto_block config in shadow — configure it first (PUT with acknowledge)"
+                        .into(),
+                ));
+            }
+            let row = db::classifier_config_by_org(&state.db, &org.id)
+                .await
+                .map_err(|e| ControlError::Internal(e.into()))?
+                .ok_or(ControlError::NotFound)?;
+            let ip = client_ip(&headers);
+            audit::record(
+                &state.db,
+                AuditEntry {
+                    org_id: Some(&org.id),
+                    actor_id: &admin.user_id,
+                    actor_email: &admin.email,
+                    action: "classifier.go_live",
+                    target_kind: TargetKind::ClassifierConfig,
+                    target_id: &org.id,
+                    before: Some(serde_json::json!({ "auto_block_live": false })),
+                    after: Some(serde_json::json!({
+                        "auto_block_live": true,
+                        "approval": approval_marker(solo, &alert),
+                    })),
+                    ip: Some(&ip),
+                },
+            )
+            .await;
+            let public = db::public_classifier_config(&state.db, &row)
+                .await
+                .map_err(|e| ControlError::Internal(e.into()))?;
+            Ok(Json(public).into_response())
+        }
     }
-    let row = db::classifier_config_by_org(&state.db, &org.id)
+}
+
+// ---------------------------------------------------------------------------
+// D33: admin four-eyes (approvals)
+// ---------------------------------------------------------------------------
+
+/// Outcome of the D33 request-time gate for one sensitive action.
+#[derive(Debug)]
+pub enum SensitiveOutcome {
+    /// Execute now. `solo` marks the single-admin auto-pass; `alert` is
+    /// the linked open flag id for a containment pass (audit MUST carry
+    /// it). Both false/None = the action wasn't sensitive at all.
+    Proceed { solo: bool, alert: Option<String> },
+    /// Deferred: a pending action exists (audited); respond 202.
+    Deferred(db::PublicPendingAction),
+}
+
+/// The shared tail of the gate: evaluate the org's admin count and either
+/// defer (creating + auditing the pending action) or let the caller
+/// proceed (solo orgs auto-pass, D33's never-deadlock rule).
+async fn gate_sensitive(
+    state: &ControlState,
+    admin: &AuthedAdmin,
+    headers: &axum::http::HeaderMap,
+    org_id: &str,
+    kind: crate::approvals::SensitiveKind,
+    target_id: &str,
+    payload: serde_json::Value,
+) -> ApiResult<SensitiveOutcome> {
+    match crate::approvals::gate_for(&state.db, org_id)
+        .await
+        .map_err(|e| ControlError::Internal(e))?
+    {
+        crate::approvals::Gate::RequiresApproval => {
+            let id = crate::approvals::create_pending(
+                &state.db,
+                org_id,
+                kind,
+                target_id,
+                &payload,
+                &admin.user_id,
+                now_ms(),
+            )
+            .await
+            .map_err(|e| ControlError::Internal(e))?;
+            let ip = client_ip(headers);
+            audit::record(
+                &state.db,
+                AuditEntry {
+                    org_id: Some(org_id),
+                    actor_id: &admin.user_id,
+                    actor_email: &admin.email,
+                    action: "approval.requested",
+                    target_kind: TargetKind::Org,
+                    target_id: &id,
+                    before: None,
+                    after: Some(payload),
+                    ip: Some(&ip),
+                },
+            )
+            .await;
+            let row = db::pending_action_by_id(&state.db, org_id, &id)
+                .await
+                .map_err(|e| ControlError::Internal(e.into()))?
+                .ok_or(ControlError::Internal(anyhow::anyhow!(
+                    "pending action vanished"
+                )))?;
+            Ok(SensitiveOutcome::Deferred(db::PublicPendingAction::from(
+                &row,
+            )))
+        }
+        crate::approvals::Gate::ExecuteDirectly { solo } => {
+            Ok(SensitiveOutcome::Proceed { solo, alert: None })
+        }
+    }
+}
+
+/// Gate for actions on a POOL KEY: only sensitive when the key belongs to
+/// ANOTHER ADMIN (own/member keys are routine, D33). Containment
+/// exemption: an open alert linked to the key lets any single admin act,
+/// with the alert id recorded.
+// clippy allows the 8th arg: the gate's parameter list IS the contract
+// (who/where/what-key/which-kind/payload) — bundling would hide it.
+#[allow(clippy::too_many_arguments)]
+async fn gate_sensitive_key(
+    state: &ControlState,
+    admin: &AuthedAdmin,
+    headers: &axum::http::HeaderMap,
+    org_id: &str,
+    key_id: &str,
+    key_user_id: Option<&str>,
+    kind: crate::approvals::SensitiveKind,
+    payload: serde_json::Value,
+) -> ApiResult<SensitiveOutcome> {
+    // Routine unless the owner is a DIFFERENT org admin.
+    let owner_is_other_admin = match key_user_id {
+        Some(uid) if uid != admin.user_id => {
+            let owner = db::user_by_id(&state.db, uid)
+                .await
+                .map_err(|e| ControlError::Internal(e.into()))?;
+            owner.is_some_and(|u| u.role == "org_admin")
+        }
+        _ => false,
+    };
+    if !owner_is_other_admin {
+        return Ok(SensitiveOutcome::Proceed {
+            solo: false,
+            alert: None,
+        });
+    }
+    // Containment: an open system alert on this key (classifier flag,
+    // D32) = any single admin may act NOW; the audit row links the alert.
+    if let Some(flag) = crate::approvals::linked_alert_for_key(&state.db, key_id)
+        .await
+        .map_err(|e| ControlError::Internal(e))?
+    {
+        return Ok(SensitiveOutcome::Proceed {
+            solo: false,
+            alert: Some(flag),
+        });
+    }
+    gate_sensitive(state, admin, headers, org_id, kind, key_id, payload).await
+}
+
+/// The approval marker appended to a sensitive action's audit `after`
+/// (every execution path carries WHY it needed only one admin).
+fn approval_marker(solo: bool, alert: &Option<String>) -> serde_json::Value {
+    match alert {
+        Some(flag) => serde_json::json!({ "mode": "containment", "alert": flag }),
+        None if solo => serde_json::json!({ "mode": "solo-admin auto-pass" }),
+        None => serde_json::json!({ "mode": "dual-approved" }),
+    }
+}
+
+/// GET /api/v1/orgs/{id}/pending-actions?status=pending|rejected|executed
+/// — the org's deferred sensitive actions (the review queue's second tab).
+pub async fn list_pending_actions(
+    State(state): State<ControlState>,
+    admin: AuthedAdmin,
+    Path(org_id): Path<String>,
+    Query(query): Query<PendingStatusQuery>,
+) -> ApiResult<Json<Vec<db::PublicPendingAction>>> {
+    let org = db::org_by_id(&state.db, &org_id)
         .await
         .map_err(|e| ControlError::Internal(e.into()))?
         .ok_or(ControlError::NotFound)?;
+    admin.ensure_org_scope(&org.id)?;
+    let rows = db::pending_actions_by_org(&state.db, &org.id, query.status.as_deref())
+        .await
+        .map_err(|e| ControlError::Internal(e.into()))?;
+    Ok(Json(
+        rows.iter().map(db::PublicPendingAction::from).collect(),
+    ))
+}
+
+/// Query params for the pending-actions list.
+#[derive(Deserialize)]
+pub struct PendingStatusQuery {
+    pub status: Option<String>,
+}
+
+/// POST /api/v1/orgs/{id}/pending-actions/{action_id}/approve — the
+/// second pair of eyes. The approver must be a DISTINCT admin (org admin
+/// of this org, or the host); the requester can never approve their own
+/// action. Execution re-validates every guard against current state.
+pub async fn approve_pending_action(
+    State(state): State<ControlState>,
+    admin: AuthedAdmin,
+    headers: axum::http::HeaderMap,
+    Path((org_id, action_id)): Path<(String, String)>,
+) -> ApiResult<Json<db::PublicPendingAction>> {
+    let org = db::org_by_id(&state.db, &org_id)
+        .await
+        .map_err(|e| ControlError::Internal(e.into()))?
+        .ok_or(ControlError::NotFound)?;
+    admin.ensure_org_scope(&org.id)?;
+    let action = db::pending_action_by_id(&state.db, &org.id, &action_id)
+        .await
+        .map_err(|e| ControlError::Internal(e.into()))?
+        .ok_or(ControlError::NotFound)?;
+    if action.status != "pending" {
+        return Err(ControlError::Conflict(format!(
+            "action already {}",
+            action.status
+        )));
+    }
     let ip = client_ip(&headers);
+    // Actor ≠ approver (D33): self-approval is refused AND logged — the
+    // refusal itself is audit evidence.
+    if action.requested_by == admin.user_id {
+        audit::record(
+            &state.db,
+            AuditEntry {
+                org_id: Some(&org.id),
+                actor_id: &admin.user_id,
+                actor_email: &admin.email,
+                action: "approval.self_approve_denied",
+                target_kind: TargetKind::Org,
+                target_id: &action.id,
+                before: None,
+                after: Some(serde_json::json!({ "kind": action.kind })),
+                ip: Some(&ip),
+            },
+        )
+        .await;
+        return Err(ControlError::Forbidden);
+    }
+    // Execute against CURRENT state; a failed guard rejects the action
+    // (the world moved — e.g. the demote target is now the last admin).
+    let summary = match crate::approvals::execute(&state.db, &action, now_ms()).await {
+        Ok(summary) => summary,
+        Err(e) => {
+            let _ = db::decide_pending_action(
+                &state.db,
+                &action.id,
+                "rejected",
+                &admin.user_id,
+                now_ms(),
+            )
+            .await;
+            audit::record(
+                &state.db,
+                AuditEntry {
+                    org_id: Some(&org.id),
+                    actor_id: &admin.user_id,
+                    actor_email: &admin.email,
+                    action: "approval.rejected",
+                    target_kind: TargetKind::Org,
+                    target_id: &action.id,
+                    before: None,
+                    after: Some(serde_json::json!({
+                        "reason": format!("execution guard failed: {e:#}")
+                    })),
+                    ip: Some(&ip),
+                },
+            )
+            .await;
+            return Err(ControlError::BadRequest(format!(
+                "action could not execute and was rejected: {e:#}"
+            )));
+        }
+    };
+    let decided =
+        db::decide_pending_action(&state.db, &action.id, "executed", &admin.user_id, now_ms())
+            .await
+            .map_err(|e| ControlError::Internal(e.into()))?;
+    if decided == 0 {
+        return Err(ControlError::Conflict("action already decided".into()));
+    }
+    // The approval decision + the executed effect, both audited.
     audit::record(
         &state.db,
         AuditEntry {
             org_id: Some(&org.id),
             actor_id: &admin.user_id,
             actor_email: &admin.email,
-            action: "classifier.go_live",
-            target_kind: TargetKind::ClassifierConfig,
-            target_id: &org.id,
-            before: Some(serde_json::json!({ "auto_block_live": false })),
-            after: Some(serde_json::json!({ "auto_block_live": true })),
+            action: "approval.approved",
+            target_kind: TargetKind::Org,
+            target_id: &action.id,
+            before: None,
+            after: Some(serde_json::json!({ "kind": action.kind })),
             ip: Some(&ip),
         },
     )
     .await;
-    let public = db::public_classifier_config(&state.db, &row)
+    audit::record(
+        &state.db,
+        AuditEntry {
+            org_id: Some(&org.id),
+            actor_id: &action.requested_by,
+            actor_email: &admin.email,
+            action: "approval.executed",
+            target_kind: TargetKind::Org,
+            target_id: &action.id,
+            before: None,
+            after: Some(serde_json::json!({
+                "kind": action.kind,
+                "summary": summary,
+                "approved_by": admin.user_id,
+            })),
+            ip: Some(&ip),
+        },
+    )
+    .await;
+    let row = db::pending_action_by_id(&state.db, &org.id, &action_id)
         .await
-        .map_err(|e| ControlError::Internal(e.into()))?;
-    Ok(Json(public))
+        .map_err(|e| ControlError::Internal(e.into()))?
+        .ok_or(ControlError::NotFound)?;
+    Ok(Json(db::PublicPendingAction::from(&row)))
+}
+
+/// POST /api/v1/orgs/{id}/pending-actions/{action_id}/reject — discard a
+/// pending action. The requester may withdraw; any other scoped admin may
+/// reject. Nothing executes.
+pub async fn reject_pending_action(
+    State(state): State<ControlState>,
+    admin: AuthedAdmin,
+    headers: axum::http::HeaderMap,
+    Path((org_id, action_id)): Path<(String, String)>,
+) -> ApiResult<Json<db::PublicPendingAction>> {
+    let org = db::org_by_id(&state.db, &org_id)
+        .await
+        .map_err(|e| ControlError::Internal(e.into()))?
+        .ok_or(ControlError::NotFound)?;
+    admin.ensure_org_scope(&org.id)?;
+    let action = db::pending_action_by_id(&state.db, &org.id, &action_id)
+        .await
+        .map_err(|e| ControlError::Internal(e.into()))?
+        .ok_or(ControlError::NotFound)?;
+    if action.status != "pending" {
+        return Err(ControlError::Conflict(format!(
+            "action already {}",
+            action.status
+        )));
+    }
+    let decided =
+        db::decide_pending_action(&state.db, &action.id, "rejected", &admin.user_id, now_ms())
+            .await
+            .map_err(|e| ControlError::Internal(e.into()))?;
+    if decided == 0 {
+        return Err(ControlError::Conflict("action already decided".into()));
+    }
+    let ip = client_ip(&headers);
+    let withdrew = action.requested_by == admin.user_id;
+    audit::record(
+        &state.db,
+        AuditEntry {
+            org_id: Some(&org.id),
+            actor_id: &admin.user_id,
+            actor_email: &admin.email,
+            action: "approval.rejected",
+            target_kind: TargetKind::Org,
+            target_id: &action.id,
+            before: None,
+            after: Some(serde_json::json!({
+                "kind": action.kind,
+                "reason": if withdrew { "withdrawn by requester" } else { "rejected by admin" },
+            })),
+            ip: Some(&ip),
+        },
+    )
+    .await;
+    let row = db::pending_action_by_id(&state.db, &org.id, &action_id)
+        .await
+        .map_err(|e| ControlError::Internal(e.into()))?
+        .ok_or(ControlError::NotFound)?;
+    Ok(Json(db::PublicPendingAction::from(&row)))
+}
+
+/// POST /api/v1/orgs/{id}/admins/{user_id}/demote — D33 sensitive: demote
+/// another org admin to member. Deferred for a second admin's approval in
+/// dual-admin orgs; the last-admin guard runs again at execution.
+pub async fn demote_admin(
+    State(state): State<ControlState>,
+    admin: AuthedAdmin,
+    headers: axum::http::HeaderMap,
+    Path((org_id, user_id)): Path<(String, String)>,
+) -> ApiResult<axum::response::Response> {
+    let org = db::org_by_id(&state.db, &org_id)
+        .await
+        .map_err(|e| ControlError::Internal(e.into()))?
+        .ok_or(ControlError::NotFound)?;
+    admin.ensure_org_scope(&org.id)?;
+    let target = db::user_by_id(&state.db, &user_id)
+        .await
+        .map_err(|e| ControlError::Internal(e.into()))?
+        .ok_or(ControlError::NotFound)?;
+    if target.role != "org_admin" || target.org_id.as_deref() != Some(&org.id) {
+        return Err(ControlError::BadRequest(
+            "target is not an admin of this org".into(),
+        ));
+    }
+    if target.id == admin.user_id {
+        return Err(ControlError::BadRequest(
+            "demote targets ANOTHER admin (self-demote is not a D33 action)".into(),
+        ));
+    }
+    // Another admin exists (the target), so the org is dual-admin by
+    // construction — this always defers. (Solo orgs cannot reach here:
+    // the only admin is the caller.)
+    let outcome = gate_sensitive(
+        &state,
+        &admin,
+        &headers,
+        &org.id,
+        crate::approvals::SensitiveKind::AdminDemote,
+        &target.id,
+        serde_json::json!({
+            "user_id": target.id,
+            "email": target.email,
+        }),
+    )
+    .await?;
+    match outcome {
+        SensitiveOutcome::Deferred(pending) => {
+            Ok((StatusCode::ACCEPTED, Json(pending)).into_response())
+        }
+        SensitiveOutcome::Proceed { solo, alert } => {
+            // Unreachable: the target is a DIFFERENT admin, so the org has
+            // ≥2 admins and gate_sensitive always defers. Guarded anyway —
+            // a demote executed without a second eye would violate D33.
+            let _ = (solo, alert);
+            Err(ControlError::Internal(anyhow::anyhow!(
+                "demote unexpectedly bypassed approvals"
+            )))
+        }
+    }
 }

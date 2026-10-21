@@ -21,7 +21,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { api, ApiError, type ReviewFlag } from "@/lib/api";
+import { api, ApiError, type PendingAction, type ReviewFlag } from "@/lib/api";
 import { formatDateTime } from "@/lib/format";
 import { useApi } from "@/lib/use-api";
 
@@ -31,6 +31,15 @@ const KIND_LABELS: Record<string, string> = {
   classifier_auto_block: "Auto-block (key suspended)",
   impossible_travel: "Country change",
   distinct_ip_concurrency: "Key used from multiple networks",
+};
+
+/** Human label for a pending sensitive action (D33 wire value → words). */
+const PENDING_KIND_LABELS: Record<string, string> = {
+  admin_demote: "Demote admin to member",
+  admin_key_expiry: "Set expiry on an admin's key",
+  admin_key_revoke: "Revoke an admin's key",
+  org_policy: "Org policy (classifier purpose / auto-block)",
+  pool_disable: "Disable pool",
 };
 
 /** The score detail line for classifier kinds (bp → 0–1 alignment). */
@@ -160,6 +169,85 @@ function FlagRow({
   );
 }
 
+/**
+ * D33 approvals: pending sensitive actions awaiting a SECOND admin.
+ * The requester cannot approve their own action (server-enforced); this
+ * panel is where every other admin becomes the second pair of eyes.
+ */
+function ApprovalsPanel({ onDecided }: { onDecided: () => void }) {
+  // The org id comes from the session bootstrap (/auth/me carries org_id).
+  const me = useApi<{ org_id: string | null }>("/auth/me");
+  const orgId = me.data?.org_id ?? null;
+  const actions = useApi<PendingAction[]>(
+    orgId ? `/orgs/${orgId}/pending-actions?status=pending` : null,
+  );
+  const [busyId, setBusyId] = useState<string | null>(null);
+
+  async function decide(actionId: string, decision: "approve" | "reject") {
+    if (!orgId) return;
+    setBusyId(actionId);
+    try {
+      await api.post(`/orgs/${orgId}/pending-actions/${actionId}/${decision}`);
+      toast.success(decision === "approve" ? "Approved and executed" : "Rejected");
+      actions.reload();
+      onDecided();
+    } catch (e) {
+      toast.error(e instanceof ApiError ? e.message : "Decision failed");
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  if (actions.loading) return <TableSkeleton />;
+  if (actions.error) {
+    return <ErrorState message={actions.error.message} onRetry={actions.reload} />;
+  }
+  if ((actions.data ?? []).length === 0) {
+    return (
+      <EmptyState
+        title="No approvals waiting"
+        hint="Sensitive admin actions (another admin's key, org policy, pool deletion) appear here for a second admin."
+      />
+    );
+  }
+  return (
+    <div className="space-y-3">
+      {(actions.data ?? []).map((action) => (
+        <Card key={action.id} data-testid="pending-approval">
+          <CardContent className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+            <div className="space-y-1">
+              <p className="font-medium">
+                {PENDING_KIND_LABELS[action.kind] ?? action.kind}
+              </p>
+              <p className="text-sm text-muted-foreground">
+                Requested {formatDateTime(action.created_at)} — needs a
+                second, distinct admin
+              </p>
+            </div>
+            <div className="flex gap-2">
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={busyId === action.id}
+                onClick={() => decide(action.id, "reject")}
+              >
+                Reject
+              </Button>
+              <Button
+                size="sm"
+                disabled={busyId === action.id}
+                onClick={() => decide(action.id, "approve")}
+              >
+                Approve
+              </Button>
+            </div>
+          </CardContent>
+        </Card>
+      ))}
+    </div>
+  );
+}
+
 /** The queue table for one status filter. */
 function QueueTable({
   status,
@@ -226,9 +314,13 @@ export default function ReviewQueuePage() {
         <CardContent>
           <Tabs defaultValue="open">
             <TabsList>
+              <TabsTrigger value="approvals">Approvals</TabsTrigger>
               <TabsTrigger value="open">Open</TabsTrigger>
               <TabsTrigger value="resolved">Resolved</TabsTrigger>
             </TabsList>
+            <TabsContent value="approvals" className="pt-4">
+              <ApprovalsPanel key={`approvals-${refreshKey}`} onDecided={bump} />
+            </TabsContent>
             <TabsContent value="open" className="pt-4">
               <QueueTable key={`open-${refreshKey}`} status="open" onResolved={bump} />
             </TabsContent>

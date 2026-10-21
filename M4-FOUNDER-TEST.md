@@ -135,3 +135,24 @@ One key, two networks, inside the window → one flag, key keeps working.
   within the 5-minute window.
 - **T5.4 (optional) Tuning**: `PUT /api/v1/orgs/<org>/settings` with
   `{"concurrency_window_secs": 60}` as admin shrinks the window.
+
+## T6 — Admin four-eyes (D33)
+
+You need a SECOND admin to see the interesting half; with one admin
+everything auto-passes (that IS a D33 rule — never deadlock a solo org).
+
+1. As host (`root@t.dev`), create a second admin for your org:
+   `POST /api/v1/members` with `{"org_id": "<yours>", "email":
+   "second@t.dev", "password": "...", "role": "org_admin"}` (the role
+   param needs the host token — M3 rule).
+2. Log in as your usual admin. Disable any pool → the API answers
+   **202** instead of deleting — nothing was disabled.
+3. Review queue → **Approvals** tab: the pending "Disable pool" card.
+   Try approving while logged in as the REQUESTER → refused (403).
+4. Log in as the second admin → Approvals → **Approve** → the pool is
+   now disabled (pool page shows it).
+5. Containment (fast path): with a live classifier auto-block, a
+   flagged key's suspension lands INSTANTLY — no approval card ever
+   appears for system actions.
+6. Solo pass: in a one-admin org the same actions execute directly; the
+   audit row (Audit page) carries `"mode": "solo-admin auto-pass"`.

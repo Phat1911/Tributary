@@ -22,6 +22,46 @@
 
 ## Milestone log (append per completed milestone; keep the most recent 10)
 
+### 2026-10-21 — D33 admin four-eyes (approvals) moved into M4
+
+Director instruction (founder overruled the M6 deferral; SPEC already
+amended by the director — the dirty SPEC.md is committed with this
+change, same-commit amendment per workflow step 3).
+
+**Scope.** Minimal two-step approval machinery for the exact D33
+sensitive set: demote another admin; alter another admin's key (expiry,
+revoke); org-wide policy (classifier purpose/auto-block configure,
+remove, go-live); pool disable. Request by admin A → `pending_actions`
+row (executes nothing) → a SECOND, DISTINCT admin (or the host) approves
+→ executes; reject/withdraw discards. Audit rows for
+requested/approved/executed/rejected/self-approve-denied. Guards:
+requester can never self-approve; the last remaining admin cannot be
+demoted (checked at request AND execution); single-admin orgs auto-pass
+with a logged `"solo-admin auto-pass"` marker; containment exemption —
+a key with an OPEN system alert (classifier, D32) may be acted on by
+any single admin, the alert id linked in the audit row; system
+suspensions (classifier auto-block) never create pending actions.
+
+**Files.** `migrations/0011_pending_actions.sql` (new table);
+`crates/control/src/approvals.rs` (kinds, gate, execution dispatcher,
+sealed classifier payload); `crates/control/src/db.rs` (pending-action
+queries, org_admin_count, demote, latest open flag);
+`crates/control/src/api.rs` (gate helpers + hooks on expiry/revoke/
+classifier PUT/DELETE/go-live/pool disable + list/approve/reject/demote
+endpoints); `crates/gateway/tests/m4_journeys.rs` (j8); dashboard review
+queue "Approvals" tab + `PendingAction` type.
+
+**Tests.** j8 dual-DB journey through the public API: A expires B's key
+→ 202 pending, key untouched → A self-approve 403 (audited) → B approves
+→ executes → policy configure + go-live also defer and approve → live
+classifier auto-block suspends B's key instantly with NO pending action
+→ open alert lets A revoke solo → solo-admin org executes directly with
+the marker. Approvals unit tests (kind round-trip, sealed payload
+rebuild). Suite: 117/117 dual-DB, clippy clean both legs, dashboard
+lint+tsc clean.
+
+**No new dependencies** (workflow step 10 n/a).
+
 Template:
 
 ```

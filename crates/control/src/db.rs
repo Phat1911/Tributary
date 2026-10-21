@@ -1335,6 +1335,229 @@ pub async fn concurrency_flags_for_key(
     Ok(n)
 }
 
+// --- Pending actions (D33 admin four-eyes) -------------------------------------
+
+/// One deferred sensitive action. The payload is SANITIZED parameters
+/// (sealed blobs for secrets — never plaintext keys, rule 2); the write
+/// only happens when a second, distinct admin approves.
+#[derive(Debug, Clone, Serialize)]
+pub struct PendingActionRow {
+    pub id: String,
+    pub org_id: String,
+    pub kind: String,
+    /// The action's subject (admin id / key id / pool id / org id) — for
+    /// display and re-validation at execution time.
+    pub target_id: String,
+    pub payload_json: String,
+    pub requested_by: String,
+    pub status: String,
+    pub decided_by: Option<String>,
+    pub decided_at: Option<i64>,
+    pub created_at: i64,
+}
+
+/// The masked public view served to admins (payload stays server-side).
+#[derive(Debug, Clone, Serialize)] // serde: this struct → JSON — queue view
+pub struct PublicPendingAction {
+    pub id: String,
+    pub org_id: String,
+    pub kind: String,
+    pub target_id: String,
+    pub requested_by: String,
+    pub status: String,
+    pub created_at: i64,
+    pub decided_by: Option<String>,
+    pub decided_at: Option<i64>,
+}
+
+impl From<&PendingActionRow> for PublicPendingAction {
+    fn from(row: &PendingActionRow) -> Self {
+        PublicPendingAction {
+            id: row.id.clone(),
+            org_id: row.org_id.clone(),
+            kind: row.kind.clone(),
+            target_id: row.target_id.clone(),
+            requested_by: row.requested_by.clone(),
+            status: row.status.clone(),
+            created_at: row.created_at,
+            decided_by: row.decided_by.clone(),
+            decided_at: row.decided_at,
+        }
+    }
+}
+
+/// How many org_admins the org has (D33 gate: ≥2 ⇒ dual-control).
+pub async fn org_admin_count(db: &Db, org_id: &str) -> sqlx::Result<i64> {
+    let sql = db.sql("SELECT COUNT(*) AS n FROM users WHERE org_id = ? AND role = 'org_admin'");
+    let row = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
+        .bind(org_id)
+        .fetch_one(db.pool())
+        .await?;
+    let n: i64 = row.get("n");
+    Ok(n)
+}
+
+/// Inserts one pending action (status='pending').
+#[allow(clippy::too_many_arguments)]
+pub async fn insert_pending_action(
+    db: &Db,
+    id: &str,
+    org_id: &str,
+    kind: &str,
+    target_id: &str,
+    payload_json: &str,
+    requested_by: &str,
+    created_at: i64,
+) -> sqlx::Result<()> {
+    let sql = db.sql(
+        "INSERT INTO pending_actions \
+         (id, org_id, kind, target_id, payload_json, requested_by, status, created_at) \
+         VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)",
+    );
+    sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
+        .bind(id)
+        .bind(org_id)
+        .bind(kind)
+        .bind(target_id)
+        .bind(payload_json)
+        .bind(requested_by)
+        .bind(created_at)
+        .execute(db.pool())
+        .await?;
+    Ok(())
+}
+
+fn pending_action_from_row(row: sqlx::any::AnyRow) -> PendingActionRow {
+    PendingActionRow {
+        id: row.get("id"),
+        org_id: row.get("org_id"),
+        kind: row.get("kind"),
+        target_id: row.get("target_id"),
+        payload_json: row.get("payload_json"),
+        requested_by: row.get("requested_by"),
+        status: row.get("status"),
+        decided_by: row.get("decided_by"),
+        decided_at: row.get("decided_at"),
+        created_at: row.get("created_at"),
+    }
+}
+
+/// Lists an org's pending actions, newest first (status filter optional).
+pub async fn pending_actions_by_org(
+    db: &Db,
+    org_id: &str,
+    status: Option<&str>,
+) -> sqlx::Result<Vec<PendingActionRow>> {
+    let (sql, has_status) = match status {
+        Some(_) => (
+            db.sql(
+                "SELECT id, org_id, kind, target_id, payload_json, requested_by, status, \
+                  decided_by, decided_at, created_at FROM pending_actions \
+                 WHERE org_id = ? AND status = ? ORDER BY created_at DESC",
+            ),
+            true,
+        ),
+        None => (
+            db.sql(
+                "SELECT id, org_id, kind, target_id, payload_json, requested_by, status, \
+                  decided_by, decided_at, created_at FROM pending_actions \
+                 WHERE org_id = ? ORDER BY created_at DESC",
+            ),
+            false,
+        ),
+    };
+    let mut q = sqlx::query(sqlx::AssertSqlSafe(sql.as_str())).bind(org_id);
+    if has_status {
+        q = q.bind(status.unwrap());
+    }
+    let rows = q.fetch_all(db.pool()).await?;
+    Ok(rows
+        .iter()
+        .map(|r| pending_action_from_row(r.clone()))
+        .collect())
+}
+
+/// Loads one pending action scoped to the org (None = wrong org or gone).
+pub async fn pending_action_by_id(
+    db: &Db,
+    org_id: &str,
+    id: &str,
+) -> sqlx::Result<Option<PendingActionRow>> {
+    let sql = db.sql(
+        "SELECT id, org_id, kind, target_id, payload_json, requested_by, status, \
+          decided_by, decided_at, created_at FROM pending_actions \
+         WHERE org_id = ? AND id = ?",
+    );
+    let row = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
+        .bind(org_id)
+        .bind(id)
+        .fetch_optional(db.pool())
+        .await?;
+    Ok(row.map(pending_action_from_row))
+}
+
+/// Marks a decision (executed | rejected). Returns rows affected (0 =
+/// already decided — the caller treats that as conflict).
+pub async fn decide_pending_action(
+    db: &Db,
+    id: &str,
+    status: &str,
+    decided_by: &str,
+    decided_at: i64,
+) -> sqlx::Result<u64> {
+    let sql = db.sql(
+        "UPDATE pending_actions SET status = ?, decided_by = ?, decided_at = ? \
+         WHERE id = ? AND status = 'pending'",
+    );
+    let res = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
+        .bind(status)
+        .bind(decided_by)
+        .bind(decided_at)
+        .bind(id)
+        .execute(db.pool())
+        .await?;
+    Ok(res.rows_affected())
+}
+
+/// The most recent OPEN flag linked to a key (D33 containment link).
+pub async fn latest_open_flag_for_key(db: &Db, pool_key_id: &str) -> sqlx::Result<Option<String>> {
+    let sql = db.sql(
+        "SELECT id FROM review_flags WHERE pool_key_id = ? AND status = 'open' \
+         ORDER BY created_at DESC LIMIT 1",
+    );
+    let row = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
+        .bind(pool_key_id)
+        .fetch_optional(db.pool())
+        .await?;
+    Ok(row.map(|r| r.get::<String, _>("id")))
+}
+
+/// Demotes an org_admin to member (D33 AdminDemote execution). Returns 0
+/// when the target stopped being an admin meanwhile — the caller refuses.
+pub async fn demote_org_admin(db: &Db, user_id: &str) -> sqlx::Result<u64> {
+    let sql = db.sql("UPDATE users SET role = 'member' WHERE id = ? AND role = 'org_admin'");
+    let res = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
+        .bind(user_id)
+        .execute(db.pool())
+        .await?;
+    Ok(res.rows_affected())
+}
+
+/// Open review flags linked to one pool key (D33 containment check: an
+/// admin revoking/expiring a key WITH a linked alert may act solo).
+pub async fn open_flags_for_key(db: &Db, pool_key_id: &str) -> sqlx::Result<i64> {
+    let sql = db.sql(
+        "SELECT COUNT(*) AS n FROM review_flags \
+         WHERE pool_key_id = ? AND status = 'open'",
+    );
+    let row = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
+        .bind(pool_key_id)
+        .fetch_one(db.pool())
+        .await?;
+    let n: i64 = row.get("n");
+    Ok(n)
+}
+
 // --- Review queue --------------------------------------------------------------
 
 /// One review-queue flag as served to admins (detail already sanitized at

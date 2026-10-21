@@ -217,6 +217,18 @@ export interface ReviewFlag {
   resolved_by: string | null;
 }
 
+export interface PendingAction {
+  id: string;
+  org_id: string;
+  kind: string; // admin_demote | admin_key_expiry | admin_key_revoke | org_policy | pool_disable
+  target_id: string;
+  requested_by: string;
+  status: string; // pending | executed | rejected
+  created_at: number;
+  decided_by: string | null;
+  decided_at: number | null;
+}
+
 export interface ClassifierConfig {
   org_id: string;
   base_url: string;

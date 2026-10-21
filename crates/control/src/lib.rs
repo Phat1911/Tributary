@@ -15,6 +15,7 @@
 //! pipeline shared with the gateway, and the BYOK classifier config (D28).
 
 pub mod api;
+pub mod approvals;
 pub mod audit;
 pub mod auth;
 pub mod classifier;
@@ -157,6 +158,23 @@ pub fn router(state: ControlState) -> Router {
         .route("/api/v1/me/usage", get(me::my_usage))
         .route("/api/v1/me/usage/summary", get(me::my_usage_summary))
         .route("/api/v1/me/disclosure", get(me::my_disclosure))
+        // D33 admin four-eyes: the pending-action list + decision API.
+        .route(
+            "/api/v1/orgs/{id}/pending-actions",
+            get(api::list_pending_actions),
+        )
+        .route(
+            "/api/v1/orgs/{id}/pending-actions/{action_id}/approve",
+            post(api::approve_pending_action),
+        )
+        .route(
+            "/api/v1/orgs/{id}/pending-actions/{action_id}/reject",
+            post(api::reject_pending_action),
+        )
+        .route(
+            "/api/v1/orgs/{id}/admins/{user_id}/demote",
+            post(api::demote_admin),
+        )
         .route("/api/v1/audit", get(api::list_audit))
         .route("/api/v1/review-flags", get(api::list_review_flags))
         .route(

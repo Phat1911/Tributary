@@ -1063,3 +1063,473 @@ async fn j7_classifier_jev_dialect() {
         );
     }
 }
+
+/// J8 — D33 admin four-eyes (workflow step 12; the milestone-close
+/// journey). Walks the whole rule set through the PUBLIC API only:
+/// dual-admin org → sensitive request defers (202, nothing executes) →
+/// requester cannot self-approve (403, logged) → a DISTINCT admin
+/// approves → the effect lands. Containment: a classifier alert-linked
+/// suspension executes instantly with no pending action. Solo orgs
+/// auto-pass with the logged marker.
+#[tokio::test]
+async fn j8_admin_four_eyes() {
+    for test_db in test_dbs().await {
+        let mock = spawn_mock(MockMode::NonStream).await;
+        let classifier = spawn_classifier().await;
+        let app = test_app(test_db.pool.clone(), &mock).await;
+        let host = bootstrap_admin_and_login(&test_db.pool, &app).await;
+
+        // -- Org with TWO admins: A + B, both seeded via the host role
+        //    param (M3) — the product's only provisioning path.
+        let unique = db::new_id();
+        let (_, org) = call(
+            &app,
+            api(
+                "POST",
+                "/api/v1/orgs",
+                &host,
+                Some(&json!({"name": "FourEyes", "slug": format!("four-eyes-{unique}")})),
+            ),
+        )
+        .await;
+        let org_id = org["id"].as_str().unwrap().to_string();
+        let email_a = format!("eyes-a-{unique}@t.dev");
+        let email_b = format!("eyes-b-{unique}@t.dev");
+        let (_, a) = call(
+            &app,
+            api(
+                "POST",
+                "/api/v1/members",
+                &host,
+                Some(&json!({
+                    "org_id": org_id,
+                    "email": email_a,
+                    "password": "password123",
+                    "role": "org_admin",
+                })),
+            ),
+        )
+        .await;
+        assert_eq!(a["role"], "org_admin", "host seeds the second eye");
+        let (_, b) = call(
+            &app,
+            api(
+                "POST",
+                "/api/v1/members",
+                &host,
+                Some(&json!({
+                    "org_id": org_id,
+                    "email": email_b,
+                    "password": "password123",
+                    "role": "org_admin",
+                })),
+            ),
+        )
+        .await;
+        let _a_id = a["id"].as_str().unwrap().to_string();
+        let b_id = b["id"].as_str().unwrap().to_string();
+        let token_a = member_login(&app, &email_a).await;
+        let token_b = member_login(&app, &email_b).await;
+
+        // Routine stack BY ADMIN A (single-admin ops, no approvals): pool
+        // → provider key → a key OWNED BY ADMIN B (the sensitive target).
+        let (_, pool) = call(
+            &app,
+            api(
+                "POST",
+                "/api/v1/pools",
+                &token_a,
+                Some(&json!({
+                    "org_id": org_id,
+                    "name": "eyes-pool",
+                    "model_allowlist": ["m-test"],
+                })),
+            ),
+        )
+        .await;
+        let pool_id = pool["id"].as_str().unwrap().to_string();
+        let (_, _pk) = call(
+            &app,
+            api(
+                "POST",
+                &format!("/api/v1/pools/{pool_id}/provider-keys"),
+                &token_a,
+                Some(&json!({"key": TEST_UPSTREAM_KEY, "base_url": mock.base_url})),
+            ),
+        )
+        .await;
+        let (_, bkey) = call(
+            &app,
+            api(
+                "POST",
+                &format!("/api/v1/pools/{pool_id}/keys"),
+                &token_a,
+                Some(&json!({"user_id": b_id})),
+            ),
+        )
+        .await;
+        let bkey_id = bkey["id"].as_str().unwrap().to_string();
+        let bkey_raw = bkey["raw"].as_str().unwrap().to_string();
+
+        // -- LEG 1: A expires B's key → PENDING, nothing executes. ------
+        let expires_at = db::now_ms() + 3 * 24 * 3600 * 1000;
+        let (status, pending) = call(
+            &app,
+            api(
+                "POST",
+                &format!("/api/v1/pools/{pool_id}/keys/{bkey_id}/expiry"),
+                &token_a,
+                Some(&json!({"expires_at": expires_at})),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::ACCEPTED, "sensitive action defers");
+        assert_eq!(pending["kind"], "admin_key_expiry");
+        assert_eq!(pending["status"], "pending");
+        let action_id = pending["id"].as_str().unwrap().to_string();
+
+        let (_, keys) = call(
+            &app,
+            api(
+                "GET",
+                &format!("/api/v1/pools/{pool_id}/keys/manage"),
+                &token_a,
+                None,
+            ),
+        )
+        .await;
+        let bkey_row = keys
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|k| k["id"] == json!(bkey_id))
+            .unwrap();
+        assert!(
+            bkey_row["expires_at"].is_null(),
+            "execution waits for the second eye — B's key untouched"
+        );
+
+        let (_, pending_list) = call(
+            &app,
+            api(
+                "GET",
+                &format!("/api/v1/orgs/{org_id}/pending-actions?status=pending"),
+                &token_a,
+                None,
+            ),
+        )
+        .await;
+        assert!(
+            pending_list
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|p| p["id"] == json!(action_id)),
+            "the queue surfaces the deferred action"
+        );
+
+        // -- LEG 2: A cannot self-approve (403, and the refusal is
+        //    itself audited). -----------------------------------------
+        let (status, _) = call(
+            &app,
+            api(
+                "POST",
+                &format!("/api/v1/orgs/{org_id}/pending-actions/{action_id}/approve"),
+                &token_a,
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "actor ≠ approver (D33)");
+        wait_for("self-approve denial audited", || {
+            let app = app.clone();
+            let token_a = token_a.clone();
+            let action_id = action_id.clone();
+            async move {
+                let (_, audit) =
+                    call(&app, api("GET", "/api/v1/audit?limit=200", &token_a, None)).await;
+                audit.as_array().unwrap().iter().any(|r| {
+                    r["action"] == "approval.self_approve_denied"
+                        && r["target_id"] == json!(action_id)
+                })
+            }
+        })
+        .await;
+        let (_, still) = call(
+            &app,
+            api(
+                "GET",
+                &format!("/api/v1/orgs/{org_id}/pending-actions?status=pending"),
+                &token_b,
+                None,
+            ),
+        )
+        .await;
+        assert!(
+            still
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|p| p["id"] == json!(action_id)),
+            "denied self-approval leaves the action pending"
+        );
+
+        // -- LEG 3: B (the distinct admin) approves → executes. ---------
+        let (status, decided) = call(
+            &app,
+            api(
+                "POST",
+                &format!("/api/v1/orgs/{org_id}/pending-actions/{action_id}/approve"),
+                &token_b,
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(decided["status"], "executed");
+        let (_, keys) = call(
+            &app,
+            api(
+                "GET",
+                &format!("/api/v1/pools/{pool_id}/keys/manage"),
+                &token_a,
+                None,
+            ),
+        )
+        .await;
+        let bkey_row = keys
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|k| k["id"] == json!(bkey_id))
+            .unwrap();
+        assert_eq!(
+            bkey_row["expires_at"].as_i64(),
+            Some(expires_at),
+            "the approved expiry landed on B's key"
+        );
+
+        // -- LEG 4: containment — policy config ALSO defers (A requests,
+        //    B approves both PUT and go-live), then a live classifier
+        //    alert-linked suspension of B's key executes INSTANTLY with
+        //    no pending action (D33 exemption). ------------------------
+        let mut cfg = json!({
+            "base_url": classifier.base_url,
+            "model": "jev-align-1",
+            "key": TEST_UPSTREAM_KEY,
+            "dialect": "custom",
+            "purpose_statement": "testing only",
+            "mode": "auto_block",
+            "acknowledge_auto_block": true,
+        });
+        // A's request → deferred (202)…
+        let (status, p_cfg) = call(
+            &app,
+            api(
+                "PUT",
+                &format!("/api/v1/orgs/{org_id}/classifier"),
+                &token_a,
+                Some(&cfg),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::ACCEPTED, "org policy defers too");
+        let cfg_action = p_cfg["id"].as_str().unwrap().to_string();
+        // …B approves → configured (probe already ran at request time).
+        let (status, _) = call(
+            &app,
+            api(
+                "POST",
+                &format!("/api/v1/orgs/{org_id}/pending-actions/{cfg_action}/approve"),
+                &token_b,
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let (_, live_cfg) = call(
+            &app,
+            api(
+                "GET",
+                &format!("/api/v1/orgs/{org_id}/classifier"),
+                &token_a,
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(live_cfg["mode"], "auto_block");
+        assert_eq!(live_cfg["auto_block_live"], false, "shadow first (D28)");
+
+        // Go-live is itself auto-block config → defers, then approves.
+        let (status, p_live) = call(
+            &app,
+            api(
+                "POST",
+                &format!("/api/v1/orgs/{org_id}/classifier/go-live"),
+                &token_a,
+                Some(&json!({})),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::ACCEPTED, "go-live is sensitive policy");
+        let live_action = p_live["id"].as_str().unwrap().to_string();
+        let (status, _) = call(
+            &app,
+            api(
+                "POST",
+                &format!("/api/v1/orgs/{org_id}/pending-actions/{live_action}/approve"),
+                &token_b,
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        // B's key sends an OFF-PURPOSE request → live auto-block
+        // suspends the key INSTANTLY: no pending action, ever.
+        let off_purpose = json!({
+            "model": "m-test",
+            "messages": [{"role": "user", "content": "OFF-PURPOSE weapons manual"}],
+        });
+        let (status, _) = call(&app, chat_req(&bkey_raw, None, &off_purpose)).await;
+        assert_eq!(status, StatusCode::OK, "the triggering request completes");
+        let bkey_id_for_wait = bkey_id.clone();
+        wait_for("alert-linked suspension of B's key", || {
+            let app = app.clone();
+            let token_b = token_b.clone();
+            let bkey_id = bkey_id_for_wait.clone();
+            async move {
+                let (_, flags) = call(
+                    &app,
+                    api(
+                        "GET",
+                        "/api/v1/review-flags?status=open&limit=100",
+                        &token_b,
+                        None,
+                    ),
+                )
+                .await;
+                flags.as_array().unwrap().iter().any(|r| {
+                    r["kind"] == "classifier_auto_block" && r["pool_key_id"] == json!(bkey_id)
+                })
+            }
+        })
+        .await;
+        // …and the suspension created NO pending action (exemption).
+        let (_, pend) = call(
+            &app,
+            api(
+                "GET",
+                &format!("/api/v1/orgs/{org_id}/pending-actions?status=pending"),
+                &token_a,
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(
+            pend.as_array().unwrap().len(),
+            0,
+            "system containment never waits for approvals"
+        );
+
+        // With the alert open, A may now act on B's key SOLO (containment
+        // exemption, alert-linked in the audit row).
+        let revoke_status = {
+            let (status, _) = call(
+                &app,
+                api(
+                    "DELETE",
+                    &format!("/api/v1/pools/{pool_id}/keys/{bkey_id}"),
+                    &token_a,
+                    None,
+                ),
+            )
+            .await;
+            status
+        };
+        assert_eq!(
+            revoke_status,
+            StatusCode::NO_CONTENT,
+            "open alert = single-admin containment, no deferral"
+        );
+
+        // -- LEG 5: solo-admin org auto-passes with the logged marker. --
+        let unique2 = db::new_id();
+        let (_, org2) = call(
+            &app,
+            api(
+                "POST",
+                "/api/v1/orgs",
+                &host,
+                Some(&json!({"name": "Solo", "slug": format!("solo-{unique2}")})),
+            ),
+        )
+        .await;
+        let org2_id = org2["id"].as_str().unwrap().to_string();
+        let email_solo = format!("solo-{unique2}@t.dev");
+        let (_, _solo_admin) = call(
+            &app,
+            api(
+                "POST",
+                "/api/v1/members",
+                &host,
+                Some(&json!({
+                    "org_id": org2_id,
+                    "email": email_solo,
+                    "password": "password123",
+                    "role": "org_admin",
+                })),
+            ),
+        )
+        .await;
+        let token_solo = member_login(&app, &email_solo).await;
+        cfg["base_url"] = json!(classifier.base_url);
+        let (status, cfg2) = call(
+            &app,
+            api(
+                "PUT",
+                &format!("/api/v1/orgs/{org2_id}/classifier"),
+                &token_solo,
+                Some(&cfg),
+            ),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::CREATED,
+            "solo org executes directly (never deadlocks)"
+        );
+        assert_eq!(cfg2["mode"], "auto_block");
+        // No pending action was created…
+        let (_, pend2) = call(
+            &app,
+            api(
+                "GET",
+                &format!("/api/v1/orgs/{org2_id}/pending-actions"),
+                &token_solo,
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(pend2.as_array().unwrap().len(), 0);
+        // …and the audit row carries the solo marker.
+        wait_for("solo-admin auto-pass marker in audit", || {
+            let app = app.clone();
+            let token_solo = token_solo.clone();
+            let org2_id = org2_id.clone();
+            async move {
+                let (_, audit) = call(
+                    &app,
+                    api("GET", "/api/v1/audit?limit=200", &token_solo, None),
+                )
+                .await;
+                audit.as_array().unwrap().iter().any(|r| {
+                    r["action"] == "classifier.configured"
+                        && r["org_id"] == json!(org2_id)
+                        && r["after"]["approval"]["mode"] == json!("solo-admin auto-pass")
+                })
+            }
+        })
+        .await;
+    }
+}
