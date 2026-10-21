@@ -6,7 +6,7 @@
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useEffect, type ReactNode } from "react";
-import {
+import { Settings2,
   KeyRound,
   LogOut,
   Scale,
@@ -51,6 +51,12 @@ const NAV: NavItem[] = [
     href: "/org/classifier",
     label: "Purpose classifier",
     icon: <Scale className="size-4" aria-hidden />,
+    roles: ["org_admin"],
+  },
+  {
+    href: "/org/settings",
+    label: "Detection settings",
+    icon: <Settings2 className="size-4" aria-hidden />,
     roles: ["org_admin"],
   },
   {
