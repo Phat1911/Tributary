@@ -653,6 +653,15 @@ function ExpiryDialog({
               value={date}
               min={new Date().toISOString().slice(0, 10)}
               onChange={(e) => setDate(e.target.value)}
+              // Enter inside a date input confirms the PICKER, not the
+              // form (Chrome behavior) — the founder's papercut: Enter
+              // looked like Save but never submitted. Submit explicitly.
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  e.currentTarget.form?.requestSubmit();
+                }
+              }}
             />
           </div>
           {error ? (
