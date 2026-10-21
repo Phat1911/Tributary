@@ -597,12 +597,6 @@ function RotateKeyDialog({
   );
 }
 
-// Local-time YYYY-MM-DD (en-CA happens to format ISO-style; the UTC-based
-// toISOString would re-admit "today" in the evening for UTC+7 users).
-function localYmd(d: Date): string {
-  return d.toLocaleDateString("en-CA");
-}
-
 /** Set-or-clear expiry dialog (epoch ms sent; input is a date). */
 function ExpiryDialog({
   poolId,
@@ -616,16 +610,9 @@ function ExpiryDialog({
   onSaved: () => void;
 }) {
   const current = poolKey.expires_at
-    ? localYmd(new Date(poolKey.expires_at))
+    ? new Date(poolKey.expires_at).toISOString().slice(0, 10)
     : "";
-  // A picked date becomes LOCAL MIDNIGHT of that day — so "today" is
-  // always already in the past and the server rejects it. Default (and
-  // the earliest allowed pick) is TOMORROW (founder UX report 2026-10-21:
-  // picking today saved nothing and the rejection was easy to miss).
-  const tomorrowDate = new Date();
-  tomorrowDate.setDate(tomorrowDate.getDate() + 1);
-  const tomorrow = localYmd(tomorrowDate);
-  const [date, setDate] = useState(current || tomorrow);
+  const [date, setDate] = useState(current);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -664,7 +651,7 @@ function ExpiryDialog({
               id="expiry-date"
               type="date"
               value={date}
-              min={tomorrow}
+              min={new Date().toISOString().slice(0, 10)}
               onChange={(e) => setDate(e.target.value)}
             />
           </div>
