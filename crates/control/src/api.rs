@@ -2291,6 +2291,37 @@ pub async fn classifier_go_live(
 // D33: admin four-eyes (approvals)
 // ---------------------------------------------------------------------------
 
+/// Builds the masked public view of a pending action. Legacy rows whose
+/// payload predates the owner_email field get the affected admin's email
+/// resolved READ-TIME (the stored payload is never rewritten — rows are
+/// immutable evidence), so every card can say whom the action touches.
+async fn pending_public(
+    state: &ControlState,
+    row: &db::PendingActionRow,
+) -> db::PublicPendingAction {
+    let mut payload: serde_json::Value =
+        serde_json::from_str(&row.payload_json).unwrap_or(serde_json::Value::Null);
+    let missing_owner = payload["owner_email"].as_str().unwrap_or("").is_empty();
+    if row.kind.starts_with("admin_key_")
+        && missing_owner
+        && let Ok(Some(email)) = db::key_owner_email(&state.db, &row.target_id).await
+    {
+        payload["owner_email"] = serde_json::json!(email);
+    }
+    db::PublicPendingAction {
+        id: row.id.clone(),
+        org_id: row.org_id.clone(),
+        kind: row.kind.clone(),
+        target_id: row.target_id.clone(),
+        requested_by: row.requested_by.clone(),
+        status: row.status.clone(),
+        created_at: row.created_at,
+        decided_by: row.decided_by.clone(),
+        decided_at: row.decided_at,
+        summary: crate::approvals::summarize(&row.kind, &payload),
+    }
+}
+
 /// Outcome of the D33 request-time gate for one sensitive action.
 #[derive(Debug)]
 pub enum SensitiveOutcome {
@@ -2352,9 +2383,9 @@ async fn gate_sensitive(
                 .ok_or(ControlError::Internal(anyhow::anyhow!(
                     "pending action vanished"
                 )))?;
-            Ok(SensitiveOutcome::Deferred(db::PublicPendingAction::from(
-                &row,
-            )))
+            Ok(SensitiveOutcome::Deferred(
+                pending_public(state, &row).await,
+            ))
         }
         crate::approvals::Gate::ExecuteDirectly { solo } => {
             Ok(SensitiveOutcome::Proceed { solo, alert: None })
@@ -2445,9 +2476,11 @@ pub async fn list_pending_actions(
     let rows = db::pending_actions_by_org(&state.db, &org.id, query.status.as_deref())
         .await
         .map_err(|e| ControlError::Internal(e.into()))?;
-    Ok(Json(
-        rows.iter().map(db::PublicPendingAction::from).collect(),
-    ))
+    let mut out = Vec::with_capacity(rows.len());
+    for r in &rows {
+        out.push(pending_public(&state, r).await);
+    }
+    Ok(Json(out))
 }
 
 /// Query params for the pending-actions list.
@@ -2583,7 +2616,7 @@ pub async fn approve_pending_action(
         .await
         .map_err(|e| ControlError::Internal(e.into()))?
         .ok_or(ControlError::NotFound)?;
-    Ok(Json(db::PublicPendingAction::from(&row)))
+    Ok(Json(pending_public(&state, &row).await))
 }
 
 /// POST /api/v1/orgs/{id}/pending-actions/{action_id}/reject — discard a
@@ -2641,7 +2674,7 @@ pub async fn reject_pending_action(
         .await
         .map_err(|e| ControlError::Internal(e.into()))?
         .ok_or(ControlError::NotFound)?;
-    Ok(Json(db::PublicPendingAction::from(&row)))
+    Ok(Json(pending_public(&state, &row).await))
 }
 
 /// POST /api/v1/orgs/{id}/admins/{user_id}/demote — D33 sensitive: demote

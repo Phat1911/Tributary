@@ -1373,25 +1373,19 @@ pub struct PublicPendingAction {
     pub summary: String,
 }
 
-impl From<&PendingActionRow> for PublicPendingAction {
-    fn from(row: &PendingActionRow) -> Self {
-        // Parse the stored payload ONLY to project its summary — the
-        // display string; nothing else from it is ever serialized out.
-        let payload: serde_json::Value =
-            serde_json::from_str(&row.payload_json).unwrap_or(serde_json::Value::Null);
-        PublicPendingAction {
-            id: row.id.clone(),
-            org_id: row.org_id.clone(),
-            kind: row.kind.clone(),
-            target_id: row.target_id.clone(),
-            requested_by: row.requested_by.clone(),
-            status: row.status.clone(),
-            created_at: row.created_at,
-            decided_by: row.decided_by.clone(),
-            decided_at: row.decided_at,
-            summary: crate::approvals::summarize(&row.kind, &payload),
-        }
-    }
+/// The email of a pool key's OWNER user (read-time enrichment for D33
+/// approval views: legacy pending rows whose payload predates the
+/// owner_email field still resolve the affected admin).
+pub async fn key_owner_email(db: &Db, pool_key_id: &str) -> sqlx::Result<Option<String>> {
+    let sql = db.sql(
+        "SELECT u.email AS email FROM pool_keys k \
+         JOIN users u ON u.id = k.user_id WHERE k.id = ?",
+    );
+    let row = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
+        .bind(pool_key_id)
+        .fetch_optional(db.pool())
+        .await?;
+    Ok(row.map(|r| r.get::<String, _>("email")))
 }
 
 /// How many org_admins the org has (D33 gate: ≥2 ⇒ dual-control).

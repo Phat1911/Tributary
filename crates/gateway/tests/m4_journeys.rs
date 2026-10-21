@@ -1126,7 +1126,7 @@ async fn j8_admin_four_eyes() {
             ),
         )
         .await;
-        let _a_id = a["id"].as_str().unwrap().to_string();
+        let a_id = a["id"].as_str().unwrap().to_string();
         let b_id = b["id"].as_str().unwrap().to_string();
         let token_a = member_login(&app, &email_a).await;
         let token_b = member_login(&app, &email_b).await;
@@ -1542,5 +1542,61 @@ async fn j8_admin_four_eyes() {
             }
         })
         .await;
+
+        // -- LEG 6 (founder follow-up 2026-10-21): a LEGACY pending row —
+        //    payload predating the owner_email field — must still name the
+        //    affected admin: the email is resolved at READ time, the
+        //    stored payload never rewritten. Seeded via the same insert
+        //    the product's request path uses, minus the enrichment.
+        // The control-plane insert (the gateway's db alias is its own).
+        tributary_control::db::insert_pending_action(
+            &test_db.pool,
+            &db::new_id(),
+            &org_id,
+            "admin_key_revoke",
+            &bkey_id,
+            // Legacy shape: key id, NO owner_email (pre-enrichment rows).
+            &format!(r#"{{"key_id": "{bkey_id}"}}"#),
+            &a_id,
+            db::now_ms(),
+        )
+        .await
+        .expect("legacy row insert");
+        let legacy_id = {
+            let (_, rows) = call(
+                &app,
+                api(
+                    "GET",
+                    &format!("/api/v1/orgs/{org_id}/pending-actions?status=pending"),
+                    &token_a,
+                    None,
+                ),
+            )
+            .await;
+            let row = rows
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|r| r["kind"] == "admin_key_revoke")
+                .expect("legacy revoke row listed");
+            let summary = row["summary"].as_str().unwrap_or_default();
+            assert!(
+                summary.contains(&format!("owner {email_b}")),
+                "legacy row heals at read time: got {summary:?}"
+            );
+            row["id"].as_str().unwrap().to_string()
+        };
+        // Clean up: B rejects it (also exercises reject on a legacy row).
+        let (status, _) = call(
+            &app,
+            api(
+                "POST",
+                &format!("/api/v1/orgs/{org_id}/pending-actions/{legacy_id}/reject"),
+                &token_b,
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "legacy row rejects fine");
     }
 }
