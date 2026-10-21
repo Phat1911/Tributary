@@ -2379,13 +2379,23 @@ async fn gate_sensitive_key(
     kind: crate::approvals::SensitiveKind,
     payload: serde_json::Value,
 ) -> ApiResult<SensitiveOutcome> {
-    // Routine unless the owner is a DIFFERENT org admin.
+    // Routine unless the owner is a DIFFERENT org admin. The owner's
+    // email rides the payload so the approvals card can say WHOSE key
+    // (the approver decides on specifics, not kind labels).
+    let mut payload = payload;
     let owner_is_other_admin = match key_user_id {
         Some(uid) if uid != admin.user_id => {
             let owner = db::user_by_id(&state.db, uid)
                 .await
                 .map_err(|e| ControlError::Internal(e.into()))?;
-            owner.is_some_and(|u| u.role == "org_admin")
+            owner.is_some_and(|u| {
+                if u.role == "org_admin" {
+                    payload["owner_email"] = serde_json::json!(u.email);
+                    true
+                } else {
+                    false
+                }
+            })
         }
         _ => false,
     };

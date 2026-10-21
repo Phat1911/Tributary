@@ -1356,7 +1356,9 @@ pub struct PendingActionRow {
     pub created_at: i64,
 }
 
-/// The masked public view served to admins (payload stays server-side).
+/// The masked public view served to admins. `summary` is the payload's
+/// sanitized one-liner (built server-side — the raw payload, which may
+/// hold sealed blobs, never crosses the wire).
 #[derive(Debug, Clone, Serialize)] // serde: this struct → JSON — queue view
 pub struct PublicPendingAction {
     pub id: String,
@@ -1368,10 +1370,15 @@ pub struct PublicPendingAction {
     pub created_at: i64,
     pub decided_by: Option<String>,
     pub decided_at: Option<i64>,
+    pub summary: String,
 }
 
 impl From<&PendingActionRow> for PublicPendingAction {
     fn from(row: &PendingActionRow) -> Self {
+        // Parse the stored payload ONLY to project its summary — the
+        // display string; nothing else from it is ever serialized out.
+        let payload: serde_json::Value =
+            serde_json::from_str(&row.payload_json).unwrap_or(serde_json::Value::Null);
         PublicPendingAction {
             id: row.id.clone(),
             org_id: row.org_id.clone(),
@@ -1382,6 +1389,7 @@ impl From<&PendingActionRow> for PublicPendingAction {
             created_at: row.created_at,
             decided_by: row.decided_by.clone(),
             decided_at: row.decided_at,
+            summary: crate::approvals::summarize(&row.kind, &payload),
         }
     }
 }

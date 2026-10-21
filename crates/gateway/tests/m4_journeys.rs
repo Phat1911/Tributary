@@ -1186,6 +1186,17 @@ async fn j8_admin_four_eyes() {
         assert_eq!(status, StatusCode::ACCEPTED, "sensitive action defers");
         assert_eq!(pending["kind"], "admin_key_expiry");
         assert_eq!(pending["status"], "pending");
+        // The approvals card must NAME the target (founder UX report
+        // 2026-10-21): whose key, which key, to when — not a bare kind.
+        let summary = pending["summary"].as_str().unwrap_or_default();
+        assert!(
+            summary.contains(&format!("owner {email_b}")),
+            "summary names the owner: got {summary:?}"
+        );
+        assert!(
+            summary.contains("Set expiry 2026-"),
+            "summary carries the date: got {summary:?}"
+        );
         let action_id = pending["id"].as_str().unwrap().to_string();
 
         let (_, keys) = call(

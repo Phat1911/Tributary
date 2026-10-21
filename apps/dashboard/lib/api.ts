@@ -227,6 +227,8 @@ export interface PendingAction {
   created_at: number;
   decided_by: string | null;
   decided_at: number | null;
+  /** Sanitized one-liner naming the target (built server-side). */
+  summary: string;
 }
 
 export interface ClassifierConfig {

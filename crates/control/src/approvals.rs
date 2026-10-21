@@ -107,6 +107,67 @@ pub async fn linked_alert_for_key(db: &Db, pool_key_id: &str) -> anyhow::Result<
         .map_err(|e| anyhow::anyhow!("linked alert lookup: {e}"))
 }
 
+/// Builds the human-readable one-liner for the approvals queue. The
+/// payload stays server-side; THIS is its sanitized projection — the
+/// approver decides on specifics (whose key, which pool, what date),
+/// never on a bare kind label (founder UX report 2026-10-21).
+pub fn summarize(kind: &str, payload: &Value) -> String {
+    let str_of = |key: &str| payload[key].as_str().unwrap_or("");
+    match kind {
+        "admin_demote" => format!("Demote admin {} to member", str_of("email")),
+        "admin_key_expiry" => {
+            let owner = str_of("owner_email");
+            let key = str_of("key_prefix");
+            match payload["expires_at"].as_i64() {
+                Some(ms) => format!(
+                    "Set expiry {} on {} (owner {})",
+                    iso_date_utc(ms),
+                    key,
+                    owner
+                ),
+                None => format!("Clear expiry on {key} (owner {owner})"),
+            }
+        }
+        "admin_key_revoke" => format!(
+            "Revoke {} (owner {})",
+            str_of("key_prefix"),
+            str_of("owner_email")
+        ),
+        "org_policy" => match str_of("policy_action") {
+            "configure" => format!(
+                "Update classifier policy: {} mode, {} dialect",
+                str_of("mode"),
+                str_of("dialect")
+            ),
+            "go_live" => "Take classifier auto-block live".into(),
+            "remove" => "Remove the classifier policy".into(),
+            other => format!("Org policy change ({other})"),
+        },
+        "pool_disable" => format!("Disable pool '{}'", str_of("name")),
+        other => format!("Sensitive action ({other})"),
+    }
+}
+
+/// Epoch-ms → "2026-10-24" (UTC). No chrono dependency pull: the approvals
+/// card needs a date, not a timezone — the dashboard renders local times
+/// where precision matters.
+fn iso_date_utc(ms: i64) -> String {
+    let days = ms / 86_400_000;
+    // Civil-from-days (Howard Hinnant's algorithm — public domain):
+    // converts a day count since 1970-01-01 to y/m/d without a library.
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    format!("{y:04}-{m:02}-{d:02}")
+}
+
 /// Records one pending action (the request half of the two-step API).
 /// Returns the row id. The caller audits `approval.requested` around it.
 pub async fn create_pending(
@@ -286,6 +347,43 @@ mod tests {
             assert_eq!(SensitiveKind::parse(kind.as_str()), Some(kind));
         }
         assert_eq!(SensitiveKind::parse("nope"), None);
+    }
+
+    #[test]
+    fn summaries_name_the_target_not_the_kind() {
+        // The founder's UX bar: an approver reads WHO/WHAT, never a bare
+        // kind label (report 2026-10-21).
+        let revoke = json!({"key_prefix": "sk-pool-6b67e…73e4", "owner_email": "b@t.dev"});
+        assert_eq!(
+            summarize("admin_key_revoke", &revoke),
+            "Revoke sk-pool-6b67e…73e4 (owner b@t.dev)"
+        );
+        let expiry = json!({
+            "key_prefix": "sk-pool-6b67e…73e4",
+            "owner_email": "b@t.dev",
+            // 2026-10-24T00:00:00Z in epoch ms.
+            "expires_at": 1_792_800_000_000i64,
+        });
+        let summary = summarize("admin_key_expiry", &expiry);
+        assert!(
+            summary.starts_with("Set expiry 2026-10-24 on sk-pool-6b67e…73e4 (owner b@t.dev)"),
+            "got: {summary}"
+        );
+        let demote = json!({"email": "second@t.dev"});
+        assert_eq!(
+            summarize("admin_demote", &demote),
+            "Demote admin second@t.dev to member"
+        );
+        let pool = json!({"name": "eyes-pool"});
+        assert_eq!(summarize("pool_disable", &pool), "Disable pool 'eyes-pool'");
+    }
+
+    #[test]
+    fn iso_date_known_values() {
+        assert_eq!(iso_date_utc(0), "1970-01-01");
+        // Leap day: 2024-02-29T00:00:00Z = 1_709_164_800_000 ms.
+        assert_eq!(iso_date_utc(1_709_164_800_000), "2024-02-29");
+        assert_eq!(iso_date_utc(1_792_800_000_000), "2026-10-24");
     }
 
     #[test]

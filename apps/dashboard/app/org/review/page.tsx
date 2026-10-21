@@ -181,6 +181,13 @@ function ApprovalsPanel({ onDecided }: { onDecided: () => void }) {
   const actions = useApi<PendingAction[]>(
     orgId ? `/orgs/${orgId}/pending-actions?status=pending` : null,
   );
+  // Resolve requester ids → emails: the approver should see WHO asked,
+  // next to what exactly they asked for (founder UX report 2026-10-21).
+  const members = useApi<{ id: string; email: string }[]>(
+    orgId ? `/members?org_id=${orgId}` : null,
+  );
+  const emailOf = (id: string) =>
+    (members.data ?? []).find((m) => m.id === id)?.email ?? "another admin";
   const [busyId, setBusyId] = useState<string | null>(null);
 
   async function decide(actionId: string, decision: "approve" | "reject") {
@@ -217,11 +224,12 @@ function ApprovalsPanel({ onDecided }: { onDecided: () => void }) {
           <CardContent className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
             <div className="space-y-1">
               <p className="font-medium">
-                {PENDING_KIND_LABELS[action.kind] ?? action.kind}
+                {action.summary || PENDING_KIND_LABELS[action.kind] || action.kind}
               </p>
               <p className="text-sm text-muted-foreground">
-                Requested {formatDateTime(action.created_at)} — needs a
-                second, distinct admin
+                Requested by {emailOf(action.requested_by)} ·{" "}
+                {formatDateTime(action.created_at)} — needs a second,
+                distinct admin
               </p>
             </div>
             <div className="flex gap-2">
