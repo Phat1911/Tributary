@@ -25,7 +25,10 @@ use tributary_common::time::{Period, period_start_ms};
 use tributary_crypto::row_ad;
 use zeroize::Zeroizing;
 
-use tributary_control::classifier::{ClassifierProvider, JevClassifier, ScoreRequest};
+use tributary_control::classifier::ClassifierError as JevError;
+use tributary_control::classifier::{
+    ClassifierProvider, Dialect as ClassifierDialect, JevClassifier, ScoreRequest,
+};
 use tributary_control::db::{self as cdb};
 use tributary_control::security::{self, Detection, DetectionKind};
 
@@ -96,6 +99,14 @@ async fn run_scoring(state: &AppState, ctx: &ScoreContext) -> anyhow::Result<()>
         return Ok(());
     };
 
+    // 1b) 429/529 cooldown (director research 2026-10-21): after the
+    //     endpoint said "slow down", skip scoring for the org instead of
+    //     hammering it. Fail-open by construction — skipping is invisible
+    //     to the chat path.
+    if !state.classifier_backoff.remaining(&ctx.org_id).is_zero() {
+        return Ok(());
+    }
+
     // 2) Sampling budget: at most N scores per org per hour. Approximate
     // (check-then-insert, not a lock) — off-by-one under concurrency is
     // acceptable for a sampling knob.
@@ -122,16 +133,55 @@ async fn run_scoring(state: &AppState, ctx: &ScoreContext) -> anyhow::Result<()>
             .map_err(|_| anyhow::anyhow!("sealed classifier key is not valid UTF-8"))?,
     );
 
-    // 4) Call the provider (raw HTTP, version-pinned path).
-    let provider = JevClassifier::new(state.http.clone(), &config.base_url, &config.model, api_key);
-    let scored = provider
+    // 4) Call the provider through the org's dialect (raw HTTP,
+    //    version-pinned path): "jev" = TypeSafe systemone contract,
+    //    "custom" = the generic 0..1 shape.
+    let dialect = ClassifierDialect::parse(&config.dialect);
+    let provider = JevClassifier::new(
+        state.http.clone(),
+        &config.base_url,
+        &config.model,
+        dialect,
+        api_key,
+    );
+    let scored = match provider
         .score(ScoreRequest {
             model: &config.model,
             purpose: &config.purpose_statement,
             text: &ctx.prompt_text,
         })
         .await
-        .map_err(|e| anyhow::anyhow!("provider call failed (fail-open): {e:#}"))?;
+    {
+        Ok(scored) => scored,
+        // Distinct handling per the vendor's documented error surface:
+        // 429/529 (rate/capacity) trip a cooldown so the sampling budget
+        // isn't burned on refusals; 401/422 (auth/shape) are config
+        // problems a retry can't fix — log loudly for the admin. Both
+        // fail open: the request was served long ago.
+        Err(JevError::Status(429)) | Err(JevError::Status(529)) => {
+            state.classifier_backoff.trip(&ctx.org_id);
+            tracing::warn!(
+                "classifier endpoint rate/capacity limited (org={}) — 60s cooldown",
+                ctx.org_id
+            );
+            return Ok(());
+        }
+        Err(JevError::Status(code)) => {
+            tracing::error!(
+                "classifier endpoint rejected the call (org={} status={code}) —                  check the configured key/model/dialect",
+                ctx.org_id
+            );
+            return Ok(());
+        }
+        Err(e) => {
+            tracing::warn!(
+                "classifier call failed (fail-open, org={} key={}): {e:#}",
+                ctx.org_id,
+                ctx.key_prefix
+            );
+            return Ok(());
+        }
+    };
 
     let score_bp = (scored.alignment * 10_000.0).round() as i64;
     let would_block = score_bp < config.block_threshold_bp;

@@ -220,6 +220,8 @@ export interface ReviewFlag {
 export interface ClassifierConfig {
   org_id: string;
   base_url: string;
+  /** Wire contract: "jev" (TypeSafe systemone) | "custom" (generic). */
+  dialect: "jev" | "custom";
   model: string;
   key_prefix: string;
   purpose_statement: string;
@@ -237,6 +239,7 @@ export interface ClassifierConfig {
 /** PUT body for the classifier config. */
 export interface ClassifierConfigInput {
   base_url: string;
+  dialect?: "jev" | "custom";
   model: string;
   key: string;
   purpose_statement: string;

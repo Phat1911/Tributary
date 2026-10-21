@@ -299,6 +299,9 @@ async fn j3_classifier_journey() {
         // -- Configure (probe-on-save validates against the mock). ---------
         let put = json!({
             "base_url": classifier.base_url,
+            // The generic dialect (the shape this journey's mock speaks);
+            // "jev" is covered end-to-end by j7.
+            "dialect": "custom",
             "model": "jev-align-1",
             "key": "sk-jev-test-key-123456",
             "purpose_statement": "Coding assistance for our team.",
@@ -410,6 +413,7 @@ async fn j3_classifier_journey() {
         // -- Auto-block: opt-in requires acknowledgement (the warning). ----
         let auto = json!({
             "base_url": classifier.base_url,
+            "dialect": "custom",
             "model": "jev-align-1",
             "key": "sk-jev-test-key-123456",
             "purpose_statement": "Coding assistance for our team.",
@@ -883,6 +887,179 @@ async fn j6_distinct_ip_concurrency() {
         assert_eq!(
             count_before, count_after,
             "one alert per key per window, not one per request"
+        );
+    }
+}
+/// The systemone-dialect mock (director research 2026-10-21): speaks the
+/// documented TypeSafe/Jev contract — score at `answers.alignment.noul`,
+/// low when the OFF-PURPOSE marker appears in `state.message`. Captures
+/// the last request body so the journey can assert what we SHIPPED to the
+/// vendor, not just what came back.
+#[derive(Clone)]
+struct MockSystemone {
+    base_url: String,
+    hits: std::sync::Arc<std::sync::Mutex<usize>>,
+    last_body: std::sync::Arc<std::sync::Mutex<serde_json::Value>>,
+}
+
+/// Spawns the systemone mock on an ephemeral port.
+async fn spawn_systemone() -> MockSystemone {
+    use axum::Json;
+    let hits = std::sync::Arc::new(std::sync::Mutex::new(0));
+    let last_body = std::sync::Arc::new(std::sync::Mutex::new(serde_json::Value::Null));
+    let state = (hits.clone(), last_body.clone());
+    let app = axum::Router::new().route(
+        "/v1/systemone",
+        axum::routing::post(move |body: String| {
+            let (hits, last_body) = state.clone();
+            async move {
+                *hits.lock().unwrap() += 1;
+                let parsed: serde_json::Value =
+                    serde_json::from_str(&body).unwrap_or(serde_json::Value::Null);
+                *last_body.lock().unwrap() = parsed.clone();
+                // The documented answer shape; the marker rides in
+                // state.message, exactly where the dialect puts it.
+                let noul = if parsed["state"]["message"]
+                    .as_str()
+                    .is_some_and(|m| m.contains("OFF-PURPOSE"))
+                {
+                    0.05
+                } else {
+                    0.95
+                };
+                Json(json!({"answers": {"alignment": {"noul": noul}}}))
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    MockSystemone {
+        base_url: format!("http://{addr}"),
+        hits,
+        last_body,
+    }
+}
+
+/// J7: the REAL Jev dialect (TypeSafe systemone contract, director
+/// research 2026-10-21). The version pin absorbed reality: this journey
+/// proves the new adapter speaks the documented wire shape end-to-end —
+/// save-time probe, scored flag, and the exact request body we ship.
+#[tokio::test]
+async fn j7_classifier_jev_dialect() {
+    for test_db in test_dbs().await {
+        let mock = spawn_mock(MockMode::NonStream).await;
+        let systemone = spawn_systemone().await;
+        let app = test_app(test_db.pool.clone(), &mock).await;
+        let token = bootstrap_admin_and_login(&test_db.pool, &app).await;
+        let stack = provision_stack(&app, &token, &mock).await;
+
+        // Configure with dialect "jev" — the probe is ONE minimal real
+        // noul call against the configured endpoint.
+        let put = json!({
+            "dialect": "jev",
+            "base_url": systemone.base_url,
+            "model": "jev-latest",
+            "key": "tsf-test-key-123456",
+            "purpose_statement": "Coding assistance for our team.",
+        });
+        let (status, cfg) = call(
+            &app,
+            api(
+                "PUT",
+                &format!("/api/v1/orgs/{}/classifier", stack.org_id),
+                &token,
+                Some(&put),
+            ),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::CREATED,
+            "jev probe passed, config saved"
+        );
+        assert_eq!(cfg["dialect"], "jev");
+        assert_eq!(*systemone.hits.lock().unwrap(), 1, "probe = one noul call");
+
+        // The probe body must match the documented shape — this is the
+        // contract assertion, at the wire level.
+        {
+            let body = systemone.last_body.lock().unwrap().clone();
+            assert_eq!(body["model"], "jev-latest", "model travels in the body");
+            assert_eq!(
+                body["questions"]["alignment"]["type"], "noul",
+                "noul-typed alignment question"
+            );
+            assert_eq!(
+                body["state"]["message"], "Tributary save-time probe",
+                "minimal probe text rides in state.message"
+            );
+            let instructions = body["questions"]["alignment"]["instructions"]
+                .as_str()
+                .unwrap();
+            assert!(
+                instructions.contains("Coding assistance for our team."),
+                "purpose embedded in the instructions: {instructions}"
+            );
+        }
+
+        // Off-purpose request through the real dialect → alert flag.
+        let body = json!({"model": "m-test", "messages": [
+            {"role": "user", "content": "OFF-PURPOSE via systemone"}
+        ]});
+        let (status, _) = call(&app, chat_req(&stack.key_raw, None, &body)).await;
+        assert_eq!(status, StatusCode::OK);
+
+        let key_id = stack.key_id.clone();
+        let token_clone = token.clone();
+        wait_for("jev-dialect classifier flag", || {
+            let app = app.clone();
+            let token = token_clone.clone();
+            let key_id = key_id.clone();
+            async move {
+                let (_, flags) = call(
+                    &app,
+                    api("GET", "/api/v1/review-flags?status=open", &token, None),
+                )
+                .await;
+                flags.as_array().is_some_and(|f| {
+                    f.iter().any(|r| {
+                        r["kind"] == "classifier_flag"
+                            && r["pool_key_id"] == key_id.as_str()
+                            && r["score_bp"].as_i64().is_some_and(|bp| bp < 5000)
+                    })
+                })
+            }
+        })
+        .await;
+
+        // The scoring call shipped the prompt under state.message and the
+        // flag detail carries scores — never the prompt text (D28).
+        {
+            let shipped = systemone.last_body.lock().unwrap().clone();
+            assert!(
+                shipped["state"]["message"]
+                    .as_str()
+                    .is_some_and(|m| m.contains("OFF-PURPOSE via systemone")),
+                "prompt text rides to the vendor in state.message"
+            );
+        }
+        let (_, flags) = call(
+            &app,
+            api("GET", "/api/v1/review-flags?status=open", &token, None),
+        )
+        .await;
+        let flag_json = flags
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["kind"] == "classifier_flag" && r["pool_key_id"] == stack.key_id)
+            .unwrap();
+        assert!(
+            !flag_json["detail_json"].to_string().contains("OFF-PURPOSE"),
+            "the flag detail stores the score, never the prompt"
         );
     }
 }

@@ -46,6 +46,11 @@ function ClassifierForm({
   existing: ClassifierConfig | null;
   onSaved: () => void;
 }) {
+  // Dialect (director research 2026-10-21): "jev" = TypeSafe AI's real
+  // hosted contract (systemone); "custom" = the generic 0..1 scorer shape.
+  const [dialect, setDialect] = useState<"jev" | "custom">(
+    existing?.dialect === "custom" ? "custom" : "jev",
+  );
   const [baseUrl, setBaseUrl] = useState(existing?.base_url ?? "");
   const [model, setModel] = useState(existing?.model ?? "");
   const [apiKey, setApiKey] = useState("");
@@ -63,6 +68,7 @@ function ClassifierForm({
   async function save(e: React.FormEvent) {
     e.preventDefault();
     const body: ClassifierConfigInput = {
+      dialect,
       base_url: baseUrl.replace(/\/$/, ""),
       model,
       key: apiKey,
@@ -93,14 +99,33 @@ function ClassifierForm({
     <form onSubmit={save} className="space-y-4">
       <div className="grid gap-4 md:grid-cols-2">
         <div className="space-y-2">
+          <Label htmlFor="clf-dialect">Classifier type</Label>
+          <Select
+            value={dialect}
+            onValueChange={(v) => setDialect(v as "jev" | "custom")}
+          >
+            <SelectTrigger id="clf-dialect">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="jev">Jev (TypeSafe AI)</SelectItem>
+              <SelectItem value="custom">Custom scorer</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+        <div className="space-y-2">
           <Label htmlFor="clf-base">Classifier base URL</Label>
           <Input
             id="clf-base"
             type="url"
             value={baseUrl}
             onChange={(e) => setBaseUrl(e.target.value)}
-            placeholder="https://jev.example.dev/v1"
-            required
+            placeholder={
+              dialect === "jev"
+                ? "leave empty for https://api.typesafe.ai"
+                : "https://your-scorer.example.dev"
+            }
+            {...(dialect === "custom" ? { required: true } : {})}
           />
         </div>
         <div className="space-y-2">
@@ -108,8 +133,12 @@ function ClassifierForm({
           <Input
             id="clf-model"
             value={model}
+            placeholder={
+              dialect === "jev"
+                ? "jev-latest (or a pinned version)"
+                : "your-scorer-model"
+            }
             onChange={(e) => setModel(e.target.value)}
-            placeholder="jev-align-1"
             required
           />
         </div>
@@ -146,6 +175,11 @@ function ClassifierForm({
           against it — scores are stored, prompts never are.
         </p>
       </div>
+      <p className="text-muted-foreground text-xs">
+        {dialect === "jev"
+          ? "Jev pricing: $0.042 per 1M input tokens, output free — at the default sampling (30/hour) that's roughly $0.03/day. Save validates your key with one minimal real call."
+          : "Custom scorer: whatever your endpoint charges. Sampling bounds the call rate."}
+      </p>
       <div className="space-y-2">
         <Label htmlFor="clf-mode">Mode</Label>
         <Select

@@ -1750,6 +1750,9 @@ pub async fn resolve_review_flag(
 #[derive(Deserialize)]
 pub struct PutClassifierRequest {
     pub base_url: String,
+    /// Wire contract: "jev" (TypeSafe systemone, default) or "custom"
+    /// (generic 0..1 scorer). Unknown values are rejected below.
+    pub dialect: Option<String>,
     pub model: String,
     pub key: String,
     pub purpose_statement: String,
@@ -1885,7 +1888,15 @@ pub async fn put_classifier(
             "classifier key looks too short to be real".into(),
         ));
     }
-    let base_url = body.base_url.trim().trim_end_matches('/').to_string();
+    // Empty base_url defaults to the hosted Jev endpoint (director
+    // research: hosted only, no self-host variant) — one less thing for an
+    // admin to get wrong. Explicit http(s) URLs override (tests, local
+    // mocks).
+    let base_url = if body.base_url.trim().is_empty() {
+        crate::classifier::JEV_DEFAULT_BASE_URL.to_string()
+    } else {
+        body.base_url.trim().trim_end_matches('/').to_string()
+    };
     if !(base_url.starts_with("http://") || base_url.starts_with("https://")) {
         return Err(ControlError::BadRequest("base_url must be http(s)".into()));
     }
@@ -1923,18 +1934,39 @@ pub async fn put_classifier(
     let block_bp = threshold_bp(body.auto_block_threshold.unwrap_or(0.15))?;
     let sampling = body.sampling_per_hour.unwrap_or(30).clamp(1, 100_000);
 
+    // Dialect: which wire contract the endpoint speaks (director research
+    // 2026-10-21). Defaults to the REAL hosted Jev contract; "custom" is
+    // the generic shape this crate originally shipped.
+    let dialect = match body.dialect.as_deref() {
+        None | Some("jev") => "jev",
+        Some("custom") => "custom",
+        Some(other) => {
+            return Err(ControlError::BadRequest(format!(
+                "dialect must be 'jev' or 'custom' (got '{other}')"
+            )));
+        }
+    };
+
     // Save-time probe (D28): the provider must accept this key + model and
-    // return a parseable score, or nothing is stored.
+    // return a parseable score, or nothing is stored. For the jev dialect
+    // this is ONE minimal real noul call (cost ≈ nothing; there is no
+    // /models endpoint to lean on) — it validates key + model + shape in
+    // one shot.
     let provider = crate::classifier::JevClassifier::new(
         state.http.clone(),
         &base_url,
         model,
+        crate::classifier::Dialect::parse(dialect),
         raw_key.clone(),
     );
     let probe = provider
         .score(crate::classifier::ScoreRequest {
             model,
-            purpose: "validate this configuration",
+            // Probe with the org's REAL purpose: the saved configuration
+            // is what must work, not a placeholder (the instructions
+            // embed the purpose; a too-long or malformed statement should
+            // fail HERE, at save time, not on the first real request).
+            purpose,
             text: "Tributary save-time probe",
         })
         .await;
@@ -1955,6 +1987,7 @@ pub async fn put_classifier(
     let row = db::ClassifierConfigRow {
         org_id: org.id.clone(),
         base_url,
+        dialect: dialect.to_string(),
         model: model.to_string(),
         ciphertext: sealed.ciphertext,
         dek_wrapped: sealed.dek_wrapped,

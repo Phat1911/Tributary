@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
 """Mock purpose-classifier server (D28 "Jev" dialect) for manual journeys.
 
-Speaks the version-pinned POST /v1/align contract the gateway adapter
-uses: request {model, purpose, text} -> response {"alignment": <0..1>}.
+Speaks BOTH classifier dialects the gateway adapter can use:
+- "custom": POST /v1/align, request {model, purpose, text} ->
+  response {"alignment": <0..1>} (the generic scorer shape);
+- "jev": POST /v1/systemone (TypeSafe AI's real hosted contract,
+  director research 2026-10-21): request text rides in state.message,
+  response score at answers.alignment.noul.
 
 Also serves the minimal OpenAI-shaped upstream surface (GET /models,
 POST /v1/chat/completions) so ONE window mocks both roles in a manual
@@ -67,8 +71,39 @@ class AlignHandler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(payload.encode())
             return
+        if self.path == "/v1/systemone":
+            # Real-dialect role (director research 2026-10-21): the TypeSafe
+            # Jev contract. Score lives at answers.alignment.noul; the
+            # request text rides in state.message; the purpose is embedded
+            # in the noul question's instructions (we read it to show the
+            # round-trip in the console log).
+            length = int(self.headers.get("Content-Length", "0"))
+            raw = self.rfile.read(length)
+            try:
+                body = json.loads(raw)
+            except json.JSONDecodeError:
+                self.send_error(400, "invalid JSON")
+                return
+            text = str(body.get("state", {}).get("message", ""))
+            instructions = str(
+                body.get("questions", {}).get("alignment", {}).get("instructions", "")
+            )
+            print(
+                f"[mock] systemone model={body.get('model')} "
+                f"instructions={instructions!r} message_len={len(text)}"
+            )
+            noul = 0.05 if "OFF-PURPOSE" in text else 0.95
+            payload = json.dumps({"answers": {"alignment": {"noul": noul}}})
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload.encode())
+            return
         if self.path != "/v1/align":
-            self.send_error(404, "only /v1/align and /v1/chat/completions are implemented")
+            self.send_error(
+                404, "only /v1/systemone, /v1/align and /v1/chat/completions are implemented"
+            )
             return
         length = int(self.headers.get("Content-Length", "0"))
         raw = self.rfile.read(length)

@@ -4,7 +4,7 @@
 //! workflow catches it; these fixtures pin OUR parsing behavior so a fix
 //! can be developed against the recorded shape, not against production.
 
-use tributary_control::classifier::parse_alignment;
+use tributary_control::classifier::{parse_alignment, parse_systemone};
 
 /// Loads one fixture (fails loudly if the file is missing — a silent skip
 /// would quietly weaken the contract).
@@ -45,4 +45,40 @@ fn vendor_error_body_fails_open() {
 #[test]
 fn html_garbage_fails_open() {
     assert_eq!(parse_alignment(&fixture("html-garbage.json")), None);
+}
+
+// ---- Jev systemone dialect (director research 2026-10-21) ------------------
+//
+// Fixtures are built from the documented example shapes: the score lives
+// at `answers.alignment.noul`. These pin OUR parsing so vendor drift is
+// caught by the weekly smoke, not by silence.
+
+#[test]
+fn systemone_canonical_parses() {
+    assert_eq!(parse_systemone(&fixture("systemone.json")), Some(0.87));
+}
+
+#[test]
+fn systemone_noul_as_string_with_siblings_parses() {
+    // Numeric-string noul + extra sibling keys/answers: still 0.31, and
+    // the decoy `other.noul` must NOT win (the documented path wins).
+    assert_eq!(
+        parse_systemone(&fixture("systemone-noul-string.json")),
+        Some(0.31)
+    );
+}
+
+#[test]
+fn systemone_out_of_range_clamps() {
+    assert_eq!(
+        parse_systemone(&fixture("systemone-clamped.json")),
+        Some(1.0)
+    );
+}
+
+#[test]
+fn systemone_wrong_path_fails_open() {
+    // `alignment.noul` at top level or `answers.noul` are NOT the
+    // documented path — no score (fail-open), never a guessed one.
+    assert_eq!(parse_systemone(&fixture("systemone-wrong-path.json")), None);
 }

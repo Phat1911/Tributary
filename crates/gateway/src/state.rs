@@ -24,6 +24,41 @@ pub struct AppState {
     /// (fetched_at, window). Same 5 s TTL discipline as the quota rules
     /// cache — rare-change data, per-request reads.
     pub org_settings: OrgSettingsCache,
+    /// 429/529 cooldown per org for classifier scoring (fail-open +
+    /// backoff, director research 2026-10-21).
+    pub classifier_backoff: ClassifierBackoff,
+}
+
+/// Per-org cooldown after the classifier endpoint answered 429/529
+/// (director research 2026-10-21: fail-open + backoff). In-process on
+/// purpose: the cost of a wrong decision is a few skipped scores, so
+/// durability across restarts buys nothing.
+#[derive(Default, Clone)]
+pub struct ClassifierBackoff {
+    // Arc so AppState stays Clone (the QuotaEngine/OrgSettingsCache
+    // pattern): shared process-wide state behind one allocation.
+    inner: std::sync::Arc<std::sync::Mutex<HashMap<String, std::time::Instant>>>,
+}
+
+impl ClassifierBackoff {
+    /// How long the org still sits in cooldown (zero = clear).
+    pub fn remaining(&self, org_id: &str) -> std::time::Duration {
+        self.inner
+            .lock()
+            .unwrap()
+            .get(org_id)
+            .map(|until| until.saturating_duration_since(std::time::Instant::now()))
+            .unwrap_or_default()
+    }
+
+    /// Enters the cooldown after a 429/529 (rate/capacity — retrying
+    /// immediately would just hammer a struggling vendor).
+    pub fn trip(&self, org_id: &str) {
+        self.inner.lock().unwrap().insert(
+            org_id.to_string(),
+            std::time::Instant::now() + std::time::Duration::from_secs(60),
+        );
+    }
 }
 
 /// Tiny TTL cache over `org_settings` rows (D9 layering: Postgres +
@@ -64,6 +99,7 @@ impl AppState {
         let geo = crate::geo::build_geo_resolver(config.geoip_db_path.as_deref());
         Self {
             org_settings: OrgSettingsCache::default(),
+            classifier_backoff: ClassifierBackoff::default(),
             db,
             http,
             config: Arc::new(config),

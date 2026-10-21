@@ -1608,6 +1608,8 @@ pub async fn alert_recipients(db: &Db, org_id: &str) -> sqlx::Result<Vec<String>
 pub struct ClassifierConfigRow {
     pub org_id: String,
     pub base_url: String,
+    /// Wire contract: "jev" (TypeSafe systemone) or "custom" (generic).
+    pub dialect: String,
     pub model: String,
     pub ciphertext: String,
     pub dek_wrapped: String,
@@ -1628,6 +1630,8 @@ pub struct ClassifierConfigRow {
 pub struct PublicClassifierConfig {
     pub org_id: String,
     pub base_url: String,
+    /// Wire contract: "jev" | "custom" (see classifier::Dialect).
+    pub dialect: String,
     pub model: String,
     pub key_prefix: String,
     pub purpose_statement: String,
@@ -1664,6 +1668,7 @@ pub async fn public_classifier_config(
     Ok(PublicClassifierConfig {
         org_id: row.org_id.clone(),
         base_url: row.base_url.clone(),
+        dialect: row.dialect.clone(),
         model: row.model.clone(),
         key_prefix: row.key_prefix.clone(),
         purpose_statement: row.purpose_statement.clone(),
@@ -1685,7 +1690,7 @@ pub async fn classifier_config_by_org(
     org_id: &str,
 ) -> sqlx::Result<Option<ClassifierConfigRow>> {
     let sql = db.sql(
-        "SELECT org_id, base_url, model, ciphertext, dek_wrapped, key_prefix, \
+        "SELECT org_id, base_url, dialect, model, ciphertext, dek_wrapped, key_prefix, \
           purpose_statement, mode, alert_threshold_bp, block_threshold_bp, \
           auto_block_live, shadow_started_at, sampling_per_hour, updated_at \
          FROM classifier_config WHERE org_id = ?",
@@ -1709,14 +1714,15 @@ pub async fn upsert_classifier_config(db: &Db, row: &ClassifierConfigRow) -> sql
         .await?;
     let ins = db.sql(
         "INSERT INTO classifier_config \
-         (org_id, base_url, model, ciphertext, dek_wrapped, key_prefix, purpose_statement, \
+         (org_id, base_url, dialect, model, ciphertext, dek_wrapped, key_prefix, purpose_statement, \
           mode, alert_threshold_bp, block_threshold_bp, auto_block_live, shadow_started_at, \
           sampling_per_hour, updated_at) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     );
     sqlx::query(sqlx::AssertSqlSafe(ins.as_str()))
         .bind(&row.org_id)
         .bind(&row.base_url)
+        .bind(&row.dialect)
         .bind(&row.model)
         .bind(&row.ciphertext)
         .bind(&row.dek_wrapped)
@@ -1770,6 +1776,7 @@ fn classifier_row_from_row(row: sqlx::any::AnyRow) -> ClassifierConfigRow {
     ClassifierConfigRow {
         org_id: row.get("org_id"),
         base_url: row.get("base_url"),
+        dialect: row.get("dialect"),
         model: row.get("model"),
         ciphertext: row.get("ciphertext"),
         dek_wrapped: row.get("dek_wrapped"),

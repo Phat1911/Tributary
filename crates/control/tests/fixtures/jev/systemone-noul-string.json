@@ -1,0 +1,10 @@
+{
+  "answers": {
+    "alignment": {
+      "noul": "0.31",
+      "why": "off-topic for the stated purpose"
+    },
+    "other": { "noul": 0.99 }
+  },
+  "model": "jev-latest"
+}
