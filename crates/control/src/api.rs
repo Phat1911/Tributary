@@ -2316,7 +2316,7 @@ async fn gate_sensitive(
 ) -> ApiResult<SensitiveOutcome> {
     match crate::approvals::gate_for(&state.db, org_id)
         .await
-        .map_err(|e| ControlError::Internal(e))?
+        .map_err(ControlError::Internal)?
     {
         crate::approvals::Gate::RequiresApproval => {
             let id = crate::approvals::create_pending(
@@ -2329,7 +2329,7 @@ async fn gate_sensitive(
                 now_ms(),
             )
             .await
-            .map_err(|e| ControlError::Internal(e))?;
+            .map_err(ControlError::Internal)?;
             let ip = client_ip(headers);
             audit::record(
                 &state.db,
@@ -2399,7 +2399,7 @@ async fn gate_sensitive_key(
     // D32) = any single admin may act NOW; the audit row links the alert.
     if let Some(flag) = crate::approvals::linked_alert_for_key(&state.db, key_id)
         .await
-        .map_err(|e| ControlError::Internal(e))?
+        .map_err(ControlError::Internal)?
     {
         return Ok(SensitiveOutcome::Proceed {
             solo: false,
