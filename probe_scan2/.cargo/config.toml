@@ -1,4 +1,0 @@
-# Probe-only cargo config: reuse the repo's artifact cache (Windows path —
-# this build runs under the Windows cargo interop).
-[build]
-target-dir = '\\wsl.localhost\crypto\home\hong_phat\my_project\AI-token-pools\target'
