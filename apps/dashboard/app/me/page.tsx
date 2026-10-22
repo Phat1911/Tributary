@@ -102,7 +102,10 @@ function ExpiresCell({
   expiresAt: number | null;
   nowMs: number;
 }) {
-  if (expiresAt === null) {
+  // Loose null check on purpose: an older control plane (pre-chore binary)
+  // does not send the field at all — `undefined` must read as "Never", not
+  // crash formatDateTime with an Invalid Date.
+  if (expiresAt === null || expiresAt === undefined) {
     return <span className="text-muted-foreground">Never</span>;
   }
   const remaining = expiresAt - nowMs;
@@ -135,7 +138,9 @@ function CapCell({ cap, status }: { cap: OwnKeyCap | null; status: string }) {
   if (status === "revoked" || status === "rotated") {
     return <span className="text-muted-foreground">—</span>;
   }
-  if (cap === null) {
+  // Loose null check: version skew (older control plane sends no `cap`)
+  // must render "Unlimited", never NaN tokens.
+  if (cap === null || cap === undefined) {
     return <span className="text-muted-foreground">Unlimited</span>;
   }
   return (

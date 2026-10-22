@@ -106,9 +106,11 @@ export interface OwnPoolKey {
   key_prefix: string;
   status: string;
   created_at: number;
-  /** Epoch ms; null = never expires. */
+  /** Epoch ms; null = never expires. May be ABSENT (undefined) against a
+   *  pre-chore control plane — the UI treats missing as "Never". */
   expires_at: number | null;
-  /** null = no token rule binds this key ("Unlimited" while usable). */
+  /** null = no token rule binds this key ("Unlimited" while usable).
+   *  May be ABSENT against a pre-chore control plane — same treatment. */
   cap: OwnKeyCap | null;
 }
 
