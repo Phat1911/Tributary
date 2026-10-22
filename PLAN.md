@@ -86,7 +86,13 @@ comment in `api.rs`), so no new AUDIT line. The "expired" chip is
 display-level by design: the DB has no expired lifecycle state and the
 gateway enforces expiry at auth time. Revoked/rotated keys show "—" for
 Cap (nothing enforceable); suspended keys keep theirs (restorable). No
-milestone ticked — M5 owns the tracker.
+milestone ticked — M5 owns the tracker. **Post-commit fix `e0fda1b`:** the
+first founder run crashed (`RangeError: Invalid time value`) because a
+PRE-chore `serve` binary was still running — it sends no `expires_at`, so
+the field arrived as `undefined`, not `null`, and fell past the strict
+guards; both cells now treat absent as Never/Unlimited (documented on the
+interface — version skew must degrade, never crash). Same gates green
+after the fix; restart the backend on the new commit to see live data.
 
 ### 2026-10-21 — D33 admin four-eyes (approvals) moved into M4
 
