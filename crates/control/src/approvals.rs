@@ -34,6 +34,9 @@ pub enum SensitiveKind {
     AdminKeyExpiry,
     /// Revoke a key owned by another admin.
     AdminKeyRevoke,
+    /// Rotate a key owned by another admin (replaces the credential —
+    /// final-scan: rotation was an ungated bypass of AdminKeyRevoke).
+    AdminKeyRotate,
     /// Org-wide policy: classifier configure / remove / go-live.
     OrgPolicy,
     /// Disable (delete) a pool.
@@ -46,6 +49,7 @@ impl SensitiveKind {
             SensitiveKind::AdminDemote => "admin_demote",
             SensitiveKind::AdminKeyExpiry => "admin_key_expiry",
             SensitiveKind::AdminKeyRevoke => "admin_key_revoke",
+            SensitiveKind::AdminKeyRotate => "admin_key_rotate",
             SensitiveKind::OrgPolicy => "org_policy",
             SensitiveKind::PoolDisable => "pool_disable",
         }
@@ -57,6 +61,7 @@ impl SensitiveKind {
             SensitiveKind::AdminDemote => "Demote admin",
             SensitiveKind::AdminKeyExpiry => "Set expiry on admin key",
             SensitiveKind::AdminKeyRevoke => "Revoke admin key",
+            SensitiveKind::AdminKeyRotate => "Rotate admin key",
             SensitiveKind::OrgPolicy => "Org policy change",
             SensitiveKind::PoolDisable => "Disable pool",
         }
@@ -67,6 +72,7 @@ impl SensitiveKind {
             "admin_demote" => Some(SensitiveKind::AdminDemote),
             "admin_key_expiry" => Some(SensitiveKind::AdminKeyExpiry),
             "admin_key_revoke" => Some(SensitiveKind::AdminKeyRevoke),
+            "admin_key_rotate" => Some(SensitiveKind::AdminKeyRotate),
             "org_policy" => Some(SensitiveKind::OrgPolicy),
             "pool_disable" => Some(SensitiveKind::PoolDisable),
             _ => None,
@@ -133,6 +139,11 @@ pub fn summarize(kind: &str, payload: &Value) -> String {
             str_of("key_prefix"),
             str_of("owner_email")
         ),
+        "admin_key_rotate" => format!(
+            "Rotate {} (owner {})",
+            str_of("key_prefix"),
+            str_of("owner_email")
+        ),
         "org_policy" => match str_of("policy_action") {
             "configure" => format!(
                 "Update classifier policy: {} mode, {} dialect",
@@ -168,6 +179,21 @@ fn iso_date_utc(ms: i64) -> String {
     format!("{y:04}-{m:02}-{d:02}")
 }
 
+/// The audit-trail view of a pending-action payload: the sealed
+/// classifier envelope (ciphertext/dek_wrapped) is DROPPED — it already
+/// lives in pending_actions for execution; the audit row only needs the
+/// human-meaningful parameters (final-scan finding F1: the blob was
+/// duplicated into audit_log, widening sealed-key exposure for zero
+/// functional need).
+pub fn audit_view(payload: &Value) -> Value {
+    let mut view = payload.clone();
+    if let Some(obj) = view.as_object_mut() {
+        obj.remove("ciphertext");
+        obj.remove("dek_wrapped");
+    }
+    view
+}
+
 /// Records one pending action (the request half of the two-step API).
 /// Returns the row id. The caller audits `approval.requested` around it.
 pub async fn create_pending(
@@ -195,35 +221,51 @@ pub async fn create_pending(
     Ok(id)
 }
 
+/// What an approved action produced: `summary` goes into the audit row
+/// (masked, safe); `reveal` carries REVEAL-ONCE material that must reach
+/// exactly the approver's HTTP response and NOTHING else (a rotated
+/// admin key's raw form — never the audit, never a log).
+#[derive(Debug)]
+pub struct Executed {
+    pub summary: Value,
+    pub reveal: Option<Value>,
+}
+
 /// Executes an approved pending action. Re-validates every guard against
 /// CURRENT state (the world may have moved between request and approval):
 /// the demote target must still be an admin and must not be the last one;
 /// key/pool targets must still exist. Returns a summary for the executed
 /// action's audit row.
-pub async fn execute(db: &Db, action: &db::PendingActionRow, now: i64) -> anyhow::Result<Value> {
+pub async fn execute(db: &Db, action: &db::PendingActionRow, now: i64) -> anyhow::Result<Executed> {
     let payload: Value = serde_json::from_str(&action.payload_json).unwrap_or(Value::Null);
     match SensitiveKind::parse(&action.kind) {
         Some(SensitiveKind::AdminDemote) => {
             let target_id = payload["user_id"].as_str().unwrap_or(&action.target_id);
-            // Last-admin guard AT EXECUTION (request-time can be stale).
-            let admins = db::org_admin_count(db, &action.org_id).await?;
-            if admins <= 1 {
-                anyhow::bail!("refused: target is the last remaining admin");
-            }
-            let affected = db::demote_org_admin(db, target_id).await?;
+            // Last-admin guard AT EXECUTION, atomically: the ≥2 count
+            // rides inside the UPDATE, so two concurrent demotes can
+            // never both win and leave the org admin-less (final-scan).
+            let affected = db::demote_org_admin_guarded(db, &action.org_id, target_id).await?;
             if affected == 0 {
-                anyhow::bail!("refused: target is no longer an admin");
+                anyhow::bail!(
+                    "refused: target is no longer an admin, or is the last remaining admin"
+                );
             }
-            Ok(json!({
-                "user_id": target_id,
-                "role_after": "member",
-            }))
+            Ok(Executed {
+                summary: json!({
+                    "user_id": target_id,
+                    "role_after": "member",
+                }),
+                reveal: None,
+            })
         }
         Some(SensitiveKind::AdminKeyExpiry) => {
             let key_id = payload["key_id"].as_str().unwrap_or(&action.target_id);
             let expires_at = payload["expires_at"].as_i64();
             db::set_pool_key_expiry(db, key_id, expires_at).await?;
-            Ok(json!({ "key_id": key_id, "expires_at": expires_at }))
+            Ok(Executed {
+                summary: json!({ "key_id": key_id, "expires_at": expires_at }),
+                reveal: None,
+            })
         }
         Some(SensitiveKind::AdminKeyRevoke) => {
             let key_id = payload["key_id"].as_str().unwrap_or(&action.target_id);
@@ -231,7 +273,56 @@ pub async fn execute(db: &Db, action: &db::PendingActionRow, now: i64) -> anyhow
             if affected == 0 {
                 anyhow::bail!("refused: key already revoked or gone");
             }
-            Ok(json!({ "key_id": key_id, "status": "revoked" }))
+            Ok(Executed {
+                summary: json!({ "key_id": key_id, "status": "revoked" }),
+                reveal: None,
+            })
+        }
+        Some(SensitiveKind::AdminKeyRotate) => {
+            // Deferred rotation: NOTHING was generated at request time;
+            // execution mints the credential and reveals it ONCE — to
+            // the approving admin only (requester proposed, distinct
+            // admin approved AND received; audit carries the masked
+            // summary alone).
+            let key_id = payload["key_id"].as_str().unwrap_or(&action.target_id);
+            let user_id = payload["user_id"]
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("rotate payload lost its owner"))?;
+            let generated = tributary_common::keys::generate_key();
+            let new_id = tributary_common::db::new_id();
+            db::insert_issued_pool_key(
+                db,
+                &db::NewPoolKey {
+                    id: new_id.clone(),
+                    pool_id: payload["pool_id"].as_str().unwrap_or_default().to_string(),
+                    key_hash: generated.key_hash,
+                    key_prefix: generated.key_prefix.clone(),
+                    user_id: user_id.to_string(),
+                    expires_at: payload["expires_at"].as_i64(),
+                    created_at: now,
+                },
+            )
+            .await?;
+            let rotated = db::rotate_pool_key(db, key_id).await?;
+            if rotated == 0 {
+                anyhow::bail!("refused: original key is no longer active");
+            }
+            // Rotation carries the IP allowlist (final-scan 2.4): the
+            // leak-response action must never strip the CIDR pin.
+            db::copy_ip_allowlist(db, key_id, &new_id).await?;
+            Ok(Executed {
+                summary: json!({
+                    "key_id": new_id,
+                    "replaces": key_id,
+                    "key_prefix": generated.key_prefix,
+                    "status": "active",
+                }),
+                reveal: Some(json!({
+                    "key_id": new_id,
+                    "raw": generated.raw,
+                    "key_prefix": generated.key_prefix,
+                })),
+            })
         }
         Some(SensitiveKind::OrgPolicy) => match payload["policy_action"].as_str() {
             Some("configure") => {
@@ -240,36 +331,67 @@ pub async fn execute(db: &Db, action: &db::PendingActionRow, now: i64) -> anyhow
                 // entering auto_block starts its shadow window NOW.
                 let mut row = classifier_row_from_payload(&payload);
                 row.updated_at = now;
-                row.shadow_started_at = if row.mode == "auto_block" {
-                    Some(now)
-                } else {
-                    None
+                // Same live-preservation rule as the direct PUT
+                // (final-scan A3): a live org approving a non-blocking
+                // tweak stays live; mode/threshold changes re-shadow.
+                let prior = db::classifier_config_by_org(db, &action.org_id).await?;
+                let (live, shadow) = match &prior {
+                    Some(p)
+                        if p.auto_block_live
+                            && row.mode == "auto_block"
+                            && p.alert_threshold_bp == row.alert_threshold_bp
+                            && p.block_threshold_bp == row.block_threshold_bp =>
+                    {
+                        (true, p.shadow_started_at)
+                    }
+                    _ => (
+                        false,
+                        if row.mode == "auto_block" {
+                            Some(now)
+                        } else {
+                            None
+                        },
+                    ),
                 };
+                row.auto_block_live = live;
+                row.shadow_started_at = shadow;
                 db::upsert_classifier_config(db, &row).await?;
-                Ok(json!({
-                    "policy": "classifier_configured",
-                    "dialect": row.dialect,
-                    "model": row.model,
-                    "mode": row.mode,
-                }))
+                Ok(Executed {
+                    summary: json!({
+                        "policy": "classifier_configured",
+                        "dialect": row.dialect,
+                        "model": row.model,
+                        "mode": row.mode,
+                    }),
+                    reveal: None,
+                })
             }
             Some("remove") => {
                 db::delete_classifier_config(db, &action.org_id).await?;
-                Ok(json!({ "policy": "classifier_removed" }))
+                Ok(Executed {
+                    summary: json!({ "policy": "classifier_removed" }),
+                    reveal: None,
+                })
             }
             Some("go_live") => {
                 let affected = db::classifier_go_live(db, &action.org_id, now).await?;
                 if affected == 0 {
                     anyhow::bail!("refused: no auto_block config to go live");
                 }
-                Ok(json!({ "policy": "classifier_go_live" }))
+                Ok(Executed {
+                    summary: json!({ "policy": "classifier_go_live" }),
+                    reveal: None,
+                })
             }
             other => anyhow::bail!("unknown policy action: {other:?}"),
         },
         Some(SensitiveKind::PoolDisable) => {
             let pool_id = payload["pool_id"].as_str().unwrap_or(&action.target_id);
             db::disable_pool(db, pool_id).await?;
-            Ok(json!({ "pool_id": pool_id, "status": "disabled" }))
+            Ok(Executed {
+                summary: json!({ "pool_id": pool_id, "status": "disabled" }),
+                reveal: None,
+            })
         }
         None => anyhow::bail!("unknown pending action kind {}", action.kind),
     }
@@ -341,6 +463,7 @@ mod tests {
             SensitiveKind::AdminDemote,
             SensitiveKind::AdminKeyExpiry,
             SensitiveKind::AdminKeyRevoke,
+            SensitiveKind::AdminKeyRotate,
             SensitiveKind::OrgPolicy,
             SensitiveKind::PoolDisable,
         ] {

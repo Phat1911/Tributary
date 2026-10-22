@@ -41,7 +41,20 @@ pub async fn test_dbs() -> Vec<TestDb> {
                     _keep_alive: None,
                 });
             }
-            Err(err) => eprintln!("postgres tests skipped (connect failed): {err:#}"),
+            // PANIC, not skip (final-scan): a silent skip turns a
+            // red dual-DB suite green SQLite-only — proven to hide a
+            // mis-forwarded env var behind a 100%-pass run. Opt out
+            // explicitly with TRIBUTARY_ALLOW_PG_SKIP=1.
+            Err(err) => {
+                if std::env::var("TRIBUTARY_ALLOW_PG_SKIP").is_ok() {
+                    eprintln!("postgres tests skipped (allowed): {err:#}");
+                } else {
+                    panic!(
+                        "TRIBUTARY_TEST_DATABASE_URL is set but Postgres connect \
+                         failed — refusing to silently pass SQLite-only: {err:#}"
+                    );
+                }
+            }
         },
         Err(_) => eprintln!(
             "TRIBUTARY_TEST_DATABASE_URL unset — Postgres half of the dual-DB \

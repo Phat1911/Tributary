@@ -45,7 +45,10 @@ const PENDING_KIND_LABELS: Record<string, string> = {
 /** The score detail line for classifier kinds (bp → 0–1 alignment). */
 function ScoreChip({ flag }: { flag: ReviewFlag }) {
   if (flag.score_bp == null) return null;
-  const alignment = (flag.score_bp / 1000).toFixed(2);
+  // Scores are basis points of the 0..1 alignment (×10 000 at write
+  // time) — dividing by 1000 rendered them 10× high on this surface
+  // (final-scan finding F3).
+  const alignment = (flag.score_bp / 10000).toFixed(2);
   return (
     <Badge variant="outline" className="font-mono text-xs">
       alignment {alignment}

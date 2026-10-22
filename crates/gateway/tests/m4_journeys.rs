@@ -5,13 +5,10 @@
 //! directly into the DB. Direct DB reads appear only in ASSERTIONS (the
 //! email outbox has no public endpoint yet), never in setup.
 //!
-//! - **J1 leak demo:** plant honey key via API → it rides the shared
-//!   listing shape-identically → use it at the gateway → generic 401
-//!   byte-identical to an unknown key + email alert + audit row + review
-//!   flag, and it NEVER serves traffic.
-//! - **J2 canary alias:** canary model in the member's allowlist → request
-//!   targets it → denied locally (same 400 as any allowlist reject) +
-//!   alert + audit + flag; upstream untouched.
+//! - **J1/J2 (honey key + canary alias): REMOVED with D31** (2026-10-19,
+//!   founder-tested decision — low-yield tripwires); their journeys were
+//!   retired with the features. The credential-sharing tripwire is now
+//!   J6's distinct-IP concurrency detector (D32).
 //! - **J3 classifier:** org configures classifier (probe-on-save) +
 //!   purpose → off-purpose request → flagged in the review queue with a
 //!   score and NO prompt text; auto-block is opt-in + shadow-first ("would
@@ -104,19 +101,29 @@ where
 async fn bootstrap_admin_and_login(pool: &db::Db, app: &axum::Router) -> String {
     let _ =
         tributary_control::create_host_admin(pool, "root@tributary.dev", "hunter2hunter2").await;
-    let (_, body) = call(
-        app,
-        Request::builder()
-            .method("POST")
-            .uri("/api/v1/auth/login")
-            .header(header::CONTENT_TYPE, "application/json")
-            .body(Body::from(
-                json!({"email": "root@tributary.dev", "password": "hunter2hunter2"}).to_string(),
-            ))
-            .unwrap(),
-    )
-    .await;
-    body["token"].as_str().expect("login token").to_string()
+    // Retry the login (final-scan): against the shared Postgres test DB
+    // a parallel test's winning INSERT can be uncommitted when we log in
+    // — the control harness documents this exact race and retries 40x.
+    for _ in 0..40 {
+        let (_, body) = call(
+            app,
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/auth/login")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({"email": "root@tributary.dev", "password": "hunter2hunter2"})
+                        .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+        if let Some(tok) = body["token"].as_str() {
+            return tok.to_string();
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    panic!("login never succeeded after 40 attempts")
 }
 
 /// The fully API-provisioned stack every journey starts from: org → pool
@@ -628,6 +635,24 @@ async fn j4_ip_allowlist_journey() {
         )
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
+        // Prove NOTHING was stored (final-scan): the 400 alone would
+        // pass even if a partial write landed the bad row.
+        let (_, entries_now) = call(
+            &app,
+            api(
+                "GET",
+                &format!(
+                    "/api/v1/pools/{}/keys/{}/allowlists",
+                    stack.pool_id, stack.key_id
+                ),
+                &token,
+                None,
+            ),
+        )
+        .await;
+        let kept = entries_now.as_array().expect("allowlist array");
+        assert_eq!(kept.len(), 1, "only the good CIDR is stored: {kept:?}");
+        assert_eq!(kept[0]["cidr"], "10.0.0.0/8");
 
         // Outside → denied + audited; inside → served.
         let before = mock.captured_count();
@@ -662,15 +687,21 @@ async fn j4_ip_allowlist_journey() {
         assert_eq!(status, StatusCode::FORBIDDEN);
 
         // The audit row is the J4 proof.
+        let key_id = stack.key_id.clone();
         wait_for("security.ip_allowlist_denied audit row", || {
             let app = app.clone();
             let token = token.clone();
+            let key_id = key_id.clone();
             async move {
                 let (_, audit) =
                     call(&app, api("GET", "/api/v1/audit?limit=200", &token, None)).await;
                 audit.as_array().is_some_and(|rows| {
                     rows.iter().any(|r| {
+                        // Key-scoped (final-scan): on the shared test DB
+                        // an unscoped predicate is satisfied by stale
+                        // rows from earlier runs — a false pass.
                         r["action"] == "security.ip_allowlist_denied"
+                            && r["target_id"] == key_id
                             && r["after"]["ip"] == "203.0.113.7"
                     })
                 })
@@ -758,18 +789,19 @@ async fn j5_quota_cap_audited() {
         assert_eq!(mock.captured_count(), before, "denied before upstream");
 
         // The audit trail shows the cap firing.
-        wait_for("security.quota_denied audit row", || {
-            let app = app.clone();
-            let token = token.clone();
-            async move {
-                let (_, audit) =
-                    call(&app, api("GET", "/api/v1/audit?limit=200", &token, None)).await;
-                audit
-                    .as_array()
-                    .is_some_and(|rows| rows.iter().any(|r| r["action"] == "security.quota_denied"))
-            }
-        })
-        .await;
+        // Key-scoped, no polling needed (final-scan): the gateway AWAITS
+        // the audit write before returning the 429 — a direct assert
+        // cannot be satisfied by a stale row from an earlier run.
+        let (_, audit) = call(&app, api("GET", "/api/v1/audit?limit=200", &token, None)).await;
+        let quota_rows =
+            audit.as_array().expect("audit array").iter().filter(|r| {
+                r["action"] == "security.quota_denied" && r["target_id"] == stack.key_id
+            });
+        assert_eq!(
+            quota_rows.count(),
+            1,
+            "exactly one quota_denied row naming THIS key"
+        );
     }
 }
 
@@ -855,17 +887,18 @@ async fn j6_distinct_ip_concurrency() {
             api("GET", "/api/v1/review-flags?status=open", &token, None),
         )
         .await;
+        // Strict (final-scan): expect() not unwrap_or(0) — a 401/500
+        // body used to make both sides 0 and the dedupe assert a
+        // tautology.
         let count_before = flags_before
             .as_array()
-            .map(|f| {
-                f.iter()
-                    .filter(|r| {
-                        r["kind"] == "distinct_ip_concurrency"
-                            && r["pool_key_id"] == stack.key_id.as_str()
-                    })
-                    .count()
+            .expect("flags array")
+            .iter()
+            .filter(|r| {
+                r["kind"] == "distinct_ip_concurrency" && r["pool_key_id"] == stack.key_id.as_str()
             })
-            .unwrap_or(0);
+            .count();
+        assert_eq!(count_before, 1, "the sharing event flagged exactly once");
         let (status, _) = call(&app, chat_req(&stack.key_raw, Some("198.51.100.5"), &body)).await;
         assert_eq!(status, StatusCode::OK);
         let (_, flags_after) = call(
@@ -875,15 +908,12 @@ async fn j6_distinct_ip_concurrency() {
         .await;
         let count_after = flags_after
             .as_array()
-            .map(|f| {
-                f.iter()
-                    .filter(|r| {
-                        r["kind"] == "distinct_ip_concurrency"
-                            && r["pool_key_id"] == stack.key_id.as_str()
-                    })
-                    .count()
+            .expect("flags array")
+            .iter()
+            .filter(|r| {
+                r["kind"] == "distinct_ip_concurrency" && r["pool_key_id"] == stack.key_id.as_str()
             })
-            .unwrap_or(0);
+            .count();
         assert_eq!(
             count_before, count_after,
             "one alert per key per window, not one per request"
@@ -1193,8 +1223,11 @@ async fn j8_admin_four_eyes() {
             summary.contains(&format!("owner {email_b}")),
             "summary names the owner: got {summary:?}"
         );
+        // Date prefix only ("Set expiry 2…"): the exact date is pinned
+        // by the unit tests in approvals.rs — hardcoding "2026-" here
+        // would be a wall-clock time bomb (final-scan).
         assert!(
-            summary.contains("Set expiry 2026-"),
+            summary.contains("Set expiry 2"),
             "summary carries the date: got {summary:?}"
         );
         let action_id = pending["id"].as_str().unwrap().to_string();
@@ -1297,7 +1330,10 @@ async fn j8_admin_four_eyes() {
         )
         .await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(decided["status"], "executed");
+        // Response shape since the final scan: {action, issued?} — the
+        // decided row rides under `action`; `issued` carries reveal-once
+        // material only for credential-minting kinds (rotate).
+        assert_eq!(decided["action"]["status"], "executed");
         let (_, keys) = call(
             &app,
             api(
@@ -1598,5 +1634,916 @@ async fn j8_admin_four_eyes() {
         )
         .await;
         assert_eq!(status, StatusCode::OK, "legacy row rejects fine");
+    }
+}
+
+// ===========================================================================
+// FINAL-SCAN ADVERSARIAL SUITE (2026-10-22). Five reviewer subagents
+// attacked the M4 features (four-eyes, classifier, allowlist, rotation).
+// These tests pin what they broke or found unguarded — every assert here
+// was RED against the pre-fix code. None weaken an existing assert (rule 6).
+// ===========================================================================
+
+/// IDENTITY & SCOPE MATRIX + RESTART (D33 invariants 1+2): members never
+/// decide; two sessions of the requester are still the requester; foreign
+/// admins and spoofed org paths get 404 (no existence oracle); pending
+/// rows survive a restart with ZERO side effects; the HOST is a valid
+/// second eye; routine member-key actions never defer.
+#[tokio::test]
+async fn adv_d33_identity_scope_matrix_and_restart() {
+    for test_db in test_dbs().await {
+        let mock = spawn_mock(MockMode::NonStream).await;
+        let app = test_app(test_db.pool.clone(), &mock).await;
+        let host = bootstrap_admin_and_login(&test_db.pool, &app).await;
+        let host_id = {
+            let (_, me) = call(&app, api("GET", "/api/v1/auth/me", &host, None)).await;
+            me["id"].as_str().unwrap().to_string()
+        };
+
+        let unique = db::new_id();
+        let (_, o1) = call(
+            &app,
+            api(
+                "POST",
+                "/api/v1/orgs",
+                &host,
+                Some(&json!({"name": "M1", "slug": format!("m1-{unique}")})),
+            ),
+        )
+        .await;
+        let org1 = o1["id"].as_str().unwrap().to_string();
+        let (_, o2) = call(
+            &app,
+            api(
+                "POST",
+                "/api/v1/orgs",
+                &host,
+                Some(&json!({"name": "M2", "slug": format!("m2-{unique}")})),
+            ),
+        )
+        .await;
+        let org2 = o2["id"].as_str().unwrap().to_string();
+        let mk_admin = |org: &str, email: &str| {
+            let app = &app;
+            let host = &host;
+            let email = email.to_string();
+            let org = org.to_string();
+            async move {
+                call(
+                    app,
+                    api(
+                        "POST",
+                        "/api/v1/members",
+                        host,
+                        Some(&json!({
+                            "org_id": org, "email": email,
+                            "password": "password123", "role": "org_admin"
+                        })),
+                    ),
+                )
+                .await
+            }
+        };
+        let (_, a) = mk_admin(&org1, &format!("mx-a-{unique}@t.dev")).await;
+        let _a_id = a["id"].as_str().unwrap().to_string();
+        let (_, b) = mk_admin(&org1, &format!("mx-b-{unique}@t.dev")).await;
+        let b_id = b["id"].as_str().unwrap().to_string();
+        let (_, m) = call(
+            &app,
+            api(
+                "POST",
+                "/api/v1/members",
+                &host,
+                Some(&json!({
+                    "org_id": org1, "email": format!("mx-m-{unique}@t.dev"),
+                    "password": "password123", "role": "member"
+                })),
+            ),
+        )
+        .await;
+        let m_id = m["id"].as_str().unwrap().to_string();
+        let (_, c) = mk_admin(&org2, &format!("mx-c-{unique}@t.dev")).await;
+        let _ = c;
+
+        let ta = member_login(&app, &format!("mx-a-{unique}@t.dev")).await;
+        let tb = member_login(&app, &format!("mx-b-{unique}@t.dev")).await;
+        let tm = member_login(&app, &format!("mx-m-{unique}@t.dev")).await;
+        let tc = member_login(&app, &format!("mx-c-{unique}@t.dev")).await;
+
+        let (_, pool) = call(
+            &app,
+            api(
+                "POST",
+                "/api/v1/pools",
+                &ta,
+                Some(&json!({
+                    "org_id": org1, "name": "mx",
+                    "model_allowlist": ["m-test"]
+                })),
+            ),
+        )
+        .await;
+        let pool_id = pool["id"].as_str().unwrap().to_string();
+        let (_, bkey) = call(
+            &app,
+            api(
+                "POST",
+                &format!("/api/v1/pools/{pool_id}/keys"),
+                &ta,
+                Some(&json!({"user_id": b_id})),
+            ),
+        )
+        .await;
+        let bkey_id = bkey["id"].as_str().unwrap().to_string();
+
+        let at = db::now_ms() + 86_400_000;
+        let (st, pend) = call(
+            &app,
+            api(
+                "POST",
+                &format!("/api/v1/pools/{pool_id}/keys/{bkey_id}/expiry"),
+                &ta,
+                Some(&json!({"expires_at": at})),
+            ),
+        )
+        .await;
+        assert_eq!(st, StatusCode::ACCEPTED);
+        let action = pend["id"].as_str().unwrap().to_string();
+
+        // MEMBER approve → 403 (extractor, before any handler logic).
+        let (st, _) = call(
+            &app,
+            api(
+                "POST",
+                &format!("/api/v1/orgs/{org1}/pending-actions/{action}/approve"),
+                &tm,
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(st, StatusCode::FORBIDDEN, "member must never decide");
+        // SECOND SESSION of the requester: still the same person → 403.
+        let ta2 = member_login(&app, &format!("mx-a-{unique}@t.dev")).await;
+        let (st, _) = call(
+            &app,
+            api(
+                "POST",
+                &format!("/api/v1/orgs/{org1}/pending-actions/{action}/approve"),
+                &ta2,
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(
+            st,
+            StatusCode::FORBIDDEN,
+            "two sessions of the requester are the same person"
+        );
+        // CROSS-ORG admin → 404 (no existence oracle); spoofed org path
+        // cannot reach another org's row either.
+        let (st, _) = call(
+            &app,
+            api(
+                "POST",
+                &format!("/api/v1/orgs/{org1}/pending-actions/{action}/approve"),
+                &tc,
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(st, StatusCode::NOT_FOUND, "cross-org approve");
+        let (st, _) = call(
+            &app,
+            api(
+                "POST",
+                &format!("/api/v1/orgs/{org2}/pending-actions/{action}/approve"),
+                &ta,
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(st, StatusCode::NOT_FOUND, "spoofed org_id path");
+        // Foreign admin cannot even LIST the org's queue.
+        let (st, _) = call(
+            &app,
+            api(
+                "GET",
+                &format!("/api/v1/orgs/{org1}/pending-actions"),
+                &tc,
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(st, StatusCode::NOT_FOUND, "queue is org-scoped");
+
+        // RESTART (fresh app, same pool): the deferral persists with ZERO
+        // side effects — the key is untouched, the row still pending.
+        let app2 = test_app(test_db.pool.clone(), &mock).await;
+        let (_, keys) = call(
+            &app2,
+            api(
+                "GET",
+                &format!("/api/v1/pools/{pool_id}/keys/manage"),
+                &ta,
+                None,
+            ),
+        )
+        .await;
+        let row = keys
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|k| k["id"] == json!(bkey_id))
+            .unwrap();
+        assert!(
+            row["expires_at"].is_null(),
+            "no side effect survived the deferral across restart"
+        );
+        let (_, pend2) = call(
+            &app2,
+            api(
+                "GET",
+                &format!("/api/v1/orgs/{org1}/pending-actions?status=pending"),
+                &tb,
+                None,
+            ),
+        )
+        .await;
+        assert!(
+            pend2
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|p| p["id"] == json!(action)),
+            "pending row persisted across restart"
+        );
+
+        // HOST is a valid second eye → executes; the host is the decider.
+        let (st, decided) = call(
+            &app2,
+            api(
+                "POST",
+                &format!("/api/v1/orgs/{org1}/pending-actions/{action}/approve"),
+                &host,
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(decided["action"]["status"], "executed");
+        assert_eq!(
+            decided["action"]["decided_by"],
+            json!(host_id),
+            "decided_by names the HOST approver"
+        );
+
+        // ROUTINE contrast: a MEMBER's key expiry never defers.
+        let (_, mkey) = call(
+            &app,
+            api(
+                "POST",
+                &format!("/api/v1/pools/{pool_id}/keys"),
+                &ta,
+                Some(&json!({"user_id": m_id})),
+            ),
+        )
+        .await;
+        let (st, _) = call(
+            &app,
+            api(
+                "POST",
+                &format!(
+                    "/api/v1/pools/{pool_id}/keys/{}/expiry",
+                    mkey["id"].as_str().unwrap()
+                ),
+                &ta,
+                Some(&json!({"expires_at": db::now_ms() + 86_400_000})),
+            ),
+        )
+        .await;
+        assert_eq!(st, StatusCode::NO_CONTENT, "member-key expiry is routine");
+    }
+}
+
+/// DECISION RACE (final-scan F2 fix — claim-first): approve ∥ reject on
+/// the same row. Exactly one wins, and the WORLD must always match the
+/// ROW: a rejected action must never leave its side effect behind.
+#[tokio::test]
+async fn adv_d33_race_reject_vs_execute_world_matches_row() {
+    for test_db in test_dbs().await {
+        let mock = spawn_mock(MockMode::NonStream).await;
+        let app = test_app(test_db.pool.clone(), &mock).await;
+        let host = bootstrap_admin_and_login(&test_db.pool, &app).await;
+        let unique = db::new_id();
+        let (_, org) = call(
+            &app,
+            api(
+                "POST",
+                "/api/v1/orgs",
+                &host,
+                Some(&json!({"name": "R", "slug": format!("race-{unique}")})),
+            ),
+        )
+        .await;
+        let org_id = org["id"].as_str().unwrap().to_string();
+        let mut admin_ids = Vec::new();
+        let mut emails = Vec::new();
+        for who in ["a", "b", "c"] {
+            let email = format!("race-{who}-{unique}@t.dev");
+            let (_, m) = call(
+                &app,
+                api(
+                    "POST",
+                    "/api/v1/members",
+                    &host,
+                    Some(&json!({
+                        "org_id": org_id, "email": email,
+                        "password": "password123", "role": "org_admin"
+                    })),
+                ),
+            )
+            .await;
+            admin_ids.push(m["id"].as_str().unwrap().to_string());
+            emails.push(email);
+        }
+        let ta = member_login(&app, &emails[0]).await;
+        let tb = member_login(&app, &emails[1]).await;
+        let tc = member_login(&app, &emails[2]).await;
+
+        let (_, pool) = call(
+            &app,
+            api(
+                "POST",
+                "/api/v1/pools",
+                &ta,
+                Some(&json!({
+                    "org_id": org_id, "name": "rp", "model_allowlist": ["m-test"]
+                })),
+            ),
+        )
+        .await;
+        let pool_id = pool["id"].as_str().unwrap().to_string();
+        let (_, bkey) = call(
+            &app,
+            api(
+                "POST",
+                &format!("/api/v1/pools/{pool_id}/keys"),
+                &ta,
+                Some(&json!({"user_id": admin_ids[1]})),
+            ),
+        )
+        .await;
+        let bkey_id = bkey["id"].as_str().unwrap().to_string();
+
+        for round in 0..5i64 {
+            let at = db::now_ms() + (round + 2) * 86_400_000;
+            let (st, pend) = call(
+                &app,
+                api(
+                    "POST",
+                    &format!("/api/v1/pools/{pool_id}/keys/{bkey_id}/expiry"),
+                    &ta,
+                    Some(&json!({"expires_at": at})),
+                ),
+            )
+            .await;
+            assert_eq!(st, StatusCode::ACCEPTED);
+            let action = pend["id"].as_str().unwrap().to_string();
+
+            let app1 = app.clone();
+            let app2 = app.clone();
+            let tc_r = tc.clone();
+            let tb_r = tb.clone();
+            let u1 = format!("/api/v1/orgs/{org_id}/pending-actions/{action}/approve");
+            let u2 = format!("/api/v1/orgs/{org_id}/pending-actions/{action}/reject");
+            let (r_approve, r_reject) = tokio::join!(
+                async move { call(&app1, api("POST", &u1, &tc_r, None)).await },
+                async move { call(&app2, api("POST", &u2, &tb_r, None)).await },
+            );
+            // Exactly one decision may win; the loser conflicts cleanly.
+            let winners = [r_approve.0, r_reject.0]
+                .iter()
+                .filter(|s| **s == StatusCode::OK)
+                .count();
+            assert_eq!(
+                winners, 1,
+                "round {round}: exactly one winner (approve={:?} reject={:?})",
+                r_approve.0, r_reject.0
+            );
+
+            // WORLD ⇔ ROW consistency (the F2 invariant).
+            let (_, keys) = call(
+                &app,
+                api(
+                    "GET",
+                    &format!("/api/v1/pools/{pool_id}/keys/manage"),
+                    &ta,
+                    None,
+                ),
+            )
+            .await;
+            let row = keys
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|k| k["id"] == json!(bkey_id))
+                .unwrap();
+            let mut decided = None;
+            for st_name in ["executed", "rejected"] {
+                let (_, rows) = call(
+                    &app,
+                    api(
+                        "GET",
+                        &format!("/api/v1/orgs/{org_id}/pending-actions?status={st_name}"),
+                        &ta,
+                        None,
+                    ),
+                )
+                .await;
+                if let Some(r) = rows
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|p| p["id"] == json!(action))
+                {
+                    decided = Some(r.clone());
+                }
+            }
+            let decided = decided.expect("row reached a terminal status");
+            match decided["status"].as_str().unwrap() {
+                "rejected" => assert!(
+                    row["expires_at"].as_i64() != Some(at),
+                    "round {round}: REJECTED but the expiry landed — side-effect-before-claim (F2)"
+                ),
+                "executed" => assert_eq!(row["expires_at"].as_i64(), Some(at)),
+                other => panic!("round {round}: unexpected status {other}"),
+            }
+        }
+    }
+}
+
+/// MUTUAL DEMOTE TOCTOU (final-scan F3 fix — locked, guarded UPDATE): A
+/// requests demote(B), B requests demote(A), each approves the other's
+/// CONCURRENTLY. The org must never end with zero admins; exactly one
+/// demote executes and the other is refused at the execution guard.
+#[tokio::test]
+async fn adv_d33_mutual_demote_never_leaves_org_adminless() {
+    for test_db in test_dbs().await {
+        let mock = spawn_mock(MockMode::NonStream).await;
+        let app = test_app(test_db.pool.clone(), &mock).await;
+        let host = bootstrap_admin_and_login(&test_db.pool, &app).await;
+        let unique = db::new_id();
+        let (_, org) = call(
+            &app,
+            api(
+                "POST",
+                "/api/v1/orgs",
+                &host,
+                Some(&json!({"name": "D", "slug": format!("mut-{unique}")})),
+            ),
+        )
+        .await;
+        let org_id = org["id"].as_str().unwrap().to_string();
+        let mut ids = Vec::new();
+        let mut emails = Vec::new();
+        for who in ["a", "b"] {
+            let email = format!("mut-{who}-{unique}@t.dev");
+            let (_, m) = call(
+                &app,
+                api(
+                    "POST",
+                    "/api/v1/members",
+                    &host,
+                    Some(&json!({
+                        "org_id": org_id, "email": email,
+                        "password": "password123", "role": "org_admin"
+                    })),
+                ),
+            )
+            .await;
+            ids.push(m["id"].as_str().unwrap().to_string());
+            emails.push(email);
+        }
+        let ta = member_login(&app, &emails[0]).await;
+        let tb = member_login(&app, &emails[1]).await;
+
+        // Cross requests: A demotes B, B demotes A — both legal rows.
+        let (st, p1) = call(
+            &app,
+            api(
+                "POST",
+                &format!("/api/v1/orgs/{org_id}/admins/{}/demote", ids[1]),
+                &ta,
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(st, StatusCode::ACCEPTED);
+        let (st, p2) = call(
+            &app,
+            api(
+                "POST",
+                &format!("/api/v1/orgs/{org_id}/admins/{}/demote", ids[0]),
+                &tb,
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(st, StatusCode::ACCEPTED);
+        let d1 = p1["id"].as_str().unwrap().to_string();
+        let d2 = p2["id"].as_str().unwrap().to_string();
+
+        // Concurrent cross-approvals — the F3 attack window.
+        let app1 = app.clone();
+        let app2 = app.clone();
+        let tb2 = tb.clone();
+        let ta2 = ta.clone();
+        let u1 = format!("/api/v1/orgs/{org_id}/pending-actions/{d1}/approve");
+        let u2 = format!("/api/v1/orgs/{org_id}/pending-actions/{d2}/approve");
+        let _ = tokio::join!(
+            async move { call(&app1, api("POST", &u1, &tb2, None)).await },
+            async move { call(&app2, api("POST", &u2, &ta2, None)).await },
+        );
+
+        // DB read in ASSERTION only (harness rule): never zero admins.
+        let admins = tributary_control::db::org_admin_count(&test_db.pool, &org_id)
+            .await
+            .unwrap();
+        assert!(
+            admins >= 1,
+            "F3 TOCTOU: mutual demotes left {admins} admins"
+        );
+
+        // Exactly one demote executed; the other was refused at execution.
+        let mut executed = 0;
+        let mut rejected = 0;
+        for (action, _) in [(&d1, 0), (&d2, 1)] {
+            let (_, rows) = call(
+                &app,
+                api(
+                    "GET",
+                    &format!("/api/v1/orgs/{org_id}/pending-actions?status=executed"),
+                    &ta,
+                    None,
+                ),
+            )
+            .await;
+            if rows
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|p| p["id"] == json!(action))
+            {
+                executed += 1;
+            }
+            let (_, rows) = call(
+                &app,
+                api(
+                    "GET",
+                    &format!("/api/v1/orgs/{org_id}/pending-actions?status=rejected"),
+                    &ta,
+                    None,
+                ),
+            )
+            .await;
+            if rows
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|p| p["id"] == json!(action))
+            {
+                rejected += 1;
+            }
+        }
+        assert_eq!(
+            (executed, rejected),
+            (1, 1),
+            "one demote lands, the other hits the last-admin guard"
+        );
+    }
+}
+
+/// ROTATION (final-scan 2.4 + D33 gate fix): rotation must carry the IP
+/// allowlist on BOTH paths — the routine direct one (member key: the new
+/// credential stays pinned) and the deferred one (another admin's key:
+/// defers with no key material disclosed, the approver receives the
+/// reveal-once raw, and the reissued key stays pinned).
+#[tokio::test]
+async fn adv_rotation_gated_and_carries_allowlist() {
+    for test_db in test_dbs().await {
+        let mock = spawn_mock(MockMode::NonStream).await;
+        let app = test_app(test_db.pool.clone(), &mock).await;
+        let host = bootstrap_admin_and_login(&test_db.pool, &app).await;
+
+        // -- LEG 1: routine rotation carries the pin (member key). ------
+        let stack = provision_stack(&app, &host, &mock).await;
+        let (st, _) = call(
+            &app,
+            api(
+                "POST",
+                &format!(
+                    "/api/v1/pools/{}/keys/{}/allowlists",
+                    stack.pool_id, stack.key_id
+                ),
+                &host,
+                Some(&json!({"cidr": "10.0.0.0/8"})),
+            ),
+        )
+        .await;
+        assert_eq!(st, StatusCode::CREATED);
+        let before = mock.captured_count();
+        let (st, rotated) = call(
+            &app,
+            api(
+                "POST",
+                &format!(
+                    "/api/v1/pools/{}/keys/{}/rotate",
+                    stack.pool_id, stack.key_id
+                ),
+                &host,
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(st, StatusCode::CREATED, "member key: routine rotation");
+        let new_raw = rotated["raw"].as_str().unwrap().to_string();
+        assert_eq!(
+            mock.captured_count(),
+            before,
+            "rotation touches no upstream"
+        );
+
+        // OLD credential dead before upstream.
+        let (st, _) = call(&app, chat_req(&stack.key_raw, None, &chat_body())).await;
+        assert_eq!(st, StatusCode::UNAUTHORIZED);
+        // NEW credential from OUTSIDE the pin → 403, no upstream — the
+        // CIDR pin survived the rotation (2.4).
+        let before = mock.captured_count();
+        let (st, _) = call(&app, chat_req(&new_raw, Some("203.0.113.7"), &chat_body())).await;
+        assert_eq!(
+            st,
+            StatusCode::FORBIDDEN,
+            "rotation must carry the IP allowlist"
+        );
+        assert_eq!(mock.captured_count(), before);
+        // In-range on the new credential → served.
+        let (st, _) = call(&app, chat_req(&new_raw, Some("10.42.0.1"), &chat_body())).await;
+        assert_eq!(st, StatusCode::OK);
+
+        // -- LEG 2: another admin's key → DEFERS; approver gets the raw.
+        let unique = db::new_id();
+        let (_, org) = call(
+            &app,
+            api(
+                "POST",
+                "/api/v1/orgs",
+                &host,
+                Some(&json!({"name": "RO", "slug": format!("rot-{unique}")})),
+            ),
+        )
+        .await;
+        let org_id = org["id"].as_str().unwrap().to_string();
+        let mut ids = Vec::new();
+        let mut emails = Vec::new();
+        for who in ["a", "b"] {
+            let email = format!("rot-{who}-{unique}@t.dev");
+            let (_, m) = call(
+                &app,
+                api(
+                    "POST",
+                    "/api/v1/members",
+                    &host,
+                    Some(&json!({
+                        "org_id": org_id, "email": email,
+                        "password": "password123", "role": "org_admin"
+                    })),
+                ),
+            )
+            .await;
+            ids.push(m["id"].as_str().unwrap().to_string());
+            emails.push(email);
+        }
+        let ta = member_login(&app, &emails[0]).await;
+        let tb = member_login(&app, &emails[1]).await;
+        let (_, pool) = call(
+            &app,
+            api(
+                "POST",
+                "/api/v1/pools",
+                &ta,
+                Some(&json!({
+                    "org_id": org_id, "name": "rp2", "model_allowlist": ["m-test"]
+                })),
+            ),
+        )
+        .await;
+        let pool_id = pool["id"].as_str().unwrap().to_string();
+        // The pool needs a provider key or every chat 503s at upstream
+        // selection (mirror provision_stack's provider step).
+        let (st, _) = call(
+            &app,
+            api(
+                "POST",
+                &format!("/api/v1/pools/{pool_id}/provider-keys"),
+                &ta,
+                Some(&json!({"key": TEST_UPSTREAM_KEY, "base_url": mock.base_url})),
+            ),
+        )
+        .await;
+        assert_eq!(st, StatusCode::CREATED);
+        let (_, bkey) = call(
+            &app,
+            api(
+                "POST",
+                &format!("/api/v1/pools/{pool_id}/keys"),
+                &ta,
+                Some(&json!({"user_id": ids[1]})),
+            ),
+        )
+        .await;
+        let bkey_id = bkey["id"].as_str().unwrap().to_string();
+        let bkey_raw = bkey["raw"].as_str().unwrap().to_string();
+        let (st, _) = call(
+            &app,
+            api(
+                "POST",
+                &format!("/api/v1/pools/{pool_id}/keys/{bkey_id}/allowlists"),
+                &ta,
+                Some(&json!({"cidr": "10.0.0.0/8"})),
+            ),
+        )
+        .await;
+        assert_eq!(st, StatusCode::CREATED);
+
+        // A rotating B's key: DEFERS, nothing disclosed, nothing executed.
+        let (st, pend) = call(
+            &app,
+            api(
+                "POST",
+                &format!("/api/v1/pools/{pool_id}/keys/{bkey_id}/rotate"),
+                &ta,
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(st, StatusCode::ACCEPTED, "rotation of an admin key defers");
+        assert_eq!(pend["kind"], "admin_key_rotate");
+        assert!(
+            pend.get("raw").is_none() && !pend.to_string().contains(&bkey_raw),
+            "a deferred action discloses no key material"
+        );
+        let (st, _) = call(&app, chat_req(&bkey_raw, Some("10.42.0.1"), &chat_body())).await;
+        assert_eq!(st, StatusCode::OK, "B's working key survived the request");
+
+        // B (the owner, a distinct admin from the requester) approves and
+        // receives the reveal-once raw.
+        let action = pend["id"].as_str().unwrap().to_string();
+        let (st, decided) = call(
+            &app,
+            api(
+                "POST",
+                &format!("/api/v1/orgs/{org_id}/pending-actions/{action}/approve"),
+                &tb,
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(decided["action"]["status"], "executed");
+        let issued_raw = decided["issued"]["raw"]
+            .as_str()
+            .expect("approver receives the reveal-once raw")
+            .to_string();
+        let issued_id = decided["issued"]["key_id"].as_str().unwrap().to_string();
+        assert_ne!(issued_raw, bkey_raw);
+
+        // Old credential dead; new credential STAYS PINNED (deferred path
+        // copies the allowlist too).
+        let (st, _) = call(&app, chat_req(&bkey_raw, Some("10.42.0.1"), &chat_body())).await;
+        assert_eq!(st, StatusCode::UNAUTHORIZED, "old credential is dead");
+        let before = mock.captured_count();
+        let (st, _) = call(
+            &app,
+            chat_req(&issued_raw, Some("203.0.113.7"), &chat_body()),
+        )
+        .await;
+        assert_eq!(
+            st,
+            StatusCode::FORBIDDEN,
+            "deferred rotation keeps the CIDR pin"
+        );
+        assert_eq!(mock.captured_count(), before);
+        let (st, _) = call(&app, chat_req(&issued_raw, Some("10.42.0.1"), &chat_body())).await;
+        assert_eq!(st, StatusCode::OK);
+        // Management view: old rotated, new active.
+        let (_, keys) = call(
+            &app,
+            api(
+                "GET",
+                &format!("/api/v1/pools/{pool_id}/keys/manage"),
+                &ta,
+                None,
+            ),
+        )
+        .await;
+        let status_of = |id: &str| {
+            keys.as_array()
+                .unwrap()
+                .iter()
+                .find(|k| k["id"] == json!(id))
+                .unwrap()["status"]
+                .clone()
+        };
+        assert_eq!(status_of(&bkey_id), json!("rotated"));
+        assert_eq!(status_of(&issued_id), json!("active"));
+    }
+}
+
+/// LIVE AUTO-BLOCK SPARES ON-PURPOSE (classifier review j10): a threshold
+/// inversion (block everything) would ship green through the existing
+/// suite — nothing proved a LIVE org's above-threshold request survives.
+/// The mock hit counter is the determinism barrier: scoring provably ran
+/// before the zero-flag assert.
+#[tokio::test]
+async fn adv_live_auto_block_spares_on_purpose() {
+    for test_db in test_dbs().await {
+        let mock = spawn_mock(MockMode::NonStream).await;
+        let classifier = spawn_classifier().await;
+        let app = test_app(test_db.pool.clone(), &mock).await;
+        let host = bootstrap_admin_and_login(&test_db.pool, &app).await;
+        let stack = provision_stack(&app, &host, &mock).await;
+
+        // Solo org: configure + go-live execute immediately (auto-pass).
+        let (st, cfg) = call(
+            &app,
+            api(
+                "PUT",
+                &format!("/api/v1/orgs/{}/classifier", stack.org_id),
+                &host,
+                Some(&json!({
+                    "base_url": classifier.base_url, "dialect": "custom",
+                    "model": "jev-align-1", "key": "sk-jev-adv-key-123456",
+                    "purpose_statement": "Coding assistance for our team.",
+                    "mode": "auto_block", "acknowledge_auto_block": true,
+                })),
+            ),
+        )
+        .await;
+        assert_eq!(st, StatusCode::CREATED);
+        assert_eq!(cfg["auto_block_live"], false, "shadow first");
+        let (st, cfg) = call(
+            &app,
+            api(
+                "POST",
+                &format!("/api/v1/orgs/{}/classifier/go-live", stack.org_id),
+                &host,
+                Some(&json!({})),
+            ),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(cfg["auto_block_live"], true);
+
+        let probe_hits = *classifier.hits.lock().unwrap();
+        let on_purpose = json!({
+            "model": "m-test",
+            "messages": [{"role": "user",
+                "content": "please refactor this rust function for clarity"}],
+        });
+        for n in 0..3 {
+            let (st, _) = call(&app, chat_req(&stack.key_raw, None, &on_purpose)).await;
+            assert_eq!(st, StatusCode::OK, "on-purpose #{n} must pass while LIVE");
+        }
+        wait_for("all on-purpose requests were scored", || {
+            let hits = classifier.hits.clone();
+            async move { *hits.lock().unwrap() >= probe_hits + 3 }
+        })
+        .await;
+
+        // Earned negative: no auto-block flag, key never suspended.
+        let (_, flags) = call(
+            &app,
+            api(
+                "GET",
+                "/api/v1/review-flags?status=open&limit=100",
+                &host,
+                None,
+            ),
+        )
+        .await;
+        let auto_blocks = flags
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|r| {
+                r["kind"] == "classifier_auto_block" && r["pool_key_id"] == json!(stack.key_id)
+            })
+            .count();
+        assert_eq!(
+            auto_blocks, 0,
+            "live auto-block must NEVER fire above the block threshold"
+        );
+        let (st, _) = call(&app, chat_req(&stack.key_raw, None, &on_purpose)).await;
+        assert_eq!(st, StatusCode::OK, "key never suspended by on-purpose use");
     }
 }

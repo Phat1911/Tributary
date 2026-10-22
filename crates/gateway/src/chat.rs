@@ -87,9 +87,17 @@ pub async fn chat_completions(
         .iter()
         .filter_map(|c| tributary_common::net::Cidr::parse(c))
         .collect();
-    if let tributary_common::net::AllowlistVerdict::Denied =
+    // Fail-CLOSED on corruption (final-scan 1.3): rows that exist but
+    // cannot parse (bad restore, manual SQL) must DENY — a key with
+    // unparseable pinning rows silently serving from anywhere is the
+    // opposite of an allowlist. (Zero rows at all stays dormant by
+    // design — pinning is opt-in.)
+    let verdict = if !cidrs_raw.is_empty() && parsed_cidrs.is_empty() {
+        tributary_common::net::AllowlistVerdict::Denied
+    } else {
         tributary_common::net::evaluate_allowlist(&parsed_cidrs, &client_ip)
-    {
+    };
+    if let tributary_common::net::AllowlistVerdict::Denied = verdict {
         // Denied: audit row (the J4 proof) — the source IP is the whole
         // story, no queue/email spam (misconfigured clients are loud, not
         // malicious).

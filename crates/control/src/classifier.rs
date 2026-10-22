@@ -296,16 +296,49 @@ pub fn parse_alignment(bytes: &[u8]) -> Option<f64> {
 /// Coerces a JSON value into f64: native numbers, or numeric strings
 /// (vendors serialize floats as strings more often than you would think).
 fn coerce_number(raw: &Value) -> Option<f64> {
-    match raw {
+    let n = match raw {
         Value::Number(n) => n.as_f64(),
         Value::String(s) => s.trim().parse::<f64>().ok(),
         _ => None,
+    }?;
+    // Non-finite is vendor GARBAGE, not "worst alignment" (final-scan
+    // A2): Rust happily parses "NaN"/"inf", and NaN clamps to NaN which
+    // casts to 0 bp at the gateway — flagging and auto-blocking members
+    // on a broken vendor. Garbage scores fail OPEN like every other
+    // unparseable value.
+    if !n.is_finite() {
+        return None;
     }
+    Some(n)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Non-finite strings must fail OPEN (None), never clamp to 0 bp
+    /// (final-scan A2 — "NaN" used to parse, clamp, and become a
+    /// worst-alignment flag that auto-blocked members).
+    #[test]
+    fn parse_systemone_rejects_non_finite() {
+        for body in [
+            br#"{"answers":{"alignment":{"noul":"NaN"}}}"#.as_slice(),
+            br#"{"answers":{"alignment":{"noul":"nan"}}}"#.as_slice(),
+            br#"{"answers":{"alignment":{"noul":"-inf"}}}"#.as_slice(),
+            br#"{"answers":{"alignment":{"noul":"1e400"}}}"#.as_slice(),
+        ] {
+            assert_eq!(parse_systemone(body), None, "body: {body:?}");
+        }
+        // Finite values (incl. negative → clamp) still parse.
+        assert_eq!(
+            parse_systemone(br#"{"answers":{"alignment":{"noul":"0.42"}}}"#),
+            Some(0.42)
+        );
+        assert_eq!(
+            parse_systemone(br#"{"answers":{"alignment":{"noul":"-3"}}}"#),
+            Some(0.0)
+        );
+    }
 
     #[test]
     fn parses_canonical_dialect() {

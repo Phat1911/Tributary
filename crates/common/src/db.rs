@@ -75,6 +75,14 @@ impl Db {
     }
 
     /// Placeholder translation: SQL is written with `?`; Postgres needs `$n`.
+    /// True when this connection is Postgres. Used ONLY to pick between
+    /// equivalent portable statements where one engine needs an explicit
+    /// lock (e.g. `FOR UPDATE`) the other lacks — never for divergent
+    /// schemas or semantics (dual-DB rule).
+    pub fn postgres(&self) -> bool {
+        self.postgres
+    }
+
     pub fn sql(&self, sql: &str) -> String {
         rewrite_placeholders(sql, self.postgres)
     }

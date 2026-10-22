@@ -131,8 +131,8 @@ const SYSTEM_ACTOR_EMAIL: &str = "system@tributary.internal";
 /// `None` when even the queue write failed — logged loudly).
 ///
 /// Best-effort by design: each write logs its own failure and the pipeline
-/// continues, because the caller's response shape (e.g. the honey key's
-/// generic 401) must not depend on detection plumbing.
+/// continues, because the caller's response shape (e.g. an allowlist 403)
+/// must not depend on detection plumbing (honey keys are gone — D31).
 pub async fn detect(db: &Db, smtp: Option<&SmtpConfig>, event: &Detection<'_>) -> Option<String> {
     let flag_id = new_id();
     let ts = now_ms();

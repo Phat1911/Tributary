@@ -1,7 +1,9 @@
 //! Async, sampled, off-hot-path purpose classification (D28, M4).
 //!
-//! Flow: the chat path (AFTER the response is served and metered) hands a
-//! [`ScoreContext`] to [`spawn_scoring`]. The spawned task:
+//! Flow: the chat path hands a [`ScoreContext`] to [`spawn_scoring`]
+//! BEFORE the upstream call (the task runs concurrently; the member's
+//! request never waits on it — fail-open by construction, D28). The
+//! spawned task:
 //!
 //! 1. loads the org's classifier config — no row ⇒ nothing happens
 //!    (dormant-by-default, D28);
@@ -67,7 +69,17 @@ pub fn extract_prompt(body: &Value) -> String {
                 }
                 text.push_str(content);
                 if text.len() >= MAX_PROMPT_CHARS {
-                    text.truncate(MAX_PROMPT_CHARS);
+                    // Char-boundary-safe cap (final-scan A1):
+                    // `String::truncate` is BYTE-indexed and PANICS when
+                    // the cap lands inside a multi-byte character — and
+                    // a member choosing prompt length could abort the
+                    // whole request handler, even with no classifier
+                    // configured. Back off to the previous boundary.
+                    let mut end = MAX_PROMPT_CHARS;
+                    while !text.is_char_boundary(end) {
+                        end -= 1;
+                    }
+                    text.truncate(end);
                     break;
                 }
             }
@@ -266,6 +278,25 @@ async fn run_scoring(state: &AppState, ctx: &ScoreContext) -> anyhow::Result<()>
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// A 3-byte char straddling byte 8192 must not panic (final-scan A1
+    /// — the exact repro; note a 4-byte emoji lands ON the boundary by
+    /// luck and would hide the bug).
+    #[test]
+    fn prompt_extraction_never_splits_a_character() {
+        let straddle = json!({"messages": [{"role": "user",
+            "content": format!("{}中", "x".repeat(MAX_PROMPT_CHARS - 2))}]});
+        let extracted = extract_prompt(&straddle);
+        assert!(extracted.chars().all(|c| c == 'x' || c == '中'));
+        assert!(extracted.chars().count() <= MAX_PROMPT_CHARS);
+        assert!(extracted.ends_with('x'), "straddling char dropped whole");
+
+        let emoji = json!({"messages": [{"role": "user",
+            "content": "🎉".repeat(MAX_PROMPT_CHARS / 2 + 5) }]});
+        let extracted = extract_prompt(&emoji);
+        assert!(extracted.chars().all(|c| c == '🎉'));
+        assert!(extracted.chars().count() <= MAX_PROMPT_CHARS);
+    }
 
     #[test]
     fn prompt_extraction_joins_and_caps() {

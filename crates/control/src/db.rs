@@ -1193,6 +1193,28 @@ pub async fn insert_ip_allowlist(
 }
 
 /// Lists the CIDRs pinned to one key (empty = unrestricted, dormant).
+/// Copies every CIDR row from one key to another (rotation contract).
+/// Row-by-row on purpose: each copy needs its OWN id, and id generation
+/// lives app-side (dual-DB rule — no engine-specific SQL like
+/// gen_random_uuid here).
+pub async fn copy_ip_allowlist(db: &Db, from_key: &str, to_key: &str) -> sqlx::Result<u64> {
+    let rows = ip_allowlists_for_key(db, from_key).await?;
+    let mut copied = 0u64;
+    for r in rows {
+        insert_ip_allowlist(
+            db,
+            &tributary_common::db::new_id(),
+            to_key,
+            &r.cidr,
+            r.note.as_deref(),
+            tributary_common::db::now_ms(),
+        )
+        .await?;
+        copied += 1;
+    }
+    Ok(copied)
+}
+
 pub async fn ip_allowlists_for_key(
     db: &Db,
     pool_key_id: &str,
@@ -1340,7 +1362,9 @@ pub async fn concurrency_flags_for_key(
 /// One deferred sensitive action. The payload is SANITIZED parameters
 /// (sealed blobs for secrets — never plaintext keys, rule 2); the write
 /// only happens when a second, distinct admin approves.
-#[derive(Debug, Clone, Serialize)]
+// No Serialize on purpose (final-scan F7): this row carries the sealed
+// payload; an accidental Json(row) must not compile into a leak.
+#[derive(Debug, Clone)]
 pub struct PendingActionRow {
     pub id: String,
     pub org_id: String,
@@ -1429,6 +1453,8 @@ pub async fn insert_pending_action(
     Ok(())
 }
 
+/// Maps one sqlx ANY row into a PendingActionRow (shared by both list
+/// and by-id queries — column order mirrors the SELECTs above).
 fn pending_action_from_row(row: sqlx::any::AnyRow) -> PendingActionRow {
     PendingActionRow {
         id: row.get("id"),
@@ -1532,6 +1558,91 @@ pub async fn latest_open_flag_for_key(db: &Db, pool_key_id: &str) -> sqlx::Resul
         .fetch_optional(db.pool())
         .await?;
     Ok(row.map(|r| r.get::<String, _>("id")))
+}
+
+/// Claims a pending action for execution (final-scan F2: the approver
+/// wins the row BEFORE any side effect — concurrent approvers can no
+/// longer both execute, and a guard failure can no longer overwrite a
+/// winner's trail with 'rejected'). 0 rows = someone else decided first.
+pub async fn claim_pending_action(
+    db: &Db,
+    id: &str,
+    decided_by: &str,
+    decided_at: i64,
+) -> sqlx::Result<u64> {
+    let sql = db.sql(
+        "UPDATE pending_actions SET status = 'executing', decided_by = ?, decided_at = ? \
+         WHERE id = ? AND status = 'pending'",
+    );
+    let res = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
+        .bind(decided_by)
+        .bind(decided_at)
+        .bind(id)
+        .execute(db.pool())
+        .await?;
+    Ok(res.rows_affected())
+}
+
+/// Finalizes a claimed ('executing') action to executed|rejected. A crash
+/// between claim and finalize strands the row in 'executing' (visible,
+/// never re-executable — strictly safer than the old crash-after-execute
+/// which left a re-executable 'pending').
+pub async fn finalize_pending_action(
+    db: &Db,
+    id: &str,
+    status: &str,
+    decided_at: i64,
+) -> sqlx::Result<u64> {
+    let sql = db.sql(
+        "UPDATE pending_actions SET status = ?, decided_at = ? \
+         WHERE id = ? AND status = 'executing'",
+    );
+    let res = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
+        .bind(status)
+        .bind(decided_at)
+        .bind(id)
+        .execute(db.pool())
+        .await?;
+    Ok(res.rows_affected())
+}
+
+/// Demotes an org_admin to member ATOMICALLY (final-scan TOCTOU fix).
+///
+/// The ≥2-admins guard lives INSIDE the UPDATE so a stale count can never
+/// authorize a demote — but on Postgres MVCC two concurrent demotes could
+/// each read count=2 in their statement snapshots and BOTH win, leaving
+/// the org admin-less. The leading SELECT closes that window: on PG it
+/// takes row locks on the whole admin bench, so the second transaction
+/// blocks until the first commits and then sees count=1 and refuses.
+/// SQLite serializes writers natively (one write lock) and has no
+/// `FOR UPDATE` — a plain read inside the transaction is equivalent.
+pub async fn demote_org_admin_guarded(db: &Db, org_id: &str, user_id: &str) -> sqlx::Result<u64> {
+    let mut tx = db.pool().begin().await?;
+    let lock = if db.postgres() {
+        db.sql(
+            "SELECT id FROM users WHERE org_id = ? AND role = 'org_admin' \
+             FOR UPDATE",
+        )
+    } else {
+        db.sql("SELECT id FROM users WHERE org_id = ? AND role = 'org_admin'")
+    };
+    sqlx::query(sqlx::AssertSqlSafe(lock.as_str()))
+        .bind(org_id)
+        .fetch_all(&mut *tx)
+        .await?;
+    let sql = db.sql(
+        "UPDATE users SET role = 'member' \
+         WHERE id = ? AND role = 'org_admin' \
+           AND (SELECT COUNT(*) FROM users \
+                WHERE org_id = ? AND role = 'org_admin') >= 2",
+    );
+    let res = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
+        .bind(user_id)
+        .bind(org_id)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(res.rows_affected())
 }
 
 /// Demotes an org_admin to member (D33 AdminDemote execution). Returns 0
