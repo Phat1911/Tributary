@@ -80,7 +80,17 @@ pub const SESSION_TTL_MS: i64 = 24 * 60 * 60 * 1000;
 
 /// Builds the `/api/v1` router with state applied — ready to merge into the
 /// gateway's app (returns `Router<()>`, i.e. a router with no remaining state).
+/// Builds the control-plane router. The scrub runs once per boot
+/// (fire-and-forget): legacy `approval.requested` audit rows written
+/// before b012cb5 still carry sealed-blob fields — A-010's fix covers
+/// new writes; this clears the old ones idempotently.
 pub fn router(state: ControlState) -> Router {
+    {
+        let db = state.db.clone();
+        tokio::spawn(async move {
+            let _ = crate::audit::scrub_legacy_approval_audit(&db).await;
+        });
+    }
     Router::new()
         .route("/api/v1/auth/login", post(api::login))
         .route("/api/v1/auth/logout", post(api::logout))

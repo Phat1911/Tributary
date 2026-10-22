@@ -2175,40 +2175,44 @@ async fn adv_d33_mutual_demote_never_leaves_org_adminless() {
         );
 
         // Exactly one demote executed; the other was refused at execution.
+        // Read through the HOST: one of A/B just lost admin status in the
+        // race, and which one varies per run — their token would 403.
         let mut executed = 0;
         let mut rejected = 0;
         for (action, _) in [(&d1, 0), (&d2, 1)] {
-            let (_, rows) = call(
+            let (st, rows) = call(
                 &app,
                 api(
                     "GET",
                     &format!("/api/v1/orgs/{org_id}/pending-actions?status=executed"),
-                    &ta,
+                    &host,
                     None,
                 ),
             )
             .await;
+            assert_eq!(st, StatusCode::OK, "list executed: {rows}");
             if rows
                 .as_array()
-                .unwrap()
+                .expect("executed list is an array")
                 .iter()
                 .any(|p| p["id"] == json!(action))
             {
                 executed += 1;
             }
-            let (_, rows) = call(
+            let (st, rows) = call(
                 &app,
                 api(
                     "GET",
                     &format!("/api/v1/orgs/{org_id}/pending-actions?status=rejected"),
-                    &ta,
+                    &host,
                     None,
                 ),
             )
             .await;
+            assert_eq!(st, StatusCode::OK, "list rejected: {rows}");
             if rows
                 .as_array()
-                .unwrap()
+                .expect("rejected list is an array")
                 .iter()
                 .any(|p| p["id"] == json!(action))
             {

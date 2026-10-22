@@ -192,6 +192,69 @@ fn audit_row_from_row(row: sqlx::any::AnyRow) -> AuditRow {
 /// Loads every row as a raw string — used ONLY by the sanitization test to
 /// prove no raw secret (or even a `key_hash`/`ciphertext` column name) ever
 /// reached the table. Not exposed over the API.
+/// One-time scrub for legacy `approval.requested` rows (final-scan A-010
+/// follow-up): rows written before commit b012cb5 carried the SEALED
+/// classifier envelope (ciphertext/dek_wrapped) inside `after_json` —
+/// sealed, not plaintext, but the audit trail has no business storing
+/// them at all. Idempotent: parses each affected row's JSON, drops the
+/// two fields, writes it back. Called once at boot; a clean DB is a
+/// no-op.
+pub async fn scrub_legacy_approval_audit(db: &tributary_common::db::Db) -> u64 {
+    let sql = db.sql(
+        "SELECT id, after_json AS a FROM audit_log \
+         WHERE action = 'approval.requested' \
+           AND (after_json LIKE '%ciphertext%' OR after_json LIKE '%dek_wrapped%')",
+    );
+    let rows = match sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
+        .fetch_all(db.pool())
+        .await
+    {
+        Ok(rows) => rows,
+        Err(e) => {
+            tracing::warn!("legacy approval-audit scrub skipped: {e:#}");
+            return 0;
+        }
+    };
+    let mut scrubbed = 0u64;
+    for row in rows {
+        let id: String = match row.try_get("id") {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let raw: String = match row.try_get("a") {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&raw) else {
+            continue;
+        };
+        let Some(obj) = value.as_object_mut() else {
+            continue;
+        };
+        obj.remove("ciphertext");
+        obj.remove("dek_wrapped");
+        let Ok(clean) = serde_json::to_string(&value) else {
+            continue;
+        };
+        let upd = db.sql("UPDATE audit_log SET after_json = ? WHERE id = ?");
+        if sqlx::query(sqlx::AssertSqlSafe(upd.as_str()))
+            .bind(&clean)
+            .bind(&id)
+            .execute(db.pool())
+            .await
+            .is_ok()
+        {
+            scrubbed += 1;
+        }
+    }
+    if scrubbed > 0 {
+        tracing::info!(
+            "scrubbed sealed-blob fields from {scrubbed} legacy approval.requested audit rows"
+        );
+    }
+    scrubbed
+}
+
 pub async fn raw_rows_for_test(db: &Db) -> Vec<String> {
     let sql = db.sql(
         "SELECT id, org_id, actor_id, actor_email, action, target_kind, target_id, \
