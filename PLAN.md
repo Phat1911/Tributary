@@ -104,6 +104,17 @@ exploitable FIXED, pinned red-first:
   12 journeys (was 11), 127 workspace tests, clippy -D warnings 0, fmt
   clean, dashboard lint+tsc clean.
 
+  Late round-2 additions (classifier reviewer reported after the first
+  push): **A-027 (med, fixed)** live-preservation narrowed — vendor
+  (base_url/dialect/model) or purpose swaps re-enter shadow on both PUT
+  and deferred execute; sampling/key tweaks keep live (regression legs
+  in adv_live). **A-028 (med, M5)** go-live approve-ordering zero-shadow
+  arm — folded into the A-022b staleness family. **A-029 (med, fixed)**
+  PG bench-lock deadlock in concurrent demote executions — ORDER BY id
+  on the FOR UPDATE select (CI caught a (0,2) flake; local repro showed
+  the loser 500ing); mutual-demote journey now 3 rounds with approve
+  response diagnostics.
+
 ### 2026-10-22 — M4 final-scan adversarial close-out (5 reviewer subagents)
 
 **Scope.** Founder-directed milestone-close scan: independent adversarial reviewers attacked the four M4 feature areas (four-eyes/D33, classifier/D28, gateway leak prevention, suite strength); every exploitable finding fixed in this commit, every design-level finding recorded in AUDIT.md A-019..A-022 for the director.

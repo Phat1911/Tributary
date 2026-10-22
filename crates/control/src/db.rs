@@ -1694,13 +1694,21 @@ pub async fn finalize_pending_action(
 /// `FOR UPDATE` — a plain read inside the transaction is equivalent.
 pub async fn demote_org_admin_guarded(db: &Db, org_id: &str, user_id: &str) -> sqlx::Result<u64> {
     let mut tx = db.pool().begin().await?;
+    // ORDER BY id (round-2 deadlock fix): every contender locks the
+    // bench in the SAME row order. Without it, two racing demotes could
+    // lock the same rows in plan-dependent opposite orders — a textbook
+    // deadlock cycle; PG then killed one transaction with a 500 instead
+    // of letting the guard refuse it cleanly.
     let lock = if db.postgres() {
         db.sql(
             "SELECT id FROM users WHERE org_id = ? AND role = 'org_admin' \
-             FOR UPDATE",
+             ORDER BY id FOR UPDATE",
         )
     } else {
-        db.sql("SELECT id FROM users WHERE org_id = ? AND role = 'org_admin'")
+        db.sql(
+            "SELECT id FROM users WHERE org_id = ? AND role = 'org_admin' \
+             ORDER BY id",
+        )
     };
     sqlx::query(sqlx::AssertSqlSafe(lock.as_str()))
         .bind(org_id)

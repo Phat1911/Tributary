@@ -2338,9 +2338,15 @@ async fn adv_d33_mutual_demote_never_leaves_org_adminless() {
             let ta2 = ta.clone();
             let u1 = format!("/api/v1/orgs/{org_id}/pending-actions/{d1}/approve");
             let u2 = format!("/api/v1/orgs/{org_id}/pending-actions/{d2}/approve");
-            let _ = tokio::join!(
+            let (r1, r2) = tokio::join!(
                 async move { call(&app1, api("POST", &u1, &tb2, None)).await },
                 async move { call(&app2, api("POST", &u2, &ta2, None)).await },
+            );
+            // Diagnostics (round-2 CI flake): the approve responses name
+            // the refusing guard — keep them for the assert message.
+            let race_diag = format!(
+                "approve(d1 by B) -> {} {} | approve(d2 by A) -> {} {}",
+                r1.0, r1.1, r2.0, r2.1
             );
 
             // DB read in ASSERTION only (harness rule): never zero admins.
@@ -2400,7 +2406,7 @@ async fn adv_d33_mutual_demote_never_leaves_org_adminless() {
             assert_eq!(
                 (executed, rejected),
                 (1, 1),
-                "round {round}: one demote lands, the other hits the last-admin guard"
+                "round {round}: one demote lands, the other hits the last-admin guard | {race_diag}"
             );
         }
     }
@@ -2946,6 +2952,72 @@ async fn adv_live_auto_block_spares_on_purpose() {
             auto_blocks2, 0,
             "still zero blocks after everything settles"
         );
+
+        // -- R2-1 regression (round 2): a semantics swap re-shadows. ----
+        // The org is LIVE. Changing the PURPOSE STATEMENT (what "off-
+        // purpose" MEANS) must drop to shadow — the new semantics were
+        // never validated — while a pure sampling tweak keeps live.
+        let (st, cfg) = call(
+            &app,
+            api(
+                "PUT",
+                &format!("/api/v1/orgs/{}/classifier", stack.org_id),
+                &host,
+                Some(&json!({
+                    "base_url": classifier.base_url, "dialect": "custom",
+                    "model": "jev-align-1", "key": "sk-jev-adv-key-123456",
+                    "purpose_statement": "Home cooking recipes only.",
+                    "mode": "auto_block", "acknowledge_auto_block": true,
+                })),
+            ),
+        )
+        .await;
+        assert!(
+            st == StatusCode::OK || st == StatusCode::CREATED,
+            "re-PUT on a live org saves (got {st})"
+        );
+        assert_eq!(
+            cfg["auto_block_live"], false,
+            "a purpose swap re-enters shadow — new semantics, new validation"
+        );
+        // Re-earn live, then prove the counterexample: a SAMPLING tweak
+        // (same enforcement semantics) preserves live.
+        let (st, _) = call(
+            &app,
+            api(
+                "POST",
+                &format!("/api/v1/orgs/{}/classifier/go-live", stack.org_id),
+                &host,
+                Some(&json!({})),
+            ),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "go-live after re-shadow");
+        let (st, cfg) = call(
+            &app,
+            api(
+                "PUT",
+                &format!("/api/v1/orgs/{}/classifier", stack.org_id),
+                &host,
+                Some(&json!({
+                    "base_url": classifier.base_url, "dialect": "custom",
+                    "model": "jev-align-1", "key": "sk-jev-adv-key-123456",
+                    "purpose_statement": "Home cooking recipes only.",
+                    "mode": "auto_block", "acknowledge_auto_block": true,
+                    "sampling_per_hour": 77,
+                })),
+            ),
+        )
+        .await;
+        assert!(
+            st == StatusCode::OK || st == StatusCode::CREATED,
+            "sampling tweak saves (got {st})"
+        );
+        assert_eq!(
+            cfg["auto_block_live"], true,
+            "a sampling tweak keeps live — semantics unchanged (A-015)"
+        );
+        assert_eq!(cfg["sampling_per_hour"], 77);
     }
 }
 

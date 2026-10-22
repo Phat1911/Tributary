@@ -334,15 +334,22 @@ pub async fn execute(db: &Db, action: &db::PendingActionRow, now: i64) -> anyhow
                 let mut row = classifier_row_from_payload(&payload);
                 row.updated_at = now;
                 // Same live-preservation rule as the direct PUT
-                // (final-scan A3): a live org approving a non-blocking
-                // tweak stays live; mode/threshold changes re-shadow.
+                // (final-scan A3, narrowed round 2 / R2-1): live survives
+                // only sampling/key tweaks. Vendor (base_url/dialect/
+                // model), purpose statement, mode, or threshold changes
+                // re-enter shadow — new enforcement semantics must be
+                // re-validated before they can block.
                 let prior = db::classifier_config_by_org(db, &action.org_id).await?;
                 let (live, shadow) = match &prior {
                     Some(p)
                         if p.auto_block_live
                             && row.mode == "auto_block"
                             && p.alert_threshold_bp == row.alert_threshold_bp
-                            && p.block_threshold_bp == row.block_threshold_bp =>
+                            && p.block_threshold_bp == row.block_threshold_bp
+                            && p.base_url == row.base_url
+                            && p.dialect == row.dialect
+                            && p.model == row.model
+                            && p.purpose_statement == row.purpose_statement =>
                     {
                         (true, p.shadow_started_at)
                     }

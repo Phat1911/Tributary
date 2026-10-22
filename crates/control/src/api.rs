@@ -2139,12 +2139,16 @@ pub async fn put_classifier(
         &row_ad("classifier_config", &org.id),
     )
     .map_err(ControlError::Internal)?;
-    // Live-status preservation (final-scan A3): a LIVE org tweaking
-    // non-blocking settings (sampling, endpoint, key, purpose) keeps its
-    // live status — silently dropping to shadow on a sampling tweak
-    // would disarm enforcement with no diff evidence. Changing the mode
-    // or EITHER threshold re-enters shadow: new enforcement parameters
-    // must be re-validated before they can block.
+    // Live-status preservation (final-scan A3, narrowed round 2 / R2-1):
+    // a LIVE org keeps its live status ONLY for tweaks that cannot
+    // change WHAT gets blocked — sampling rate and the sealed key
+    // material. Swapping the VENDOR (base_url/dialect/model) or the
+    // PURPOSE STATEMENT redefines the enforcement semantics themselves,
+    // so those re-enter shadow: the new semantics must re-earn live
+    // through a fresh shadow window + explicit go-live (round-2 probe:
+    // a swapped vendor suspended a member on innocent text with zero
+    // shadow data under the new semantics). Mode and thresholds were
+    // already re-shadowing (A-015).
     let prior = db::classifier_config_by_org(&state.db, &org.id)
         .await
         .map_err(|e| ControlError::Internal(e.into()))?;
@@ -2153,7 +2157,11 @@ pub async fn put_classifier(
             if p.auto_block_live
                 && mode == "auto_block"
                 && p.alert_threshold_bp == alert_bp
-                && p.block_threshold_bp == block_bp =>
+                && p.block_threshold_bp == block_bp
+                && p.base_url == base_url
+                && p.dialect == dialect
+                && p.model == model
+                && p.purpose_statement == body.purpose_statement =>
         {
             (true, p.shadow_started_at)
         }
