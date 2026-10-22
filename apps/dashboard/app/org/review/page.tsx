@@ -9,6 +9,7 @@ import { ShieldAlert } from "lucide-react";
 import { toast } from "sonner";
 import { AppShell, PageHeader } from "@/components/app-shell";
 import { EmptyState, ErrorState, TableSkeleton } from "@/components/data-state";
+import { SecretReveal } from "@/components/secret-reveal";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -38,6 +39,7 @@ const PENDING_KIND_LABELS: Record<string, string> = {
   admin_demote: "Demote admin to member",
   admin_key_expiry: "Set expiry on an admin's key",
   admin_key_revoke: "Revoke an admin's key",
+  admin_key_rotate: "Rotate an admin's key (reissue)",
   org_policy: "Org policy (classifier purpose / auto-block)",
   pool_disable: "Disable pool",
 };
@@ -192,13 +194,29 @@ function ApprovalsPanel({ onDecided }: { onDecided: () => void }) {
   const emailOf = (id: string) =>
     (members.data ?? []).find((m) => m.id === id)?.email ?? "another admin";
   const [busyId, setBusyId] = useState<string | null>(null);
+  // Approving a key ROTATION mints the replacement credential and hands
+  // its raw form to the approver ONCE (reveal-once, D33). The server
+  // response is the only channel — dropping it (round-2 F2) meant the
+  // old key died while the new raw existed nowhere: the target admin
+  // was locked out. Keep it until the approver leaves the page.
+  const [issued, setIssued] = useState<{ raw: string; key_prefix: string } | null>(
+    null,
+  );
 
   async function decide(actionId: string, decision: "approve" | "reject") {
     if (!orgId) return;
     setBusyId(actionId);
     try {
-      await api.post(`/orgs/${orgId}/pending-actions/${actionId}/${decision}`);
-      toast.success(decision === "approve" ? "Approved and executed" : "Rejected");
+      const res = await api.post<{
+        action?: { status?: string };
+        issued?: { raw?: string; key_prefix?: string };
+      }>(`/orgs/${orgId}/pending-actions/${actionId}/${decision}`);
+      if (decision === "approve" && res?.issued?.raw && res?.issued?.key_prefix) {
+        setIssued({ raw: res.issued.raw, key_prefix: res.issued.key_prefix });
+        toast.success("Approved — the replacement key is shown below, once");
+      } else {
+        toast.success(decision === "approve" ? "Approved and executed" : "Rejected");
+      }
       actions.reload();
       onDecided();
     } catch (e) {
@@ -211,6 +229,21 @@ function ApprovalsPanel({ onDecided }: { onDecided: () => void }) {
   if (actions.loading) return <TableSkeleton />;
   if (actions.error) {
     return <ErrorState message={actions.error.message} onRetry={actions.reload} />;
+  }
+  if (issued) {
+    // The rotation reveal outranks the (now reloaded) queue: the approver
+    // must copy the raw key before navigating away — it is unrecoverable.
+    return (
+      <div className="space-y-3">
+        <SecretReveal
+          secret={issued.raw}
+          label={`Replacement key (${issued.key_prefix}) — deliver it to the key's owner over a secure channel`}
+        />
+        <Button variant="outline" size="sm" onClick={() => setIssued(null)}>
+          Done — back to the queue
+        </Button>
+      </div>
+    );
   }
   if ((actions.data ?? []).length === 0) {
     return (

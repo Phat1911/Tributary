@@ -1460,29 +1460,37 @@ async fn rotate_execute_and_respond(
 ) -> ApiResult<axum::response::Response> {
     let generated = generate_key();
     let new_key_id = new_id();
-    db::insert_issued_pool_key(
+    let owner = old
+        .user_id
+        .clone()
+        .ok_or(ControlError::Conflict("key has no owner".into()))?;
+    // Atomic (H-1/F3, final-scan round 2): kill-old, mint-new, and
+    // allowlist-copy commit together or not at all. Ok(false) means the
+    // key died (revoked/rotated) between load and here — refuse with 409
+    // and mint NOTHING. Previously the insert committed first, so this
+    // window minted a live key while reporting a rotated one.
+    let rotated = db::rotate_key_atomic(
         &state.db,
+        &old.id,
         &db::NewPoolKey {
             id: new_key_id.clone(),
             pool_id: pool.id.clone(),
             key_hash: generated.key_hash,
             key_prefix: generated.key_prefix.clone(),
-            user_id: old
-                .user_id
-                .clone()
-                .ok_or(ControlError::Conflict("key has no owner".into()))?,
+            user_id: owner,
             expires_at: old.expires_at,
             created_at: now_ms(),
         },
     )
     .await
     .map_err(|e| ControlError::Internal(e.into()))?;
-    db::rotate_pool_key(&state.db, &old.id)
-        .await
-        .map_err(|e| ControlError::Internal(e.into()))?;
-    db::copy_ip_allowlist(&state.db, &old.id, &new_key_id)
-        .await
-        .map_err(|e| ControlError::Internal(e.into()))?;
+    if !rotated {
+        return Err(ControlError::Conflict(
+            "key is no longer rotatable — it was revoked or rotated while this \
+             request was in flight; nothing was minted"
+                .into(),
+        ));
+    }
     let ip = client_ip(&headers);
     audit::record(
         &state.db,
@@ -2731,7 +2739,11 @@ pub async fn approve_pending_action(
         &state.db,
         AuditEntry {
             org_id: Some(&org.id),
-            actor_id: &action.requested_by,
+            // Actor consistency (F7, round 2): both fields name the
+            // APPROVER — the person who acted. The requester is already
+            // recorded in after_json.approved_by/requested_by; mixing the
+            // two identities in one row muddied the trail.
+            actor_id: &admin.user_id,
             actor_email: &admin.email,
             action: "approval.executed",
             target_kind: TargetKind::Org,

@@ -290,8 +290,14 @@ pub async fn execute(db: &Db, action: &db::PendingActionRow, now: i64) -> anyhow
                 .ok_or_else(|| anyhow::anyhow!("rotate payload lost its owner"))?;
             let generated = tributary_common::keys::generate_key();
             let new_id = tributary_common::db::new_id();
-            db::insert_issued_pool_key(
+            // Atomic (F1, round 2): mint-new + kill-old + allowlist-copy
+            // share ONE transaction. The old code inserted the new key
+            // BEFORE the guard, so a key that died between request and
+            // approval left an orphan `active` row behind a rejected
+            // action (and suspended keys hit that path deterministically).
+            let rotated = db::rotate_key_atomic(
                 db,
+                key_id,
                 &db::NewPoolKey {
                     id: new_id.clone(),
                     pool_id: payload["pool_id"].as_str().unwrap_or_default().to_string(),
@@ -303,13 +309,9 @@ pub async fn execute(db: &Db, action: &db::PendingActionRow, now: i64) -> anyhow
                 },
             )
             .await?;
-            let rotated = db::rotate_pool_key(db, key_id).await?;
-            if rotated == 0 {
-                anyhow::bail!("refused: original key is no longer active");
+            if !rotated {
+                anyhow::bail!("refused: original key is no longer rotatable — nothing was minted");
             }
-            // Rotation carries the IP allowlist (final-scan 2.4): the
-            // leak-response action must never strip the CIDR pin.
-            db::copy_ip_allowlist(db, key_id, &new_id).await?;
             Ok(Executed {
                 summary: json!({
                     "key_id": new_id,

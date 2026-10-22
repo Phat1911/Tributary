@@ -1113,12 +1113,88 @@ pub async fn managed_pool_keys_by_pool(
 /// Distinct from 'revoked' so the audit trail distinguishes rotation from
 /// kill-switch use.
 pub async fn rotate_pool_key(db: &Db, id: &str) -> sqlx::Result<u64> {
-    let sql = db.sql("UPDATE pool_keys SET status = 'rotated' WHERE id = ? AND status = 'active'");
+    // 'suspended' included (H-1, final-scan round 2): the handler
+    // deliberately allows rotating suspended keys (leak response —
+    // suspend, rotate, reissue). A guard narrower than the precheck made
+    // that a silent no-op and left the suspended row resurrectable via
+    // unblock. 'rotated' is terminal: unblock only lifts 'suspended'.
+    let sql = db.sql(
+        "UPDATE pool_keys SET status = 'rotated' \
+         WHERE id = ? AND status IN ('active', 'suspended')",
+    );
     let res = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
         .bind(id)
         .execute(db.pool())
         .await?;
     Ok(res.rows_affected())
+}
+
+/// Atomic rotation (H-1/F1, final-scan round 2): kill the old credential,
+/// mint its replacement, and carry the IP allowlist — ALL in one
+/// transaction, or none of it. The status guard runs FIRST and a 0-row
+/// result rolls everything back, so a key that died (revoked/rotated)
+/// between request and execution can never leave an orphan `active` row
+/// behind a rejected action, and an allowlist-copy failure can never
+/// hand out an UNRESTRICTED replacement key.
+///
+/// Returns Ok(false) when the old key was no longer rotatable — callers
+/// translate that into a refusal, with zero side effects persisted.
+pub async fn rotate_key_atomic(db: &Db, old_id: &str, new_key: &NewPoolKey) -> sqlx::Result<bool> {
+    let mut tx = db.pool().begin().await?;
+    let guard = db.sql(
+        "UPDATE pool_keys SET status = 'rotated' \
+         WHERE id = ? AND status IN ('active', 'suspended')",
+    );
+    let res = sqlx::query(sqlx::AssertSqlSafe(guard.as_str()))
+        .bind(old_id)
+        .execute(&mut *tx)
+        .await?;
+    if res.rows_affected() == 0 {
+        // Drop the transaction: the INSERT never runs, the guard rolls
+        // back — the world is exactly as it was.
+        tx.rollback().await?;
+        return Ok(false);
+    }
+    let ins = db.sql(
+        "INSERT INTO pool_keys \
+         (id, pool_id, key_hash, key_prefix, kind, status, user_id, expires_at, created_at) \
+         VALUES (?, ?, ?, ?, 'live', 'active', ?, ?, ?)",
+    );
+    sqlx::query(sqlx::AssertSqlSafe(ins.as_str()))
+        .bind(&new_key.id)
+        .bind(&new_key.pool_id)
+        .bind(&new_key.key_hash)
+        .bind(&new_key.key_prefix)
+        .bind(&new_key.user_id)
+        .bind(new_key.expires_at)
+        .bind(new_key.created_at)
+        .execute(&mut *tx)
+        .await?;
+    // Allowlist rows ride the same transaction (per-row app-side ids —
+    // the dual-DB rule forbids engine-specific SQL like gen_random_uuid).
+    let list = db.sql("SELECT cidr, note FROM ip_allowlists WHERE pool_key_id = ?");
+    let rows = sqlx::query(sqlx::AssertSqlSafe(list.as_str()))
+        .bind(old_id)
+        .fetch_all(&mut *tx)
+        .await?;
+    for r in rows {
+        let cidr: String = r.try_get("cidr")?;
+        let note: Option<String> = r.try_get("note")?;
+        let copy = db.sql(
+            "INSERT INTO ip_allowlists (id, pool_key_id, cidr, note, created_at) \
+             VALUES (?, ?, ?, ?, ?)",
+        );
+        sqlx::query(sqlx::AssertSqlSafe(copy.as_str()))
+            .bind(tributary_common::db::new_id())
+            .bind(&new_key.id)
+            .bind(&cidr)
+            .bind(&note)
+            .bind(tributary_common::db::now_ms())
+            .execute(&mut *tx)
+            .await?;
+    }
+    tx.commit().await?;
+    Ok(true)
 }
 
 /// Suspends a key (auto-block only): every request dies with 403 until an
@@ -1642,17 +1718,6 @@ pub async fn demote_org_admin_guarded(db: &Db, org_id: &str, user_id: &str) -> s
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;
-    Ok(res.rows_affected())
-}
-
-/// Demotes an org_admin to member (D33 AdminDemote execution). Returns 0
-/// when the target stopped being an admin meanwhile — the caller refuses.
-pub async fn demote_org_admin(db: &Db, user_id: &str) -> sqlx::Result<u64> {
-    let sql = db.sql("UPDATE users SET role = 'member' WHERE id = ? AND role = 'org_admin'");
-    let res = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
-        .bind(user_id)
-        .execute(db.pool())
-        .await?;
     Ok(res.rows_affected())
 }
 

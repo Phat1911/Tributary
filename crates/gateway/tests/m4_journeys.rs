@@ -24,6 +24,7 @@ use axum::http::{Request, StatusCode, header};
 use common::*;
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
+use sqlx::Row; // try_get on raw assertion-only DB reads (outbox, payloads)
 use tower::ServiceExt;
 use tributary_gateway::db;
 
@@ -304,6 +305,8 @@ async fn j3_classifier_journey() {
         assert_eq!(disclosure["classification_active"], false);
 
         // -- Configure (probe-on-save validates against the mock). ---------
+        // Baseline (round-2): the save-time probe must run EXACTLY once.
+        let probe_hits = *classifier.hits.lock().unwrap();
         let put = json!({
             "base_url": classifier.base_url,
             // The generic dialect (the shape this journey's mock speaks);
@@ -326,7 +329,13 @@ async fn j3_classifier_journey() {
         assert_eq!(status, StatusCode::CREATED, "probe passed, config saved");
         assert_eq!(cfg["mode"], "alert");
         assert_eq!(cfg["key_prefix"], "sk-je…3456", "masked display only");
-        assert!(*classifier.hits.lock().unwrap() >= 1, "save-time probe ran");
+        // Strict (round-2): >= 1 could hide a double-probe billing
+        // regression — the PUT probes exactly once.
+        assert_eq!(
+            *classifier.hits.lock().unwrap(),
+            probe_hits + 1,
+            "save-time probe ran exactly once"
+        );
 
         // A bad key must NOT save (probe failure → 400, nothing stored).
         let bad = json!({
@@ -485,7 +494,10 @@ async fn j3_classifier_journey() {
                     ),
                 )
                 .await;
-                cfg["shadow_would_have_blocked"].as_i64().unwrap_or(0) >= 1
+                cfg["shadow_would_have_blocked"]
+                    .as_i64()
+                    .expect("shadow counter present")
+                    >= 1
             }
         })
         .await;
@@ -724,7 +736,12 @@ async fn j4_ip_allowlist_journey() {
         )
         .await;
         // NOTE: allowlists list rides the management surface; delete by id.
-        let entry_id = entries[0]["id"].as_str().unwrap().to_string();
+        let entry_id = entries
+            .as_array()
+            .expect("allowlist rows array (round-2: no panic-index)")[0]["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
         let (status, _) = call(
             &app,
             api(
@@ -873,7 +890,9 @@ async fn j6_distinct_ip_concurrency() {
                             && r["pool_key_id"] == key_id.as_str()
                             && r["detail_json"]["shared_networks"]
                                 .as_array()
-                                .is_some_and(|n| n.len() >= 2)
+                                // Strict (round-2): exactly the two
+                                // /24s seen at flag time.
+                                .is_some_and(|n| n.len() == 2)
                     })
                 })
             }
@@ -899,6 +918,17 @@ async fn j6_distinct_ip_concurrency() {
             })
             .count();
         assert_eq!(count_before, 1, "the sharing event flagged exactly once");
+        let flag_id = flags_before
+            .as_array()
+            .expect("flags array")
+            .iter()
+            .find(|r| {
+                r["kind"] == "distinct_ip_concurrency" && r["pool_key_id"] == stack.key_id.as_str()
+            })
+            .expect("the flag we just counted")["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
         let (status, _) = call(&app, chat_req(&stack.key_raw, Some("198.51.100.5"), &body)).await;
         assert_eq!(status, StatusCode::OK);
         let (_, flags_after) = call(
@@ -918,6 +948,107 @@ async fn j6_distinct_ip_concurrency() {
             count_before, count_after,
             "one alert per key per window, not one per request"
         );
+
+        // -- Three-surface proof (round-2 gap): the SAME event must exist
+        //    as (1) queue flag ✓above, (2) an audit row linked by flag id,
+        //    (3) an email-outbox row. Assertion-only DB reads are
+        //    sanctioned by the harness header. -------------------------
+        let (_, audit_rows) = call(&app, api("GET", "/api/v1/audit?limit=200", &token, None)).await;
+        let linked = audit_rows
+            .as_array()
+            .expect("audit array")
+            .iter()
+            .find(|r| {
+                r["action"] == "security.distinct_ip_concurrency"
+                    && r["target_id"] == json!(flag_id)
+            })
+            .unwrap_or_else(|| panic!("D32 audit row linking flag {flag_id} is missing"));
+        assert_eq!(linked["actor_id"], "system", "system actor on D32 rows");
+        // db.sql() translates the ? placeholder per engine (PG needs $n).
+        let outbox_sql = test_db
+            .pool
+            .sql("SELECT body FROM email_alerts WHERE org_id = ?");
+        let outbox: Vec<String> = sqlx::query(sqlx::AssertSqlSafe(outbox_sql.as_str()))
+            .bind(&stack.org_id)
+            .fetch_all(test_db.pool.pool())
+            .await
+            .expect("outbox query")
+            .into_iter()
+            .map(|r| r.try_get("body").expect("body"))
+            .collect();
+        assert!(
+            !outbox.is_empty(),
+            "the sharing event queued an email alert (outbox persists on fallback)"
+        );
+        assert!(
+            outbox.iter().all(|b| !b.contains(&stack.key_raw)),
+            "alert email carries the masked prefix only — never the raw key"
+        );
+
+        // -- v6 /64 semantics on a FRESH key (round-2 journey gap): same
+        //    /64 is one source, different /64s are two. ------------------
+        let (_, members) = call(
+            &app,
+            api(
+                "GET",
+                &format!("/api/v1/members?org_id={}", stack.org_id),
+                &token,
+                None,
+            ),
+        )
+        .await;
+        let member_id = members.as_array().expect("members")[0]["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let (_, k2) = call(
+            &app,
+            api(
+                "POST",
+                &format!("/api/v1/pools/{}/keys", stack.pool_id),
+                &token,
+                Some(&json!({ "user_id": member_id })),
+            ),
+        )
+        .await;
+        let k2_raw = k2["raw"].as_str().unwrap().to_string();
+        let k2_id = k2["id"].as_str().unwrap().to_string();
+        let (st, _) = call(&app, chat_req(&k2_raw, Some("2001:db8:1::1"), &body)).await;
+        assert_eq!(st, StatusCode::OK);
+        let (st, _) = call(&app, chat_req(&k2_raw, Some("2001:db8:1::ffff:0:1"), &body)).await;
+        assert_eq!(st, StatusCode::OK, "same-/64 v6 hosts are one source");
+        let (_, v6flags) = call(
+            &app,
+            api("GET", "/api/v1/review-flags?status=open", &token, None),
+        )
+        .await;
+        assert!(
+            !v6flags.as_array().unwrap().iter().any(|r| {
+                r["kind"] == "distinct_ip_concurrency" && r["pool_key_id"] == json!(k2_id)
+            }),
+            "one /64 alone must not flag (v6)"
+        );
+        let (st, _) = call(&app, chat_req(&k2_raw, Some("2001:db8:2::1"), &body)).await;
+        assert_eq!(st, StatusCode::OK, "D32 stays alert-only (v6 leg)");
+        let k2_id_wait = k2_id.clone();
+        wait_for("v6 distinct-/64 flag", || {
+            let app = app.clone();
+            let token = token.clone();
+            let k2_id = k2_id_wait.clone();
+            async move {
+                let (_, flags) = call(
+                    &app,
+                    api("GET", "/api/v1/review-flags?status=open", &token, None),
+                )
+                .await;
+                flags.as_array().is_some_and(|f| {
+                    f.iter().any(|r| {
+                        r["kind"] == "distinct_ip_concurrency" && r["pool_key_id"] == k2_id.as_str()
+                    })
+                })
+            }
+        })
+        .await;
     }
 }
 /// The systemone-dialect mock (director research 2026-10-21): speaks the
@@ -1498,6 +1629,43 @@ async fn j8_admin_four_eyes() {
             revoke_status,
             StatusCode::NO_CONTENT,
             "open alert = single-admin containment, no deferral"
+        );
+
+        // The containment audit row LINKS the alert (j11, round-2 gap):
+        // D33 makes a solo action without a linked alert a detectable
+        // policy violation — prove the link exists.
+        let (_, arows) = call(&app, api("GET", "/api/v1/audit?limit=200", &token_a, None)).await;
+        let containment = arows
+            .as_array()
+            .expect("audit rows")
+            .iter()
+            .find(|r| r["target_id"] == json!(bkey_id))
+            .expect("containment revoke is audited");
+        assert_eq!(
+            containment["after"]["approval"]["mode"], "containment",
+            "solo action is marked containment"
+        );
+        let linked_alert = containment["after"]["approval"]["alert"]
+            .as_str()
+            .expect("the audit row names the authorizing alert");
+        // It must be THIS org's open auto-block flag for THIS key.
+        let (_, open_flags) = call(
+            &app,
+            api(
+                "GET",
+                "/api/v1/review-flags?status=open&limit=100",
+                &token_a,
+                None,
+            ),
+        )
+        .await;
+        assert!(
+            open_flags.as_array().unwrap().iter().any(|r| {
+                r["id"] == json!(linked_alert)
+                    && r["kind"] == "classifier_auto_block"
+                    && r["pool_key_id"] == json!(bkey_id)
+            }),
+            "the linked alert is the open auto-block flag for B's key"
         );
 
         // -- LEG 5: solo-admin org auto-passes with the logged marker. --
@@ -2093,137 +2261,148 @@ async fn adv_d33_mutual_demote_never_leaves_org_adminless() {
         let app = test_app(test_db.pool.clone(), &mock).await;
         let host = bootstrap_admin_and_login(&test_db.pool, &app).await;
         let unique = db::new_id();
-        let (_, org) = call(
-            &app,
-            api(
-                "POST",
-                "/api/v1/orgs",
-                &host,
-                Some(&json!({"name": "D", "slug": format!("mut-{unique}")})),
-            ),
-        )
-        .await;
-        let org_id = org["id"].as_str().unwrap().to_string();
-        let mut ids = Vec::new();
-        let mut emails = Vec::new();
-        for who in ["a", "b"] {
-            let email = format!("mut-{who}-{unique}@t.dev");
-            let (_, m) = call(
+
+        // THREE rounds, each on a FRESH org with an exact 2-admin bench
+        // (round-2 hardening): the FOR UPDATE serialization must hold
+        // every time the two transactions genuinely overlap — one lucky
+        // trial proves little. A shared org would grow the bench to 3,
+        // where BOTH cross-demotes are legal and (1,1) is unprovable.
+        for round in 0..3 {
+            let (_, org) = call(
                 &app,
                 api(
                     "POST",
-                    "/api/v1/members",
+                    "/api/v1/orgs",
                     &host,
                     Some(&json!({
-                        "org_id": org_id, "email": email,
-                        "password": "password123", "role": "org_admin"
+                        "name": "D",
+                        "slug": format!("mut-{unique}-r{round}")
                     })),
                 ),
             )
             .await;
-            ids.push(m["id"].as_str().unwrap().to_string());
-            emails.push(email);
-        }
-        let ta = member_login(&app, &emails[0]).await;
-        let tb = member_login(&app, &emails[1]).await;
+            let org_id = org["id"].as_str().unwrap().to_string();
+            let mut ids = Vec::new();
+            let mut emails = Vec::new();
+            for who in ["a", "b"] {
+                let email = format!("mut-{who}-{unique}-r{round}@t.dev");
+                let (_, m) = call(
+                    &app,
+                    api(
+                        "POST",
+                        "/api/v1/members",
+                        &host,
+                        Some(&json!({
+                            "org_id": org_id, "email": email,
+                            "password": "password123", "role": "org_admin"
+                        })),
+                    ),
+                )
+                .await;
+                ids.push(m["id"].as_str().unwrap().to_string());
+                emails.push(email);
+            }
+            let ta = member_login(&app, &emails[0]).await;
+            let tb = member_login(&app, &emails[1]).await;
 
-        // Cross requests: A demotes B, B demotes A — both legal rows.
-        let (st, p1) = call(
-            &app,
-            api(
-                "POST",
-                &format!("/api/v1/orgs/{org_id}/admins/{}/demote", ids[1]),
-                &ta,
-                None,
-            ),
-        )
-        .await;
-        assert_eq!(st, StatusCode::ACCEPTED);
-        let (st, p2) = call(
-            &app,
-            api(
-                "POST",
-                &format!("/api/v1/orgs/{org_id}/admins/{}/demote", ids[0]),
-                &tb,
-                None,
-            ),
-        )
-        .await;
-        assert_eq!(st, StatusCode::ACCEPTED);
-        let d1 = p1["id"].as_str().unwrap().to_string();
-        let d2 = p2["id"].as_str().unwrap().to_string();
-
-        // Concurrent cross-approvals — the F3 attack window.
-        let app1 = app.clone();
-        let app2 = app.clone();
-        let tb2 = tb.clone();
-        let ta2 = ta.clone();
-        let u1 = format!("/api/v1/orgs/{org_id}/pending-actions/{d1}/approve");
-        let u2 = format!("/api/v1/orgs/{org_id}/pending-actions/{d2}/approve");
-        let _ = tokio::join!(
-            async move { call(&app1, api("POST", &u1, &tb2, None)).await },
-            async move { call(&app2, api("POST", &u2, &ta2, None)).await },
-        );
-
-        // DB read in ASSERTION only (harness rule): never zero admins.
-        let admins = tributary_control::db::org_admin_count(&test_db.pool, &org_id)
-            .await
-            .unwrap();
-        assert!(
-            admins >= 1,
-            "F3 TOCTOU: mutual demotes left {admins} admins"
-        );
-
-        // Exactly one demote executed; the other was refused at execution.
-        // Read through the HOST: one of A/B just lost admin status in the
-        // race, and which one varies per run — their token would 403.
-        let mut executed = 0;
-        let mut rejected = 0;
-        for (action, _) in [(&d1, 0), (&d2, 1)] {
-            let (st, rows) = call(
+            // Cross requests: A demotes B, B demotes A — both legal rows.
+            let (st, p1) = call(
                 &app,
                 api(
-                    "GET",
-                    &format!("/api/v1/orgs/{org_id}/pending-actions?status=executed"),
-                    &host,
+                    "POST",
+                    &format!("/api/v1/orgs/{org_id}/admins/{}/demote", ids[1]),
+                    &ta,
                     None,
                 ),
             )
             .await;
-            assert_eq!(st, StatusCode::OK, "list executed: {rows}");
-            if rows
-                .as_array()
-                .expect("executed list is an array")
-                .iter()
-                .any(|p| p["id"] == json!(action))
-            {
-                executed += 1;
-            }
-            let (st, rows) = call(
+            assert_eq!(st, StatusCode::ACCEPTED);
+            let (st, p2) = call(
                 &app,
                 api(
-                    "GET",
-                    &format!("/api/v1/orgs/{org_id}/pending-actions?status=rejected"),
-                    &host,
+                    "POST",
+                    &format!("/api/v1/orgs/{org_id}/admins/{}/demote", ids[0]),
+                    &tb,
                     None,
                 ),
             )
             .await;
-            assert_eq!(st, StatusCode::OK, "list rejected: {rows}");
-            if rows
-                .as_array()
-                .expect("rejected list is an array")
-                .iter()
-                .any(|p| p["id"] == json!(action))
-            {
-                rejected += 1;
+            assert_eq!(st, StatusCode::ACCEPTED);
+            let d1 = p1["id"].as_str().unwrap().to_string();
+            let d2 = p2["id"].as_str().unwrap().to_string();
+
+            // Concurrent cross-approvals — the F3 attack window.
+            let app1 = app.clone();
+            let app2 = app.clone();
+            let tb2 = tb.clone();
+            let ta2 = ta.clone();
+            let u1 = format!("/api/v1/orgs/{org_id}/pending-actions/{d1}/approve");
+            let u2 = format!("/api/v1/orgs/{org_id}/pending-actions/{d2}/approve");
+            let _ = tokio::join!(
+                async move { call(&app1, api("POST", &u1, &tb2, None)).await },
+                async move { call(&app2, api("POST", &u2, &ta2, None)).await },
+            );
+
+            // DB read in ASSERTION only (harness rule): never zero admins.
+            let admins = tributary_control::db::org_admin_count(&test_db.pool, &org_id)
+                .await
+                .unwrap();
+            assert!(
+                admins >= 1,
+                "F3 TOCTOU (round {round}): mutual demotes left {admins} admins"
+            );
+
+            // Exactly one demote executed; the other was refused at
+            // execution. Read through the HOST: one of A/B just lost
+            // admin status in the race, and which one varies per run.
+            let mut executed = 0;
+            let mut rejected = 0;
+            for action in [&d1, &d2] {
+                let (st, rows) = call(
+                    &app,
+                    api(
+                        "GET",
+                        &format!("/api/v1/orgs/{org_id}/pending-actions?status=executed"),
+                        &host,
+                        None,
+                    ),
+                )
+                .await;
+                assert_eq!(st, StatusCode::OK, "list executed: {rows}");
+                if rows
+                    .as_array()
+                    .expect("executed list is an array")
+                    .iter()
+                    .any(|p| p["id"] == json!(action))
+                {
+                    executed += 1;
+                }
+                let (st, rows) = call(
+                    &app,
+                    api(
+                        "GET",
+                        &format!("/api/v1/orgs/{org_id}/pending-actions?status=rejected"),
+                        &host,
+                        None,
+                    ),
+                )
+                .await;
+                assert_eq!(st, StatusCode::OK, "list rejected: {rows}");
+                if rows
+                    .as_array()
+                    .expect("rejected list is an array")
+                    .iter()
+                    .any(|p| p["id"] == json!(action))
+                {
+                    rejected += 1;
+                }
             }
+            assert_eq!(
+                (executed, rejected),
+                (1, 1),
+                "round {round}: one demote lands, the other hits the last-admin guard"
+            );
         }
-        assert_eq!(
-            (executed, rejected),
-            (1, 1),
-            "one demote lands, the other hits the last-admin guard"
-        );
     }
 }
 
@@ -2460,6 +2639,194 @@ async fn adv_rotation_gated_and_carries_allowlist() {
         };
         assert_eq!(status_of(&bkey_id), json!("rotated"));
         assert_eq!(status_of(&issued_id), json!("active"));
+
+        // -- Reveal confinement negatives (round-2 gap): the raw exists
+        //    NOWHERE except the approver's single HTTP response. ------
+        let (_, audit_rows) = call(&app, api("GET", "/api/v1/audit?limit=300", &host, None)).await;
+        let audit_surface = audit_rows.to_string();
+        assert!(
+            !audit_surface.contains(&issued_raw),
+            "raw key never reaches the audit trail"
+        );
+        assert!(
+            !audit_surface.contains("ciphertext") && !audit_surface.contains("dek_wrapped"),
+            "sealed-blob field names never reach the audit trail"
+        );
+        let (_, exec_rows) = call(
+            &app,
+            api(
+                "GET",
+                &format!("/api/v1/orgs/{org_id}/pending-actions?status=executed"),
+                &host,
+                None,
+            ),
+        )
+        .await;
+        assert!(
+            !exec_rows.to_string().contains(&issued_raw),
+            "the executed list view carries no raw"
+        );
+        let payload_sql = test_db
+            .pool
+            .sql("SELECT payload_json FROM pending_actions WHERE id = ?");
+        let payload: String = sqlx::query(sqlx::AssertSqlSafe(payload_sql.as_str()))
+            .bind(&action)
+            .fetch_one(test_db.pool.pool())
+            .await
+            .expect("pending row persists")
+            .try_get("payload_json")
+            .expect("payload column");
+        assert!(
+            !payload.contains(&issued_raw),
+            "the stored payload carries no raw (it never contained one)"
+        );
+
+        // -- Direct refusal (F3 regression): rotating an ALREADY-DEAD key
+        //    mints NOTHING and says so. stack.key_id rotated in LEG 1. --
+        let (_, keys_before) = call(
+            &app,
+            api(
+                "GET",
+                &format!("/api/v1/pools/{}/keys/manage", stack.pool_id),
+                &host,
+                None,
+            ),
+        )
+        .await;
+        let count_before = keys_before.as_array().expect("manage array").len();
+        let (st, err) = call(
+            &app,
+            api(
+                "POST",
+                &format!(
+                    "/api/v1/pools/{}/keys/{}/rotate",
+                    stack.pool_id, stack.key_id
+                ),
+                &host,
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(st, StatusCode::CONFLICT, "dead keys do not rotate");
+        assert!(
+            err["error"]["message"]
+                .as_str()
+                .is_some_and(|m| m.contains("only active or suspended keys rotate")),
+            "the precheck refuses dead keys with its own message: {err}"
+        );
+        let (_, keys_after) = call(
+            &app,
+            api(
+                "GET",
+                &format!("/api/v1/pools/{}/keys/manage", stack.pool_id),
+                &host,
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(
+            keys_after.as_array().expect("manage array").len(),
+            count_before,
+            "a refused rotation mints nothing"
+        );
+
+        // -- Deferred refusal (F1 regression): the target dies between
+        //    request and approval — the approval is REJECTED and no
+        //    orphan key row survives behind it. -----------------------
+        // B self-rotates the reissued key (own admin key, routine direct).
+        let (st, r2) = call(
+            &app,
+            api(
+                "POST",
+                &format!("/api/v1/pools/{}/keys/{}/rotate", pool_id, issued_id),
+                &tb,
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(st, StatusCode::CREATED, "B self-rotates routinely");
+        let b2_id = r2["id"].as_str().unwrap().to_string();
+        // A requests rotating B's (new) key → defers.
+        let (st, p3) = call(
+            &app,
+            api(
+                "POST",
+                &format!("/api/v1/pools/{}/keys/{}/rotate", pool_id, b2_id),
+                &ta,
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(st, StatusCode::ACCEPTED);
+        let action3 = p3["id"].as_str().unwrap().to_string();
+        // B kills their own key BEFORE approval: self-revoke via the
+        // member self-service surface.
+        let (st, _) = call(
+            &app,
+            api("DELETE", &format!("/api/v1/me/keys/{b2_id}"), &tb, None),
+        )
+        .await;
+        assert_eq!(st, StatusCode::NO_CONTENT, "B revokes own key");
+        // Host approves → the guard refuses (target 'revoked').
+        let (_, keys_pre) = call(
+            &app,
+            api(
+                "GET",
+                &format!("/api/v1/pools/{pool_id}/keys/manage"),
+                &host,
+                None,
+            ),
+        )
+        .await;
+        let pre = keys_pre.as_array().expect("manage array").len();
+        let (st, decided3) = call(
+            &app,
+            api(
+                "POST",
+                &format!("/api/v1/orgs/{org_id}/pending-actions/{action3}/approve"),
+                &host,
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(
+            st,
+            StatusCode::BAD_REQUEST,
+            "approval refuses when the target died: {decided3}"
+        );
+        let (_, keys_post) = call(
+            &app,
+            api(
+                "GET",
+                &format!("/api/v1/pools/{pool_id}/keys/manage"),
+                &host,
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(
+            keys_post.as_array().expect("manage array").len(),
+            pre,
+            "the refused approval leaves NO orphan key row"
+        );
+        let (_, rejected_rows) = call(
+            &app,
+            api(
+                "GET",
+                &format!("/api/v1/orgs/{org_id}/pending-actions?status=rejected"),
+                &host,
+                None,
+            ),
+        )
+        .await;
+        assert!(
+            rejected_rows
+                .as_array()
+                .expect("rejected array")
+                .iter()
+                .any(|r| r["id"] == json!(action3)),
+            "the refused action is recorded as rejected"
+        );
     }
 }
 
@@ -2549,5 +2916,233 @@ async fn adv_live_auto_block_spares_on_purpose() {
         );
         let (st, _) = call(&app, chat_req(&stack.key_raw, None, &on_purpose)).await;
         assert_eq!(st, StatusCode::OK, "key never suspended by on-purpose use");
+        // Determinism barrier (round-2): the 3rd scoring decision lands
+        // asynchronously — re-read the queue AFTER the final chat so a
+        // late block can no longer slip past the earlier zero-read.
+        wait_for("third decision settled", || {
+            let hits = classifier.hits.clone();
+            async move { *hits.lock().unwrap() >= probe_hits + 4 }
+        })
+        .await;
+        let (_, flags2) = call(
+            &app,
+            api(
+                "GET",
+                "/api/v1/review-flags?status=open&limit=100",
+                &host,
+                None,
+            ),
+        )
+        .await;
+        let auto_blocks2 = flags2
+            .as_array()
+            .expect("flags array")
+            .iter()
+            .filter(|r| {
+                r["kind"] == "classifier_auto_block" && r["pool_key_id"] == json!(stack.key_id)
+            })
+            .count();
+        assert_eq!(
+            auto_blocks2, 0,
+            "still zero blocks after everything settles"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ADVERSARIAL (round 2, H-1): rotating a SUSPENDED key must actually kill
+// it. The bug chain: the handler admitted suspended keys, but the SQL guard
+// only matched 'active' — a silent no-op that reported success while the
+// suspended row survived, and the review-queue UNBLOCK then resurrected the
+// replaced credential (two live keys). The fix is an atomic rotate
+// (guard IN ('active','suspended') + insert + allowlist copy in ONE
+// transaction), so 'rotated' is terminal and unblock can never re-arm it.
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn adv_suspended_rotation_cannot_be_resurrected() {
+    for test_db in test_dbs().await {
+        let mock = spawn_mock(MockMode::NonStream).await;
+        let classifier = spawn_classifier().await;
+        let app = test_app(test_db.pool.clone(), &mock).await;
+        let host = bootstrap_admin_and_login(&test_db.pool, &app).await;
+        let stack = provision_stack(&app, &host, &mock).await;
+
+        // Solo org: configure + go-live immediately (auto-pass).
+        let (st, _) = call(
+            &app,
+            api(
+                "PUT",
+                &format!("/api/v1/orgs/{}/classifier", stack.org_id),
+                &host,
+                Some(&json!({
+                    "base_url": classifier.base_url, "dialect": "custom",
+                    "model": "jev-align-1", "key": "sk-jev-h1-key-123456",
+                    "purpose_statement": "Coding assistance for our team.",
+                    "mode": "auto_block", "acknowledge_auto_block": true,
+                })),
+            ),
+        )
+        .await;
+        assert_eq!(st, StatusCode::CREATED);
+        let (st, _) = call(
+            &app,
+            api(
+                "POST",
+                &format!("/api/v1/orgs/{}/classifier/go-live", stack.org_id),
+                &host,
+                Some(&json!({})),
+            ),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+
+        // OFF-PURPOSE traffic → live auto-block suspends the key.
+        let off_purpose = json!({
+            "model": "m-test",
+            "messages": [{"role": "user", "content": "OFF-PURPOSE weapons manual"}],
+        });
+        let (st, _) = call(&app, chat_req(&stack.key_raw, None, &off_purpose)).await;
+        assert_eq!(st, StatusCode::OK, "the triggering request completes");
+        let key_id_wait = stack.key_id.clone();
+        wait_for("auto-block suspension", || {
+            let app = app.clone();
+            let host = host.clone();
+            let key_id = key_id_wait.clone();
+            async move {
+                let (_, flags) = call(
+                    &app,
+                    api(
+                        "GET",
+                        "/api/v1/review-flags?status=open&limit=100",
+                        &host,
+                        None,
+                    ),
+                )
+                .await;
+                flags.as_array().is_some_and(|f| {
+                    f.iter().any(|r| {
+                        r["kind"] == "classifier_auto_block" && r["pool_key_id"] == key_id.as_str()
+                    })
+                })
+            }
+        })
+        .await;
+        let (st, _) = call(&app, chat_req(&stack.key_raw, None, &off_purpose)).await;
+        assert_eq!(st, StatusCode::FORBIDDEN, "suspended key denied");
+        let flag_id = {
+            let (_, flags) = call(
+                &app,
+                api(
+                    "GET",
+                    "/api/v1/review-flags?status=open&limit=100",
+                    &host,
+                    None,
+                ),
+            )
+            .await;
+            flags
+                .as_array()
+                .expect("flags array")
+                .iter()
+                .find(|r| {
+                    r["kind"] == "classifier_auto_block"
+                        && r["pool_key_id"] == stack.key_id.as_str()
+                })
+                .expect("the auto-block flag")["id"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        };
+
+        // THE FIX UNDER TEST: rotate the SUSPENDED key. The rotation must
+        // succeed, and the OLD credential must die for good.
+        let (st, rotated) = call(
+            &app,
+            api(
+                "POST",
+                &format!(
+                    "/api/v1/pools/{}/keys/{}/rotate",
+                    stack.pool_id, stack.key_id
+                ),
+                &host,
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(
+            st,
+            StatusCode::CREATED,
+            "suspended keys rotate (leak-response flow): {rotated}"
+        );
+        let new_raw = rotated["raw"].as_str().unwrap().to_string();
+        let new_id = rotated["id"].as_str().unwrap().to_string();
+        assert_ne!(new_raw, stack.key_raw);
+
+        // Old credential: 'rotated' (TERMINAL), 401 at the gateway.
+        let (_, keys) = call(
+            &app,
+            api(
+                "GET",
+                &format!("/api/v1/pools/{}/keys/manage", stack.pool_id),
+                &host,
+                None,
+            ),
+        )
+        .await;
+        let status_of = |id: &str| {
+            keys.as_array()
+                .expect("manage array")
+                .iter()
+                .find(|k| k["id"] == json!(id))
+                .unwrap()["status"]
+                .clone()
+        };
+        assert_eq!(
+            status_of(&stack.key_id),
+            json!("rotated"),
+            "rotated is terminal"
+        );
+        assert_eq!(status_of(&new_id), json!("active"));
+        let (st, _) = call(&app, chat_req(&stack.key_raw, None, &off_purpose)).await;
+        assert_eq!(
+            st,
+            StatusCode::UNAUTHORIZED,
+            "the replaced credential is dead"
+        );
+
+        // The replacement is CLEAN: on-purpose traffic serves immediately
+        // (the containment hold belonged to the old key — rotation is the
+        // documented leak-response resolution, and it is audited).
+        let on_purpose = json!({
+            "model": "m-test",
+            "messages": [{"role": "user",
+                "content": "please refactor this rust function for clarity"}],
+        });
+        let (st, _) = call(&app, chat_req(&new_raw, None, &on_purpose)).await;
+        assert_eq!(st, StatusCode::OK, "the replacement key works");
+
+        // NO RESURRECTION: the flag is still open, but unblock can only
+        // lift 'suspended' — the old row is 'rotated' and must 409.
+        let (st, err) = call(
+            &app,
+            api(
+                "POST",
+                &format!("/api/v1/review-flags/{flag_id}/resolve"),
+                &host,
+                Some(&json!({"action": "unblock"})),
+            ),
+        )
+        .await;
+        assert_eq!(
+            st,
+            StatusCode::CONFLICT,
+            "unblock must NOT resurrect a rotated key: {err}"
+        );
+        let (st, _) = call(&app, chat_req(&stack.key_raw, None, &off_purpose)).await;
+        assert_eq!(
+            st,
+            StatusCode::UNAUTHORIZED,
+            "still dead after the unblock attempt — exactly ONE live key"
+        );
     }
 }

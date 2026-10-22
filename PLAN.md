@@ -79,6 +79,31 @@ Template:
 - **dependencies (AGENTS workflow step 10):** JS-side additions, all MIT/ISC/Apache-2.0: **tailwindcss v4 + @tailwindcss/postcss + postcss** (the M0-deferred activation the kickoff ordered; v4 is CSS-first — no tailwind.config, tokens as `@theme inline` in globals.css); **shadcn/ui generated components** with their runtime deps — `radix-ui` (unified primitives package behind dialog/select/tabs/alert-dialog/dropdown), `class-variance-authority` + `clsx` + `tailwind-merge` + `cn` (variant plumbing; `cn` is the official shadcn util package the current CLI templates import), `lucide-react` (icons), `sonner` + `next-themes` (mutation toasts; next-themes is sonner's theme integration), `tw-animate-css` (v4 replacement for tailwindcss-animate); **eslint + eslint-config-next** (devDeps — lint gate for CI); **typescript pinned to ^6 (6.0.3), down from ^7.0.2** — typescript-eslint does not support the TS 7 native compiler yet (eslint-config-next hard-fails on load); TS 6.x is the line supported by both Next 16 and the lint toolchain, and `tsc --noEmit` remains enforced. Deliberately NOT added: any chart library (the usage sparkline is inline SVG — a polyline is all a 14-day trend needs), framer-motion/3D (M5 visual polish scope), state-management libs (a 60-line useApi hook suffices). No Rust-side dependency changes (reused axum/sqlx/argon2/serde/tracing).
 - **limitations/notes:** cookie `Path=/api/v1` means server components cannot see the session — all dashboard data fetching is client-side by design (the API stays the single authority); CSRF posture = SameSite=Lax + JSON-only mutation bodies (no endpoint accepts form-encoded writes — browsers auto-send forms cross-site, JSON does not), no token framework needed at this scale; the session cookie is always `Secure` — modern browsers honor it on `http://localhost`, and the login page's "silently bounces back to /login" symptom is documented in the dashboard README as the first thing to check in local dev; audit inserts are logged-not-propagated on failure (A-003 posture — the mutation already succeeded; a lost row is observable as an `error!` log) — outbox/retry if it ever fires; `ip` on audit rows and throttle buckets is first-XFF-hop-else-"local" (edge-proxy trust model — direct exposure would let a client rotate buckets by spoofing XFF; the per-email dimension still holds); dev proxy = Next rewrites to `TRIBUTARY_API_URL` (production packaging is M5, NO containerization this milestone); the host overview fetches provider keys per pool (no bulk endpoint — fine at M3 scale, noted in code); shared-PG parallel test interference eliminated by per-run unique identities in throttle fixtures + retry-tolerant shared-admin bootstrap (forensics: a globally fixed test email let sibling binaries' failed logins land in "our" throttle buckets — two full clean runs confirm the fix); member password reset/rotation UI deferred (members are recreated, not reset, at this scale); **post-demo follow-up (cab3d1d + d365860, 2026-10-18):** org_admins were only ever minted by direct test seeding — no API/UI path existed, which would have made the M3 done-when journey unreachable in real use; `POST /members` now takes an optional `role` (`org_admin` host-caller-only; `host_admin`/unknown rejected — host stays bootstrap-only) and the host overview gained an "Add admin" action per org (regression test: `host_provisions_org_admins_via_api`). **Live-verification sweep (user walkthrough, 2026-10-18, commits 471881c→fa8d543):** four more journey defects the gates missed — bare `GET /members` (missing required `?org_id=`) on the org page *and* the pool page's member pickers; no pool-creation UI; secret-reveal overflow; no org column on the host pools table — all fixed and verified live; a full client↔server contract cross-check (27 call sites) now shows no mismatches, and the final tree re-passed the complete dual-DB Rust gate + dashboard tsc/eslint/build (CI green through run 39108479555). Full defect log + process analysis: `M3-FINAL-REPORT.md`.
 
+### 2026-10-22 — M4 round-2 adversarial scan (founder-ordered second wave)
+
+Five fresh reviewers against 43e2591 (D33, classifier, gateway, rules
+sweep, suite strength). Verdicts: 1 High + 6 Med + Lows; everything
+exploitable FIXED, pinned red-first:
+
+- **A-023 (High, fixed)** suspended-rotation chain: silent no-op +
+  unblock resurrection (two live keys) + deferred orphan —
+  `rotate_key_atomic` (guard `IN ('active','suspended')` + insert +
+  allowlist copy in ONE tx) on both paths; refusal mints nothing.
+- **A-024 (med, fixed)** dashboard dropped the approve reveal —
+  SecretReveal now renders `issued` (was: UI-approved rotation = lockout).
+- **A-025 (low, fixed)** approval.executed actor mixing.
+- **A-026 (open, M5)** NO-BYPASS instances: quota-0 kill +
+  delete_quota_rule + revoke_provider_key; ungated allowlist edits on
+  another admin's key; admin-target key issuance. Folded into the
+  director-ruled A-022b workstream; (c) needs a director call.
+- Suite strengthened per the round-2 test review: D32 three-surface proof
+  (flag + audit row + email-outbox row, one flag id), D33 containment
+  audit alert-link (j11), rotation reveal negatives (audit + executed
+  list + stored payload), v6 /64 journey legs, mutual-demote now 3 fresh
+  orgs, five weak asserts hardened, adv_live determinism barrier.
+  12 journeys (was 11), 127 workspace tests, clippy -D warnings 0, fmt
+  clean, dashboard lint+tsc clean.
+
 ### 2026-10-22 — M4 final-scan adversarial close-out (5 reviewer subagents)
 
 **Scope.** Founder-directed milestone-close scan: independent adversarial reviewers attacked the four M4 feature areas (four-eyes/D33, classifier/D28, gateway leak prevention, suite strength); every exploitable finding fixed in this commit, every design-level finding recorded in AUDIT.md A-019..A-022 for the director.
