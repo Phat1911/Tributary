@@ -1,5 +1,6 @@
 //! Member self-service isolation tests (M3): a member sees and touches ONLY
 //! their own keys and usage — never another member's, never org-wide data.
+//! The pre-M5 surfacing chore added the expiry/cap payload journey here.
 
 mod harness;
 
@@ -347,5 +348,249 @@ async fn admin_usage_endpoints_scope_by_pool() {
         )
         .await;
         assert_eq!(status, StatusCode::FORBIDDEN, "{}", db.name);
+    }
+}
+
+/// Pre-M5 surfacing chore (workflow step 12 — public API only): the
+/// member key list carries `expires_at` and the effective cap. Everything
+/// with a provisioning path is provisioned through the API (org, pools,
+/// members, keys incl. expiry, quota rules); only the metering rows are
+/// seeded directly — the gateway's chat path is their sole writer and has
+/// no control-plane provisioning surface.
+///
+/// Fixture shape (min-headroom proof across subjects):
+/// - pool P1: key A1 (expires +3 d, KEY rule 100k/day), key B1 (no expiry);
+///   POOL rule 1M/month on P1 (binds A1 + B1, never wins — huge headroom).
+/// - pool P2: key A3 (already expired — issuance passes expires_at
+///   through), key A4 (never expires; only a minute request-RATE rule,
+///   which is not a token cap and must surface none).
+/// - member B carries a USER rule 50k/day — the cross-subject leg: B1's
+///   binding constraint is the user rule, not the pool rule.
+/// - usage: A1 12.4k tokens today (+ one 50k row BEFORE today's window —
+///   must be excluded), B1 2k today.
+#[tokio::test]
+async fn member_key_list_surfaces_expiry_and_effective_cap() {
+    for db in test_dbs().await {
+        let (app, _mock) = control_app(db.pool.clone()).await;
+        let host = bootstrap_and_login(&db.pool, &app).await;
+        let (_, org) = send(
+            &app,
+            post_json(
+                "/api/v1/orgs",
+                Some(&host),
+                &json!({"name": "Cap", "slug": unique_slug("cap")}),
+            ),
+        )
+        .await;
+        let org_id = org["id"].as_str().unwrap().to_string();
+
+        let mut pool_ids = Vec::new();
+        for name in ["p1", "p2"] {
+            let (_, pool) = send(
+                &app,
+                post_json(
+                    "/api/v1/pools",
+                    Some(&host),
+                    &json!({"org_id": org_id, "name": name}),
+                ),
+            )
+            .await;
+            pool_ids.push(pool["id"].as_str().unwrap().to_string());
+        }
+
+        let mut members = Vec::new();
+        for n in ["a", "b"] {
+            let email = unique_email(n);
+            let (_, member) = send(
+                &app,
+                post_json(
+                    "/api/v1/members",
+                    Some(&host),
+                    &json!({"org_id": org_id, "email": email, "password": "password123"}),
+                ),
+            )
+            .await;
+            let (_, login) = send(
+                &app,
+                post_json(
+                    "/api/v1/auth/login",
+                    None,
+                    &json!({"email": email, "password": "password123"}),
+                ),
+            )
+            .await;
+            members.push((
+                member["id"].as_str().unwrap().to_string(),
+                login["token"].as_str().unwrap().to_string(),
+            ));
+        }
+        let (user_a, token_a) = (&members[0].0, &members[0].1);
+        let (user_b, token_b) = (&members[1].0, &members[1].1);
+
+        // Keys, issued through the public API with expiry bodies.
+        let now = tributary_common::db::now_ms();
+        let expiring_soon = now + 3 * 86_400_000; // < 7 d → UI warning tint
+        let already_expired = now - 1_000;
+        let (_, k_a1) = send(
+            &app,
+            post_json(
+                &format!("/api/v1/pools/{}/keys", pool_ids[0]),
+                Some(&host),
+                &json!({"user_id": user_a, "expires_at": expiring_soon}),
+            ),
+        )
+        .await;
+        let (_, k_b1) = send(
+            &app,
+            post_json(
+                &format!("/api/v1/pools/{}/keys", pool_ids[0]),
+                Some(&host),
+                &json!({"user_id": user_b}),
+            ),
+        )
+        .await;
+        let (_, k_a3) = send(
+            &app,
+            post_json(
+                &format!("/api/v1/pools/{}/keys", pool_ids[1]),
+                Some(&host),
+                &json!({"user_id": user_a, "expires_at": already_expired}),
+            ),
+        )
+        .await;
+        let (_, k_a4) = send(
+            &app,
+            post_json(
+                &format!("/api/v1/pools/{}/keys", pool_ids[1]),
+                Some(&host),
+                &json!({"user_id": user_a}),
+            ),
+        )
+        .await;
+
+        // Quota rules, through the public API: key-level (A1, day), a
+        // user-level (B, day — the cross-subject leg), pool-level (P1,
+        // month — binds A1+B1, never wins), and a request-RATE-only rule
+        // (A4, minute — must NOT surface as a cap).
+        let key_a1 = k_a1["id"].as_str().unwrap();
+        let key_a4 = k_a4["id"].as_str().unwrap();
+        for body in [
+            json!({"subject_kind": "pool_key", "subject_id": key_a1,
+                   "period": "day", "limit_tokens": 100_000}),
+            json!({"subject_kind": "user", "subject_id": user_b,
+                   "period": "day", "limit_tokens": 50_000}),
+            json!({"subject_kind": "pool", "subject_id": pool_ids[0],
+                   "period": "month", "limit_tokens": 1_000_000}),
+            json!({"subject_kind": "pool_key", "subject_id": key_a4,
+                   "period": "minute", "limit_requests": 10}),
+        ] {
+            let (status, body_out) =
+                send(&app, post_json("/api/v1/quota-rules", Some(&host), &body)).await;
+            assert_eq!(
+                status,
+                StatusCode::CREATED,
+                "{}: {body_out} for {body}",
+                db.name
+            );
+        }
+
+        // Metering rows (the gateway owns this write in production): 12.4k
+        // for A1 today + a 50k row from BEFORE today's window (excluded
+        // from a day cap), 2k for B1 today.
+        let day_start =
+            tributary_common::time::period_start_ms(tributary_common::time::Period::Day, now);
+        for (key, user, ts, tokens) in [
+            (&k_a1, user_a, now, 10_000i64),
+            (&k_a1, user_a, now, 2_400),
+            (&k_a1, user_a, day_start - 1, 50_000),
+            (&k_b1, user_b, now, 2_000),
+        ] {
+            insert_usage_event(
+                &db.pool,
+                &tributary_common::db::new_id(),
+                ts,
+                key["id"].as_str().unwrap(),
+                Some(user),
+                Some(&pool_ids[0]),
+                "m-test",
+                tokens,
+                0,
+            )
+            .await;
+        }
+
+        // Member A: three keys, exact expiry + cap values.
+        let (status, keys_a) = send(&app, get_json("/api/v1/me/keys", Some(token_a))).await;
+        assert_eq!(status, StatusCode::OK, "{}: {keys_a}", db.name);
+        let keys_a = keys_a.as_array().unwrap();
+        assert_eq!(keys_a.len(), 3, "{}", db.name);
+        // A nested fn (not a closure): closures cannot express that the
+        // returned reference borrows from `keys` — a named lifetime can.
+        fn by_id<'a>(
+            keys: &'a [serde_json::Value],
+            id: &str,
+            db_name: &str,
+        ) -> &'a serde_json::Value {
+            keys.iter()
+                .find(|k| k["id"] == id)
+                .unwrap_or_else(|| panic!("{db_name}: key {id} missing"))
+        }
+        let a1 = by_id(keys_a, k_a1["id"].as_str().unwrap(), db.name);
+        assert_eq!(a1["expires_at"], expiring_soon, "{}", db.name);
+        assert_eq!(a1["cap"]["limit_tokens"], 100_000, "{}: {a1}", db.name);
+        assert_eq!(a1["cap"]["period"], "day", "{}: {a1}", db.name);
+        // 12.4k counted, the pre-window 50k row excluded.
+        assert_eq!(a1["cap"]["used_tokens"], 12_400, "{}: {a1}", db.name);
+        let a3 = by_id(keys_a, k_a3["id"].as_str().unwrap(), db.name);
+        assert_eq!(a3["expires_at"], already_expired, "{}: {a3}", db.name);
+        // Display-level expiry only — the DB status stays "active".
+        assert_eq!(a3["status"], "active", "{}: {a3}", db.name);
+        // No token rule binds A3 (its pool has none) → null cap = Unlimited.
+        assert_eq!(a3["cap"], serde_json::Value::Null, "{}: {a3}", db.name);
+        let a4 = by_id(keys_a, k_a4["id"].as_str().unwrap(), db.name);
+        assert_eq!(a4["expires_at"], serde_json::Value::Null, "{}", db.name);
+        // A request-RATE rule is not a token cap — still Unlimited.
+        assert_eq!(a4["cap"], serde_json::Value::Null, "{}: {a4}", db.name);
+
+        // Member B: one key; the USER rule (50k day, 2k used) beats the
+        // pool-wide 1M month rule — the cross-subject min-headroom leg.
+        let (status, keys_b) = send(&app, get_json("/api/v1/me/keys", Some(token_b))).await;
+        assert_eq!(status, StatusCode::OK, "{}: {keys_b}", db.name);
+        let keys_b = keys_b.as_array().unwrap();
+        assert_eq!(keys_b.len(), 1, "{}", db.name);
+        assert_eq!(keys_b[0]["id"], k_b1["id"], "{}", db.name);
+        assert_eq!(
+            keys_b[0]["expires_at"],
+            serde_json::Value::Null,
+            "{}",
+            db.name
+        );
+        assert_eq!(keys_b[0]["cap"]["limit_tokens"], 50_000, "{}", db.name);
+        assert_eq!(keys_b[0]["cap"]["period"], "day", "{}", db.name);
+        assert_eq!(keys_b[0]["cap"]["used_tokens"], 2_000, "{}", db.name);
+
+        // Masking + isolation invariants on the new surface (rule 2): no
+        // raw key material, nothing of the other member's.
+        let surface_a = serde_json::to_string(&keys_a).unwrap();
+        for raw in [&k_a1, &k_b1, &k_a3, &k_a4] {
+            let raw_str = raw["raw"].as_str().unwrap();
+            assert!(
+                !surface_a.contains(raw_str),
+                "{}: raw key material leaked to the member list",
+                db.name
+            );
+        }
+        assert!(
+            !surface_a.contains(k_b1["id"].as_str().unwrap())
+                && !surface_a.contains(k_b1["key_prefix"].as_str().unwrap()),
+            "{}: member B's key leaked into A's list",
+            db.name
+        );
+        let surface_b = serde_json::to_string(&keys_b).unwrap();
+        assert!(
+            !surface_b.contains(k_a1["key_prefix"].as_str().unwrap()),
+            "{}: member A's key prefix leaked into B's list",
+            db.name
+        );
     }
 }

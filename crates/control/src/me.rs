@@ -18,11 +18,18 @@ use crate::error::{ApiResult, ControlError};
 use crate::usage::{PagingQuery, UsageListResponse, UsageSummary, UsageSummaryQuery};
 
 /// GET /api/v1/me/keys — the caller's own keys across pools (masked).
+///
+/// The pre-M5 surfacing chore extended the payload with each key's
+/// `expires_at` and effective cap (`quota_rules` + window usage) —
+/// read-only M4 data members already live under but could not see.
 pub async fn my_keys(
     State(state): State<ControlState>,
     user: AuthedUser,
 ) -> ApiResult<Json<Vec<db::OwnPoolKey>>> {
-    let keys = db::pool_keys_by_user(&state.db, &user.user_id)
+    let mut keys = db::pool_keys_by_user(&state.db, &user.user_id)
+        .await
+        .map_err(|e| ControlError::Internal(e.into()))?;
+    db::attach_effective_caps(&state.db, &user.user_id, &mut keys)
         .await
         .map_err(|e| ControlError::Internal(e.into()))?;
     Ok(Json(keys))

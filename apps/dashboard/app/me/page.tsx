@@ -2,6 +2,7 @@
 // anyone else's is reachable, enforced server-side by the /me endpoints.
 "use client";
 
+import { useCallback, useSyncExternalStore } from "react";
 import { Eye, KeyRound, ShieldAlert, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import { AppShell, PageHeader } from "@/components/app-shell";
@@ -34,12 +35,119 @@ import {
   api,
   ApiError,
   type Disclosure,
+  type OwnKeyCap,
   type OwnPoolKey,
   type UsageList,
   type UsageSummary,
 } from "@/lib/api";
-import { formatDateTime, formatTokens } from "@/lib/format";
+import {
+  formatDateTime,
+  formatTokens,
+  formatTokensCompact,
+} from "@/lib/format";
 import { useApi } from "@/lib/use-api";
+
+/** Seven days in ms — expiry closer than this gets the amber warning tint. */
+const EXPIRY_WARNING_MS = 7 * 86_400_000;
+
+/** The client wall clock as an external store — React's sanctioned way to
+ *  read a value that changes outside React: render stays pure (no
+ *  Date.now() in the component body, react-hooks/purity) and nothing sets
+ *  state inside an effect (react-hooks/set-state-in-effect). The snapshot
+ *  is cached at module scope and only refreshed when the interval fires,
+ *  because React requires consecutive getSnapshot calls within one render
+ *  to return an identical value (a fresh Date.now() each call would trip
+ *  the snapshot-stability check). Server/hydration render with 0 — plain
+ *  dates — and the real clock applies only after hydration, so a warning
+ *  tint or "expired" chip can never mismatch the server HTML. */
+let clockCache = 0;
+
+/** getSnapshot (client): lazily captures the clock, then holds it stable
+ *  until the next interval tick mutates the cache and notifies React. */
+function clientClock(): number {
+  if (clockCache === 0) clockCache = Date.now();
+  return clockCache;
+}
+
+/** getServerSnapshot: SSR + hydration pass — deliberately constant. */
+function serverClock(): number {
+  return 0;
+}
+
+/** Subscribes the component to the 60 s clock tick (the finest grain the
+ *  expiry UI needs); cleanup clears the timer on unmount. */
+function useWallClock(intervalMs = 60_000): number {
+  const subscribe = useCallback(
+    (notify: () => void) => {
+      const tick = setInterval(() => {
+        clockCache = Date.now();
+        notify();
+      }, intervalMs);
+      return () => clearInterval(tick);
+    },
+    [intervalMs],
+  );
+  return useSyncExternalStore(subscribe, clientClock, serverClock);
+}
+
+/** The Expires cell: same format as Issued, "Never" for null, amber when
+ *  under 7 days remain, and an "expired" chip once past — display-level
+ *  only (the Status column keeps the DB truth; expiry is enforced at the
+ *  gateway, never stored as a lifecycle state). `nowMs` comes from the
+ *  page's wall-clock store (see useWallClock). */
+function ExpiresCell({
+  expiresAt,
+  nowMs,
+}: {
+  expiresAt: number | null;
+  nowMs: number;
+}) {
+  if (expiresAt === null) {
+    return <span className="text-muted-foreground">Never</span>;
+  }
+  const remaining = expiresAt - nowMs;
+  if (remaining <= 0) {
+    return (
+      <span className="inline-flex items-center gap-1.5">
+        <span className="text-muted-foreground">
+          {formatDateTime(expiresAt)}
+        </span>
+        <Badge variant="secondary">expired</Badge>
+      </span>
+    );
+  }
+  if (remaining < EXPIRY_WARNING_MS) {
+    return (
+      <span className="text-amber-600 dark:text-amber-400">
+        {formatDateTime(expiresAt)}
+      </span>
+    );
+  }
+  return <>{formatDateTime(expiresAt)}</>;
+}
+
+/** The Cap cell: "used / limit · window" in the quota unit M4 ships
+ *  (tokens); "Unlimited" when no token rule binds a still-usable key,
+ *  "—" for dead keys (revoked/rotated — nothing is enforceable anymore).
+ *  used/limit mirror the gateway's window SUM, so the number shown is the
+ *  number enforced. */
+function CapCell({ cap, status }: { cap: OwnKeyCap | null; status: string }) {
+  if (status === "revoked" || status === "rotated") {
+    return <span className="text-muted-foreground">—</span>;
+  }
+  if (cap === null) {
+    return <span className="text-muted-foreground">Unlimited</span>;
+  }
+  return (
+    <span className="inline-flex items-baseline gap-1">
+      <span className="font-mono text-xs">
+        {formatTokensCompact(cap.used_tokens)} /{" "}
+        {formatTokensCompact(cap.limit_tokens)}
+      </span>
+      <span className="text-xs text-muted-foreground">· {cap.period}</span>
+    </span>
+  );
+}
 
 /** The M4 disclosure banner: shown whenever classification runs at all
  * (Alert mode included) — the wording strengthens when auto-block is live. */
@@ -83,6 +191,9 @@ export default function MePage() {
   const keys = useApi<OwnPoolKey[]>("/me/keys");
   const usage = useApi<UsageList>("/me/usage?limit=50");
   const summary = useApi<UsageSummary>("/me/usage/summary");
+  // Read-only clock for the Expires column (see useWallClock for why this
+  // is a store subscription rather than Date.now() in render).
+  const nowMs = useWallClock();
 
   async function revoke(key: OwnPoolKey) {
     try {
@@ -131,6 +242,8 @@ export default function MePage() {
                 <TableHead>Key</TableHead>
                 <TableHead>Status</TableHead>
                 <TableHead>Issued</TableHead>
+                <TableHead>Expires</TableHead>
+                <TableHead>Cap</TableHead>
                 <TableHead className="w-12" aria-label="Actions" />
               </TableRow>
             </TableHeader>
@@ -158,6 +271,12 @@ export default function MePage() {
                     </Badge>
                   </TableCell>
                   <TableCell>{formatDateTime(key.created_at)}</TableCell>
+                  <TableCell>
+                    <ExpiresCell expiresAt={key.expires_at} nowMs={nowMs} />
+                  </TableCell>
+                  <TableCell>
+                    <CapCell cap={key.cap} status={key.status} />
+                  </TableCell>
                   <TableCell>
                     {key.status === "active" ? (
                       <AlertDialog>

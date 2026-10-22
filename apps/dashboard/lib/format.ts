@@ -25,6 +25,13 @@ export function formatTokens(n: number): string {
   return String(n);
 }
 
+/** Like formatTokens but drops a trailing ".0" ("100k", not "100.0k") —
+ *  used where two counts sit side by side ("12.4k / 100k") and the extra
+ *  zeros only add width. */
+export function formatTokensCompact(n: number): string {
+  return formatTokens(n).replace(/\.0(?=[kM]$)/, "");
+}
+
 /** Money stays micro-USD integers end-to-end; format only at the edge. */
 export function formatMicroUsd(micros: number): string {
   return `$${(micros / 1_000_000).toFixed(micros % 1_000_000 === 0 ? 0 : 2)}`;

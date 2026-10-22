@@ -88,6 +88,17 @@ export interface PublicPoolKey {
   created_at: number;
 }
 
+/** Effective token cap binding a key — the quota rule that would deny
+ *  first (smallest remaining headroom across key/user/pool rules). */
+export interface OwnKeyCap {
+  limit_tokens: number;
+  /** Window `used_tokens` is counted in: 'hour' | 'day' | 'month'. */
+  period: string;
+  /** Tokens metered against the rule's subject in its current window —
+   *  the same SUM the gateway enforces before any upstream call. */
+  used_tokens: number;
+}
+
 export interface OwnPoolKey {
   id: string;
   pool_id: string;
@@ -95,6 +106,10 @@ export interface OwnPoolKey {
   key_prefix: string;
   status: string;
   created_at: number;
+  /** Epoch ms; null = never expires. */
+  expires_at: number | null;
+  /** null = no token rule binds this key ("Unlimited" while usable). */
+  cap: OwnKeyCap | null;
 }
 
 export interface IssuedKey {

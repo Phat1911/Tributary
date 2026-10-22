@@ -957,7 +957,10 @@ pub async fn usage_daily(
 // Member self-service (M3): own pool keys, by user
 // ---------------------------------------------------------------------------
 
-/// A member's own pool key with its pool name for display.
+/// A member's own pool key with its pool name for display. The pre-M5
+/// surfacing chore added `expires_at` (M4 key governance) and `cap` (the
+/// effective quota from `quota_rules`) — both already-stored M4 data,
+/// surfaced read-only; no new enforcement lives here.
 #[derive(Debug, Clone, Serialize)] // serde: this struct → JSON — self-service key row
 pub struct OwnPoolKey {
     pub id: String,
@@ -966,12 +969,35 @@ pub struct OwnPoolKey {
     pub key_prefix: String,
     pub status: String,
     pub created_at: i64,
+    /// Optional expiry (epoch ms; None = never) — shown as "Never" in the UI.
+    pub expires_at: Option<i64>,
+    /// The effective token cap binding this key (None = no token rule
+    /// applies → "Unlimited"). Filled by [`attach_effective_caps`].
+    pub cap: Option<OwnKeyCap>,
+}
+
+/// The one quota rule that would deny this member's request FIRST — the
+/// display twin of the gateway's AND-together enforcement (crates/gateway
+/// src/quota.rs): rules on the key, its owner, and its pool all bind, so
+/// the honest "your limit" is the smallest remaining headroom.
+#[derive(Debug, Clone, Serialize, PartialEq)] // serde: this struct → JSON — cap fields for the keys table
+pub struct OwnKeyCap {
+    /// The winning rule's token limit.
+    pub limit_tokens: i64,
+    /// Canonical period wire form ('hour' | 'day' | 'month') — the window
+    /// `used_tokens` is counted in.
+    pub period: String,
+    /// Tokens (prompt + completion) metered against the rule's subject in
+    /// its current window — the same SUM the gateway runs before admitting
+    /// a request.
+    pub used_tokens: i64,
 }
 
 /// Lists one user's pool keys across pools (masked — hash never selected).
 pub async fn pool_keys_by_user(db: &Db, user_id: &str) -> sqlx::Result<Vec<OwnPoolKey>> {
     let sql = db.sql(
-        "SELECT k.id, k.pool_id, p.name AS pool_name, k.key_prefix, k.status, k.created_at \
+        "SELECT k.id, k.pool_id, p.name AS pool_name, k.key_prefix, k.status, k.created_at, \
+         k.expires_at \
          FROM pool_keys k JOIN pools p ON k.pool_id = p.id \
          WHERE k.user_id = ? ORDER BY k.created_at",
     );
@@ -987,9 +1013,119 @@ pub async fn pool_keys_by_user(db: &Db, user_id: &str) -> sqlx::Result<Vec<OwnPo
             key_prefix: row.get("key_prefix"),
             status: row.get("status"),
             created_at: row.get("created_at"),
+            expires_at: row.get("expires_at"),
+            // Filled in by attach_effective_caps (needs cross-table queries).
+            cap: None,
         })
         .collect();
     Ok(rows)
+}
+
+/// The `usage_events` column a quota subject kind aggregates over — MUST
+/// mirror the gateway engine's mapping exactly: the member's displayed
+/// "used" number may never diverge from what enforcement counts.
+fn usage_column(kind: &str) -> &'static str {
+    match kind {
+        "user" => "user_id",
+        "pool" => "pool_id",
+        _ => "pool_key_id",
+    }
+}
+
+/// Tokens (prompt + completion) metered for one subject since a window
+/// start — the control-plane twin of the gateway engine's `usage_tokens`
+/// (same SUM, same CAST-to-BIGINT the sqlx Any driver needs on Postgres,
+/// where SUM promotes to NUMERIC — the M2 lesson, recorded in PLAN).
+async fn tokens_used_since(db: &Db, kind: &str, id: &str, since_ms: i64) -> sqlx::Result<i64> {
+    let sql = db.sql(&format!(
+        "SELECT CAST(COALESCE(SUM(prompt_tokens + completion_tokens), 0) AS BIGINT) AS t \
+         FROM usage_events WHERE {} = ? AND ts >= ?",
+        usage_column(kind)
+    ));
+    let row = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
+        .bind(id)
+        .bind(since_ms)
+        .fetch_one(db.pool())
+        .await?;
+    Ok(row.get("t"))
+}
+
+/// Picks the binding rule from every (rule, used-in-window) pair that
+/// applies to one key: the token rule with the SMALLEST remaining headroom
+/// (`limit − used`) is the one the gateway would deny on first — anything
+/// else in the column would be a lie by omission. Pure so it unit-tests
+/// without a DB; ties keep the earlier entry (stable display).
+fn effective_cap(entries: &[(&QuotaRuleRow, i64)]) -> Option<OwnKeyCap> {
+    entries
+        .iter()
+        // Request-rate-only rules (limit_tokens = NULL) are rate limits,
+        // not caps — a second quota concept, deliberately not surfaced here.
+        .filter_map(|(rule, used)| rule.limit_tokens.map(|limit| (rule, used, limit)))
+        .min_by_key(|&(_rule, used, limit)| limit.saturating_sub(*used))
+        .map(|(rule, used, limit)| OwnKeyCap {
+            limit_tokens: limit,
+            // Same fallback the engine uses for token rules: an unknown
+            // period string counts as a day window.
+            period: tributary_common::time::Period::parse(&rule.period)
+                .unwrap_or(tributary_common::time::Period::Day)
+                .as_str()
+                .to_string(),
+            used_tokens: *used,
+        })
+}
+
+/// Fills `cap` on each of the caller's keys: loads every quota rule once,
+/// keeps those binding each key through its three subjects (pool_key /
+/// user / pool — the same AND-set the gateway checks), counts window usage
+/// per subject (cached — several keys share a pool or owner), and resolves
+/// the min-headroom winner. Dead keys (revoked/rotated) get no cap: no
+/// request will ever be checked against them again.
+pub async fn attach_effective_caps(
+    db: &Db,
+    user_id: &str,
+    keys: &mut [OwnPoolKey],
+) -> sqlx::Result<()> {
+    if keys.is_empty() {
+        return Ok(());
+    }
+    let rules = list_quota_rules(db).await?;
+    let now = tributary_common::db::now_ms();
+    // (subject_kind, subject_id, window_start) → used tokens — shared
+    // subjects (one owner, one pool) are counted once, not per key.
+    let mut used_cache: std::collections::HashMap<(&'static str, &str, i64), i64> =
+        std::collections::HashMap::new();
+    for key in keys.iter_mut() {
+        // A key that can no longer serve has no enforceable limit to show.
+        if key.status != "active" && key.status != "suspended" {
+            continue;
+        }
+        let subjects: [(&'static str, &str); 3] = [
+            ("pool_key", key.id.as_str()),
+            ("user", user_id),
+            ("pool", key.pool_id.as_str()),
+        ];
+        let mut entries: Vec<(&QuotaRuleRow, i64)> = Vec::new();
+        for (kind, id) in subjects {
+            for rule in rules.iter().filter(|r| {
+                r.subject_kind == kind && r.subject_id == id && r.limit_tokens.is_some()
+            }) {
+                let period = tributary_common::time::Period::parse(&rule.period)
+                    .unwrap_or(tributary_common::time::Period::Day);
+                let since = tributary_common::time::period_start_ms(period, now);
+                let used = match used_cache.get(&(kind, id, since)) {
+                    Some(cached) => *cached,
+                    None => {
+                        let counted = tokens_used_since(db, kind, id, since).await?;
+                        used_cache.insert((kind, id, since), counted);
+                        counted
+                    }
+                };
+                entries.push((rule, used));
+            }
+        }
+        key.cap = effective_cap(&entries);
+    }
+    Ok(())
 }
 
 /// Loads ONE pool key by id together with its owner (self-service checks).
@@ -2253,4 +2389,77 @@ pub async fn classifier_samples_this_hour(
         .await?;
     let n: i64 = row.get("n");
     Ok(n)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Builds a quota rule row for the resolver tests (ids/periods vary
+    /// per test; only the cap-relevant fields matter here).
+    fn rule(kind: &str, id: &str, period: &str, limit_tokens: Option<i64>) -> QuotaRuleRow {
+        QuotaRuleRow {
+            id: format!("r-{kind}-{period}"),
+            subject_kind: kind.to_string(),
+            subject_id: id.to_string(),
+            period: period.to_string(),
+            limit_tokens,
+            // A request-rate rule (minute period) usually rides this NULL —
+            // the case `cap_ignores_request_rate_rules` proves is skipped.
+            limit_requests: None,
+            limit_cost: 0,
+            created_at: 0,
+        }
+    }
+
+    #[test]
+    fn cap_prefers_smallest_headroom_across_subjects() {
+        // key: 100k day cap, 12.4k used → headroom 87.6k
+        let key_rule = rule("pool_key", "k1", "day", Some(100_000));
+        // user: 500k month cap, 10k used → headroom 490k
+        let user_rule = rule("user", "u1", "month", Some(500_000));
+        // pool: 50k day cap, 49.5k used → headroom 500 — the binding one
+        let pool_rule = rule("pool", "p1", "day", Some(50_000));
+        let cap = effective_cap(&[
+            (&key_rule, 12_400),
+            (&user_rule, 10_000),
+            (&pool_rule, 49_500),
+        ])
+        .expect("a cap must resolve");
+        assert_eq!(cap.limit_tokens, 50_000);
+        assert_eq!(cap.period, "day");
+        assert_eq!(cap.used_tokens, 49_500);
+    }
+
+    #[test]
+    fn cap_ignores_request_rate_rules() {
+        // Only a minute-window request-rate rule binds → no token cap.
+        let rate_only = rule("pool_key", "k1", "minute", None);
+        assert_eq!(effective_cap(&[(&rate_only, 0)]), None);
+        // Same rule set plus a real token rule → the token rule wins.
+        let token = rule("pool", "p1", "day", Some(1_000));
+        let cap = effective_cap(&[(&rate_only, 999), (&token, 100)]).unwrap();
+        assert_eq!(cap.limit_tokens, 1_000);
+        assert_eq!(cap.used_tokens, 100);
+    }
+
+    #[test]
+    fn cap_canonicalizes_unknown_period_to_day_like_the_engine() {
+        // The gateway's token path falls back to a day window when a period
+        // string does not parse; the display must never disagree.
+        let odd = rule("pool_key", "k1", "fortnight", Some(1_000));
+        let cap = effective_cap(&[(&odd, 10)]).unwrap();
+        assert_eq!(cap.period, "day");
+    }
+
+    #[test]
+    fn cap_counts_exhausted_rules_as_smallest_headroom() {
+        // An admin can lower a limit below usage already metered; the
+        // exhausted rule (headroom 0, saturating) is still the honest cap.
+        let exhausted = rule("user", "u1", "day", Some(1_000));
+        let roomy = rule("pool", "p1", "month", Some(1_000_000));
+        let cap = effective_cap(&[(&roomy, 0), (&exhausted, 1_500)]).unwrap();
+        assert_eq!(cap.limit_tokens, 1_000);
+        assert_eq!(cap.used_tokens, 1_500);
+    }
 }

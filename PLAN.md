@@ -22,6 +22,72 @@
 
 ## Milestone log (append per completed milestone; keep the most recent 10)
 
+### 2026-10-22 — CHORE: member keys table — surface expiry + cap (pre-M5)
+
+**Scope.** Director mini-kickoff (chore-grade, pre-M5): M4 already gave
+pool keys `expires_at` and per-key token quotas, but the member "My pool
+keys" table showed only Pool / Key / Status / Issued — members could not
+see their own limits. Pure SURFACING: no new enforcement, schema, cron, or
+second quota concept. Four design rulings received with the GO: cap
+resolution = min-headroom across key/user/pool rules (the constraint that
+actually blocks, anything else is a lie by omission); `used` = tokens in
+the rule's current window, mirroring `quota.rs` enforcement (display never
+diverges from what the gateway counts); the window is a visible muted
+suffix (`12.4k / 100k · day`), not a tooltip (undiscoverable on mobile);
+commit stages only explicitly-changed paths.
+
+**Files.** `crates/control/src/db.rs` (`OwnPoolKey` + `expires_at` +
+`cap: Option<OwnKeyCap>`; `OwnKeyCap {limit_tokens, period, used_tokens}`;
+`tokens_used_since` — the twin of the gateway engine's `usage_tokens`
+incl. the CAST-to-BIGINT Any-driver rule; pure `effective_cap` resolver;
+`attach_effective_caps` orchestrator with a per-subject window-usage
+cache; resolver unit tests); `crates/control/src/me.rs` (`GET /me/keys`
+enriches rows); `crates/control/tests/self_service.rs`
+(`member_key_list_surfaces_expiry_and_effective_cap`); `apps/dashboard/lib/api.ts`
+(`OwnKeyCap`, extended `OwnPoolKey`); `apps/dashboard/lib/format.ts`
+(`formatTokensCompact` — drops a trailing ".0" so the cell reads
+`12.4k / 100k`; `formatTokens` itself untouched, other surfaces keep their
+output); `apps/dashboard/app/me/page.tsx` (Expires + Cap columns;
+`useWallClock` — the client clock as a `useSyncExternalStore` external
+store with a cached snapshot: React-19 lint bans both `Date.now()` in
+render (purity) and setState-in-effect, and the 0-valued server snapshot
+keeps hydration mismatch-free); new `MEMBER-KEYS-FOUNDER-TEST.md`.
+
+**Tests.** Journey (workflow step 12, public API only — org, pools,
+members, keys with expiry bodies, quota rules all provisioned through the
+API; only metering rows are seeded, the gateway owning their sole write
+path): member A sees three keys — expiring-soon key with a key-level day
+cap (`100k` limit, exactly `12.4k` used: a 50k row from before today's
+window is excluded), an already-expired key (expires_at carried, status
+still `active` — display-level only), a never-expiring key whose minute
+request-RATE rule correctly surfaces NO cap ("Unlimited"); member B's
+binding cap is their user-level day rule (50k/2k) beating the pool-level
+month rule — the cross-subject min-headroom leg. Raw key material and
+cross-member leakage asserted absent. Resolver unit tests: smallest
+headroom wins across subjects, rate-only rules ignored, unknown period
+canonicalizes to `day` like the engine, exhausted (used > limit) rules
+still resolve. Gates: `cargo fmt --all -- --check` ✓, `clippy --workspace
+--all-targets -D warnings` ✓, `cargo test --workspace` **132/132 ✓ dual-DB**
+(SQLite + Postgres `trib_test_ci` :5433; self_service 4→5). Environment
+notes, not code: one Windows `link.exe` LNK1000 flake over the UNC target
+plus a stale running `tributary-gateway.exe serve` locking the binary —
+the founder's server was left running, so the verified run used an
+isolated Windows-local `CARGO_TARGET_DIR`; one transient Postgres connect
+refusal under the parallel connect storm (harness anti-skip panic fired
+as designed) — clean on rerun. Dashboard: `eslint` + `tsc --noEmit` +
+`next build` ✓ (11 routes).
+
+**No new dependencies** (workflow step 10 n/a — `formatTokensCompact` and
+`useWallClock` are hand-rolled; no date library, per the M3 ruling).
+
+**Notes.** `quota_rules.limit_cost` stays stored-but-unenforced — already
+recorded as the D23 deferral (PLAN M1 notes + SPEC §5/D23 + the bind-site
+comment in `api.rs`), so no new AUDIT line. The "expired" chip is
+display-level by design: the DB has no expired lifecycle state and the
+gateway enforces expiry at auth time. Revoked/rotated keys show "—" for
+Cap (nothing enforceable); suspended keys keep theirs (restorable). No
+milestone ticked — M5 owns the tracker.
+
 ### 2026-10-21 — D33 admin four-eyes (approvals) moved into M4
 
 Director instruction (founder overruled the M6 deferral; SPEC already
@@ -164,6 +230,12 @@ exploitable FIXED, pinned red-first:
 - **limitations/notes:** crates are placeholder libs (`crate_name()` + one unit test each); crate names carry the `tributary-` prefix ahead of crates.io reservation (D19); dashboard is a TS-only placeholder page; `next build` auto-adjusted `tsconfig.json` (`jsx: react-jsx`, `.next/dev/types` include) — kept; local Rust builds on this machine run via Windows-cargo WSL interop (needs `WSLENV=CARGO_INCREMENTAL CARGO_INCREMENTAL=0`), or just use CI.
 
 ## Fast jump — most recent milestone → changed files
+
+**CHORE — member keys expiry + cap surfacing (2026-10-22):**
+
+- Control: `crates/control/src/db.rs` (OwnPoolKey/OwnKeyCap + resolver) · `crates/control/src/me.rs` · `crates/control/tests/self_service.rs`
+- Dashboard: `apps/dashboard/lib/api.ts` · `apps/dashboard/lib/format.ts` · `apps/dashboard/app/me/page.tsx`
+- Docs: `MEMBER-KEYS-FOUNDER-TEST.md` · `PLAN.md` (this entry)
 
 **M4 (2026-10-18):**
 
