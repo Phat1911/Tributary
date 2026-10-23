@@ -12,9 +12,6 @@ out/
 # Rust build artifacts
 /target
 
-# Environment / secrets — never commit
-.env
-.env.*
-
-# Internal note:
+# Internal notes — intentionally untracked; NEVER `git add -f`
+STRATEGY.md
 M3-FINAL-REPORT.md

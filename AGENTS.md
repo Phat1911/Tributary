@@ -1,7 +1,9 @@
 # AGENTS.md — Tributary working agreement
 
 Read this before touching code. Sources of truth: **SPEC.md** (product & design),
-this file (how we work), **PLAN.md** (status & log), **AUDIT.md** (security findings).
+this file (how we work), **PLAN.md** (status & log), **AUDIT.md** (security findings),
+**STRATEGY.md** (strategy context — *intentionally untracked*: read it freely, but NEVER
+commit it or `git add -f` it; it is excluded in `.gitignore` by design).
 
 ## Project structure (target monorepo)
 

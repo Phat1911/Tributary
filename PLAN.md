@@ -4,9 +4,9 @@
 
 ## Current state
 
-- **Date:** 2026-10-17 · **Spec:** v0.3 (decisions D1–D30)
-- **Next milestone:** M4 — leak prevention free tier (+ basic canaries, BYOK purpose classifier + auto-block)
-- **Code:** M3 complete — control plane hardened (secure HttpOnly cookie sessions alongside bearer tokens, per-email+IP login throttling closing A-004, audit log with sanitized snapshots, usage + member self-service endpoints) and the dashboard is live (Next.js + Tailwind v4 + shadcn/ui; host/org/member/audit views; dev proxy to local `serve`). Rust dual-DB green (2× consecutive full runs, 76/76) + dashboard lint/typecheck/build green locally
+- **Date:** 2026-10-22 · **Spec:** v0.3 (decisions D1–D33)
+- **Next milestone:** M5 — hardening block (A-019…A-022, A-026, A-028) + public packaging (compose, GHCR, docs, landing, OpenAI-SDK contract tests, Playwright)
+- **Code:** M4 complete and director-verified (two adversarial waves, 12 journeys, zero open High) at 38caee5 + round-2 fixes; member-keys chore (expiry + cap surfacing) at 314ceb1 — 132/132 dual-DB, dashboard green. Director's uncommitted edits (SPEC/AGENTS/.gitignore/PLAN) await the M5 housekeeping sweep.
 
 ## Milestone status
 
@@ -16,7 +16,8 @@
 | M1 | **done** (2026-10-15) | CI green incl. dual-DB tests: [run 38682358525](https://github.com/Phat1911/Tributary/actions/runs/38682358525); local end-to-end smoke vs mock upstream ✓; real-OpenAI curl demo pending user key |
 | M2 | **done** (2026-10-17) | CI green on `main` incl. dual-DB tests + cargo-deny: [run 38996743570](https://github.com/Phat1911/Tributary/actions/runs/38996743570); local dual-DB 59/59 (SQLite in-memory + Docker Postgres 16 on :5433); done-when `m2_isolation.rs` green |
 | M3 | **done** (2026-10-17) | CI green on `main`: [run 39051018301](https://github.com/Phat1911/Tributary/actions/runs/39051018301) — Rust (fmt/clippy/test dual-DB) ✓, cargo-deny ✓, dashboard lint+typecheck+build ✓ (first run 39050675931 caught a lost script entry — fixed in 8efa119). Local: Rust dual-DB 76/76 twice consecutively (SQLite in-memory + Docker Postgres 16 `tributary-pg-m3` on :5433, removed after) + dev-proxy smoke vs a mock control plane; done-when: org-admin journey through the UI (see log) |
-| M4–M6 | pending | V1 — Gateway + Org Pools |
+| M4 | **done** (2026-10-22) | Closed at 38caee5 + round-2 fixes (A-023…A-029); two adversarial waves, 12 journeys, 127/127 dual-DB at close; open items A-019…A-022 ruled into M5. Post-close chore: member-keys expiry+cap surfacing (314ceb1, 132/132) |
+| M5–M6 | pending | V1 — packaging/pilots |
 | M7–M11 | pending | V2 — Root Pool |
 | M12–M14 | pending | V3 — Operator network |
 
