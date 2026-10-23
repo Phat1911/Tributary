@@ -29,6 +29,13 @@ pub struct Config {
     /// check ONLY when the `geoip` feature is also compiled in (dormant
     /// otherwise; see `geo`).
     pub geoip_db_path: Option<String>,
+    /// Trusted reverse-proxy networks (A-019): `X-Forwarded-For` is
+    /// honored only when the transport peer matches one of these CIDRs;
+    /// the RIGHTMOST untrusted hop is then the client. Empty (default)
+    /// ⇒ the header is ignored and the socket address is the client.
+    /// Deploy note: IP-derived controls (allowlist pins, D32 sharing
+    /// detection, travel) are only sound behind a proxy in this list.
+    pub trusted_proxies: Vec<tributary_common::net::Cidr>,
 }
 
 impl fmt::Debug for Config {
@@ -44,6 +51,14 @@ impl fmt::Debug for Config {
             .field("log_json", &self.log_json)
             .field("smtp", &self.smtp.as_ref().map(|_| "<configured>"))
             .field("geoip_db_path", &self.geoip_db_path)
+            .field(
+                "trusted_proxies",
+                &self
+                    .trusted_proxies
+                    .iter()
+                    .map(tributary_common::net::format_cidr)
+                    .collect::<Vec<_>>(),
+            )
             .finish()
     }
 }
@@ -62,6 +77,7 @@ impl Config {
             geoip_db_path: env::var("TRIBUTARY_GEOIP_DB_PATH")
                 .ok()
                 .filter(|p| !p.trim().is_empty()),
+            trusted_proxies: trusted_proxies()?,
         })
     }
 
@@ -95,6 +111,32 @@ fn model_list() -> Vec<String> {
     }
 }
 
+/// Parses `TRIBUTARY_TRUSTED_PROXIES` (comma-separated CIDRs or bare IPs;
+/// empty/unset ⇒ trust nothing). A malformed entry FAILS STARTUP rather
+/// than silently disabling trust or silently trusting — the operator
+/// typo'd a security control and must hear about it (A-019).
+fn trusted_proxies() -> anyhow::Result<Vec<tributary_common::net::Cidr>> {
+    let raw = match env::var("TRIBUTARY_TRUSTED_PROXIES") {
+        Ok(raw) => raw,
+        Err(_) => return Ok(Vec::new()),
+    };
+    let mut out = Vec::new();
+    for token in raw.split(',') {
+        let token = token.trim();
+        if token.is_empty() {
+            continue;
+        }
+        let cidr = tributary_common::net::Cidr::parse(token).ok_or_else(|| {
+            anyhow::anyhow!(
+                "TRIBUTARY_TRUSTED_PROXIES entry '{token}' is not a valid \
+                 CIDR or IP (expected e.g. 10.0.0.0/8, 172.16.0.5)"
+            )
+        })?;
+        out.push(cidr);
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -109,6 +151,7 @@ mod tests {
             log_json: false,
             smtp: None,
             geoip_db_path: None,
+            trusted_proxies: Vec::new(),
         };
         let rendered = format!("{config:?}");
         assert!(!rendered.contains("supersecret"));

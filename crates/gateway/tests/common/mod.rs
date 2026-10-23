@@ -287,7 +287,14 @@ pub fn test_master() -> MasterKey {
 /// Builds the merged app exactly like `serve` does (data + control plane).
 /// M4: SMTP stays unconfigured in tests — email alerts take the
 /// log-fallback path (the outbox row still persists for assertions).
+/// A-019: trusted proxies default to NONE (socket address decides).
 pub async fn test_app(pool: db::Db, _mock: &MockUpstream) -> Router {
+    test_app_with_trusted(pool, _mock, &[]).await
+}
+
+/// Same as [`test_app`] with an explicit trusted-proxy list (A-019
+/// journeys: the socket simulates the reverse proxy).
+pub async fn test_app_with_trusted(pool: db::Db, _mock: &MockUpstream, trusted: &[&str]) -> Router {
     let config = Config {
         database_url: String::new(),
         master_key: test_master(),
@@ -296,6 +303,10 @@ pub async fn test_app(pool: db::Db, _mock: &MockUpstream) -> Router {
         log_json: false,
         smtp: None,
         geoip_db_path: None,
+        trusted_proxies: trusted
+            .iter()
+            .filter_map(|c| tributary_common::net::Cidr::parse(c))
+            .collect(),
     };
     build_full_app(pool, config).await.expect("build full app")
 }

@@ -1921,6 +1921,10 @@ pub struct PutOrgSettingsRequest {
     /// Clamped to 60–86400: below a minute is alert spam, above a day the
     /// "concurrent" claim stops being honest.
     pub concurrency_window_secs: i64,
+    /// A-028: minimum shadow age in seconds before classifier go-live may
+    /// execute. Optional; omitted (or 0) keeps the gate dormant. Max 30
+    /// days — beyond that an org is likely misconfiguring itself.
+    pub classifier_min_shadow_secs: Option<i64>,
 }
 
 /// GET /api/v1/orgs/{id}/settings — defaults are returned even when the
@@ -1961,11 +1965,35 @@ pub async fn put_org_settings(
             body.concurrency_window_secs
         )));
     }
+    let min_shadow = match body.classifier_min_shadow_secs {
+        // Partial-update semantics: omitting the field KEEPS the current
+        // value — tuning the D32 window must not silently reset the
+        // shadow-age gate.
+        None => {
+            db::org_settings(&state.db, &org.id)
+                .await
+                .map_err(|e| ControlError::Internal(e.into()))?
+                .classifier_min_shadow_secs
+        }
+        Some(0) => 0,
+        Some(v) if (1..=2_592_000).contains(&v) => v,
+        Some(v) => {
+            return Err(ControlError::BadRequest(format!(
+                "classifier_min_shadow_secs must be 0 (off) or 1–2592000 (got {v})"
+            )));
+        }
+    };
     let client_ip = tributary_common::net::client_ip(&headers);
     let updated_at = tributary_common::db::now_ms();
-    db::upsert_org_settings(&state.db, &org.id, body.concurrency_window_secs, updated_at)
-        .await
-        .map_err(|e| ControlError::Internal(e.into()))?;
+    db::upsert_org_settings(
+        &state.db,
+        &org.id,
+        body.concurrency_window_secs,
+        min_shadow,
+        updated_at,
+    )
+    .await
+    .map_err(|e| ControlError::Internal(e.into()))?;
     audit::record(
         &state.db,
         audit::AuditEntry {
@@ -1977,7 +2005,8 @@ pub async fn put_org_settings(
             target_id: &org.id,
             before: None,
             after: Some(serde_json::json!({
-                "concurrency_window_secs": body.concurrency_window_secs
+                "concurrency_window_secs": body.concurrency_window_secs,
+                "classifier_min_shadow_secs": min_shadow,
             })),
             ip: Some(&client_ip),
         },
@@ -2193,6 +2222,10 @@ pub async fn put_classifier(
         shadow_started_at,
         sampling_per_hour: sampling,
         updated_at: now_ms(),
+        // A-028: the epoch the REQUESTER observed (prior row's, 0 when
+        // unconfigured). The deferred payload freezes it; the upsert
+        // stamps the row with the freshly bumped watermark instead.
+        config_epoch: prior.as_ref().map(|p| p.config_epoch).unwrap_or(0),
     };
     // D33: org-wide policy (the purpose statement + auto-block config)
     // needs a second admin's approval in dual-admin orgs. The probe has
@@ -2294,7 +2327,12 @@ pub async fn delete_classifier(
         &org.id,
         crate::approvals::SensitiveKind::OrgPolicy,
         &org.id,
-        serde_json::json!({ "policy_action": "remove" }),
+        // A-028: the remove payload freezes the epoch it observed — an
+        // approval for a config that was since reconfigured must not fire.
+        serde_json::json!({
+            "policy_action": "remove",
+            "config_epoch": existing.config_epoch,
+        }),
     )
     .await?
     {
@@ -2345,6 +2383,17 @@ pub async fn classifier_go_live(
         .map_err(|e| ControlError::Internal(e.into()))?
         .ok_or(ControlError::NotFound)?;
     admin.ensure_org_scope(&org.id)?;
+    // The current row gates everything below: its epoch rides into the
+    // deferred payload (A-028) and its shadow age is what min-shadow
+    // measures. Absent row ⇒ the same 409 the execute path produces.
+    let current = db::classifier_config_by_org(&state.db, &org.id)
+        .await
+        .map_err(|e| ControlError::Internal(e.into()))?
+        .ok_or_else(|| {
+            ControlError::Conflict(
+                "no auto_block config in shadow — configure it first (PUT with acknowledge)".into(),
+            )
+        })?;
     // D33: go-live IS auto-block config — the most sensitive policy
     // switch the org has (D28 made it explicit; D33 makes it dual-admin).
     // In dual-admin orgs it defers; solo orgs flip it with the marker.
@@ -2355,7 +2404,10 @@ pub async fn classifier_go_live(
         &org.id,
         crate::approvals::SensitiveKind::OrgPolicy,
         &org.id,
-        serde_json::json!({ "policy_action": "go_live" }),
+        serde_json::json!({
+            "policy_action": "go_live",
+            "config_epoch": current.config_epoch,
+        }),
     )
     .await?
     {
@@ -2363,6 +2415,11 @@ pub async fn classifier_go_live(
             Ok((StatusCode::ACCEPTED, Json(pending)).into_response())
         }
         SensitiveOutcome::Proceed { solo, alert } => {
+            // A-028: min-shadow applies to the DIRECT flip exactly as to
+            // the deferred one (solo orgs are not exempt from org policy).
+            crate::approvals::enforce_min_shadow(&state.db, &org.id, Some(&current), now_ms())
+                .await
+                .map_err(|e| ControlError::Conflict(format!("{e:#}")))?;
             let n = db::classifier_go_live(&state.db, &org.id, now_ms())
                 .await
                 .map_err(|e| ControlError::Internal(e.into()))?;
@@ -2714,8 +2771,15 @@ pub async fn approve_pending_action(
                 },
             )
             .await;
+            // A-028: a stale config epoch is a STATE conflict — 409 tells
+            // the client to re-request against the present; other guard
+            // failures stay 400 (bad request against current reality).
+            let message = format!("{e:#}");
+            if let Some(human) = message.strip_prefix(crate::approvals::STALE_EPOCH_BAIL) {
+                return Err(ControlError::Conflict(human.to_string()));
+            }
             return Err(ControlError::BadRequest(format!(
-                "action could not execute and was rejected: {e:#}"
+                "action could not execute and was rejected: {message}"
             )));
         }
     };

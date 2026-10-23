@@ -236,6 +236,25 @@ pub struct Executed {
 /// the demote target must still be an admin and must not be the last one;
 /// key/pool targets must still exist. Returns a summary for the executed
 /// action's audit row.
+/// Prefix bailed by `execute` when the classifier config moved under a
+/// pending approval (A-028). The approve endpoint maps it to 409 Conflict
+/// (the ruling's wording) instead of the generic 400 — an HTTP client can
+/// distinguish "retry the request fresh" from "fix your payload".
+pub const STALE_EPOCH_BAIL: &str = "STALE_EPOCH:";
+
+/// bails with the typed stale-epoch marker (see [`STALE_EPOCH_BAIL`]).
+macro_rules! bail_stale_epoch {
+    ($expected:expr, $current:expr) => {
+        anyhow::bail!(
+            "{}classifier config changed since this approval was requested \
+             (config epoch {} → {}) — re-request it",
+            STALE_EPOCH_BAIL,
+            $expected,
+            $current
+        )
+    };
+}
+
 pub async fn execute(db: &Db, action: &db::PendingActionRow, now: i64) -> anyhow::Result<Executed> {
     let payload: Value = serde_json::from_str(&action.payload_json).unwrap_or(Value::Null);
     match SensitiveKind::parse(&action.kind) {
@@ -328,6 +347,17 @@ pub async fn execute(db: &Db, action: &db::PendingActionRow, now: i64) -> anyhow
         }
         Some(SensitiveKind::OrgPolicy) => match payload["policy_action"].as_str() {
             Some("configure") => {
+                // A-028 config-epoch guard: the payload froze the config
+                // the REQUESTER saw. If the row mutated since (another
+                // approval executed, a reconfigure landed), executing
+                // this would silently overwrite the newer world — refuse;
+                // the requester re-requests against the present.
+                let prior = db::classifier_config_by_org(db, &action.org_id).await?;
+                let current_epoch = prior.as_ref().map(|p| p.config_epoch).unwrap_or(0);
+                let expected_epoch = payload["config_epoch"].as_i64().unwrap_or(-1);
+                if current_epoch != expected_epoch {
+                    bail_stale_epoch!(expected_epoch, current_epoch);
+                }
                 // The classifier row was built (and its key SEALED) at
                 // request time; execution only refreshes the timestamps —
                 // entering auto_block starts its shadow window NOW.
@@ -339,7 +369,6 @@ pub async fn execute(db: &Db, action: &db::PendingActionRow, now: i64) -> anyhow
                 // model), purpose statement, mode, or threshold changes
                 // re-enter shadow — new enforcement semantics must be
                 // re-validated before they can block.
-                let prior = db::classifier_config_by_org(db, &action.org_id).await?;
                 let (live, shadow) = match &prior {
                     Some(p)
                         if p.auto_block_live
@@ -376,6 +405,14 @@ pub async fn execute(db: &Db, action: &db::PendingActionRow, now: i64) -> anyhow
                 })
             }
             Some("remove") => {
+                // A-028: same epoch guard — a remove requested against a
+                // config that has since been reconfigured must not fire.
+                let prior = db::classifier_config_by_org(db, &action.org_id).await?;
+                let current_epoch = prior.as_ref().map(|p| p.config_epoch).unwrap_or(0);
+                let expected_epoch = payload["config_epoch"].as_i64().unwrap_or(-1);
+                if current_epoch != expected_epoch {
+                    bail_stale_epoch!(expected_epoch, current_epoch);
+                }
                 db::delete_classifier_config(db, &action.org_id).await?;
                 Ok(Executed {
                     summary: json!({ "policy": "classifier_removed" }),
@@ -383,6 +420,14 @@ pub async fn execute(db: &Db, action: &db::PendingActionRow, now: i64) -> anyhow
                 })
             }
             Some("go_live") => {
+                // A-028 epoch guard + optional minimum shadow age.
+                let prior = db::classifier_config_by_org(db, &action.org_id).await?;
+                let current_epoch = prior.as_ref().map(|p| p.config_epoch).unwrap_or(0);
+                let expected_epoch = payload["config_epoch"].as_i64().unwrap_or(-1);
+                if current_epoch != expected_epoch {
+                    bail_stale_epoch!(expected_epoch, current_epoch);
+                }
+                enforce_min_shadow(db, &action.org_id, prior.as_ref(), now).await?;
                 let affected = db::classifier_go_live(db, &action.org_id, now).await?;
                 if affected == 0 {
                     anyhow::bail!("refused: no auto_block config to go live");
@@ -439,6 +484,9 @@ fn classifier_row_from_payload(payload: &Value) -> db::ClassifierConfigRow {
         shadow_started_at: None,
         sampling_per_hour: payload["sampling_per_hour"].as_i64().unwrap_or(30),
         updated_at: 0,
+        // A-028: the epoch the REQUESTER observed — carried through so the
+        // execute-side guard can compare it with the present row.
+        config_epoch: payload["config_epoch"].as_i64().unwrap_or(-1),
     }
 }
 
@@ -459,7 +507,39 @@ pub fn classifier_payload(row: &db::ClassifierConfigRow, policy_action: &str) ->
         "alert_threshold_bp": row.alert_threshold_bp,
         "block_threshold_bp": row.block_threshold_bp,
         "sampling_per_hour": row.sampling_per_hour,
+        "config_epoch": row.config_epoch,
     })
+}
+
+/// A-028 minimum-shadow-age gate, shared by the deferred execute path and
+/// the direct (solo org) go-live: when the org opted into
+/// `classifier_min_shadow_secs > 0`, a go-live may only execute once the
+/// current shadow window is at least that old. Default 0 = dormant.
+pub async fn enforce_min_shadow(
+    db: &Db,
+    org_id: &str,
+    prior: Option<&db::ClassifierConfigRow>,
+    now: i64,
+) -> anyhow::Result<()> {
+    let settings = db::org_settings(db, org_id).await?;
+    if settings.classifier_min_shadow_secs <= 0 {
+        return Ok(());
+    }
+    let Some(row) = prior else {
+        anyhow::bail!("refused: no classifier config to go live");
+    };
+    let Some(started) = row.shadow_started_at else {
+        anyhow::bail!("refused: config has no shadow window (mode is alert-only)");
+    };
+    let age_secs = (now - started).max(0) / 1000;
+    if age_secs < settings.classifier_min_shadow_secs {
+        anyhow::bail!(
+            "refused: shadow window is {age_secs}s old; org policy requires at least \
+             {}s before go-live (classifier_min_shadow_secs)",
+            settings.classifier_min_shadow_secs
+        );
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -536,6 +616,7 @@ mod tests {
             shadow_started_at: None,
             sampling_per_hour: 30,
             updated_at: 1,
+            config_epoch: 7,
         };
         let payload = classifier_payload(&row, "configure");
         let back = classifier_row_from_payload(&payload);
@@ -543,6 +624,8 @@ mod tests {
         assert_eq!(back.dialect, "jev");
         assert_eq!(back.ciphertext, "ct");
         assert_eq!(back.mode, "auto_block");
+        // A-028: the observed epoch rides the payload round-trip.
+        assert_eq!(back.config_epoch, 7);
         // Never carried: execution-time fields reset by design.
         assert_eq!(back.updated_at, 0);
         assert!(back.shadow_started_at.is_none());

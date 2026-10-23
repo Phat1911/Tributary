@@ -257,3 +257,137 @@ pub async fn prior_countries_for_key(
         .await?;
     Ok(rows.iter().map(|r| r.get::<String, _>("country")).collect())
 }
+
+// --- Quota reservations (A-020: reserve→settle→release) ------------------------
+
+/// One live request's reservation against a single (subject, period)
+/// window — the amounts that MUST be subtracted again at settle/release.
+#[derive(Debug, Clone)]
+pub struct ReservedBucket {
+    pub subject_kind: String,
+    pub subject_id: String,
+    pub period: String,
+    pub window_start: i64,
+    pub est_tokens: i64,
+    pub est_requests: i64,
+}
+
+/// Atomically reserves `est_tokens` + `est_requests` against one window
+/// (A-020). ONE conditional UPDATE is the atomicity unit on both engines:
+/// PostgreSQL row-locks the bucket and re-evaluates the WHERE against the
+/// committed winner (EvalPlanQual on READ COMMITTED); SQLite serializes
+/// writers. Returns `false` when the window cannot absorb the estimate
+/// (deny) — no partial state is left behind.
+///
+/// The usage aggregates inside the WHERE are CORRELATED on the bucket row
+/// itself (`quota_buckets.subject_id` / `window_start`), so the check sees
+/// exactly the window it reserves; their SQL must stay byte-aligned with
+/// `quota.rs`'s aggregations (CAST-to-BIGINT rule, AUDIT A-006).
+pub async fn reserve_bucket(
+    db: &Db,
+    bucket: &ReservedBucket,
+    limit_tokens: Option<i64>,
+    limit_requests: Option<i64>,
+) -> sqlx::Result<bool> {
+    // (1) Ensure the counter row exists (create-if-absent, never resets).
+    let ensure = db.sql(
+        "INSERT INTO quota_buckets \
+         (subject_kind, subject_id, period, window_start, reserved_tokens, \
+          reserved_requests, created_at) \
+         VALUES (?, ?, ?, ?, 0, 0, ?) \
+         ON CONFLICT (subject_kind, subject_id, period, window_start) DO NOTHING",
+    );
+    sqlx::query(sqlx::AssertSqlSafe(ensure.as_str()))
+        .bind(&bucket.subject_kind)
+        .bind(&bucket.subject_id)
+        .bind(&bucket.period)
+        .bind(bucket.window_start)
+        .bind(now_ms())
+        .execute(db.pool())
+        .await?;
+
+    // (2) The atomic conditional reservation. `? IS NULL` = "no limit of
+    // this kind — condition vacuous". A NULL-bound Option<i64> is NULL on
+    // both drivers (the dual-DB INTEGER rule keeps these i64-only).
+    let col = crate::quota::usage_column(&bucket.subject_kind);
+    let sql = db.sql(&format!(
+        "UPDATE quota_buckets SET \
+            reserved_tokens = reserved_tokens + ?, \
+            reserved_requests = reserved_requests + ? \
+         WHERE subject_kind = ? AND subject_id = ? AND period = ? \
+           AND window_start = ? \
+           AND (? IS NULL OR reserved_tokens + ? + \
+                (SELECT CAST(COALESCE(SUM(prompt_tokens + completion_tokens), 0) AS BIGINT) \
+                 FROM usage_events \
+                 WHERE {col} = quota_buckets.subject_id \
+                   AND ts >= quota_buckets.window_start) <= ?) \
+           AND (? IS NULL OR reserved_requests + ? + \
+                (SELECT COUNT(*) FROM usage_events \
+                 WHERE {col} = quota_buckets.subject_id \
+                   AND ts >= quota_buckets.window_start) <= ?)"
+    ));
+    let result = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
+        .bind(bucket.est_tokens)
+        .bind(bucket.est_requests)
+        .bind(&bucket.subject_kind)
+        .bind(&bucket.subject_id)
+        .bind(&bucket.period)
+        .bind(bucket.window_start)
+        .bind(limit_tokens)
+        .bind(bucket.est_tokens)
+        .bind(limit_tokens)
+        .bind(limit_requests)
+        .bind(bucket.est_requests)
+        .bind(limit_requests)
+        .execute(db.pool())
+        .await?;
+    Ok(result.rows_affected() > 0)
+}
+
+/// Returns a reservation's amounts to the window (A-020 settle/release —
+/// the same decrement either way: settle additionally wrote a usage row,
+/// which this function deliberately does NOT touch). Floor guards make a
+/// double-release harmless (bounded at zero, never negative).
+pub async fn release_bucket(db: &Db, bucket: &ReservedBucket) -> sqlx::Result<u64> {
+    let sql = db.sql(
+        "UPDATE quota_buckets SET \
+            reserved_tokens = reserved_tokens - ?, \
+            reserved_requests = reserved_requests - ? \
+         WHERE subject_kind = ? AND subject_id = ? AND period = ? \
+           AND window_start = ? \
+           AND reserved_tokens >= ? AND reserved_requests >= ?",
+    );
+    let result = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
+        .bind(bucket.est_tokens)
+        .bind(bucket.est_requests)
+        .bind(&bucket.subject_kind)
+        .bind(&bucket.subject_id)
+        .bind(&bucket.period)
+        .bind(bucket.window_start)
+        .bind(bucket.est_tokens)
+        .bind(bucket.est_requests)
+        .execute(db.pool())
+        .await?;
+    Ok(result.rows_affected())
+}
+
+/// TTL sweep (A-020): drops counter rows whose window has rolled over.
+/// This is the crashed-request reclaimer — a process death between
+/// reserve and settle leaves the amounts pinned until the window (and
+/// therefore the bucket) expires. Over-reserving is the failure mode;
+/// the sweep bounds it to the window length. One portable CASE statement
+/// (period lives per row); month uses a 31-day upper bound.
+pub async fn sweep_reservation_windows(db: &Db, now_epoch_ms: i64) -> sqlx::Result<u64> {
+    let sql = db.sql(
+        "DELETE FROM quota_buckets WHERE CASE period \
+            WHEN 'minute' THEN window_start + 60000 \
+            WHEN 'hour' THEN window_start + 3600000 \
+            WHEN 'day' THEN window_start + 86400000 \
+            ELSE window_start + 2678400000 END <= ?",
+    );
+    let result = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
+        .bind(now_epoch_ms)
+        .execute(db.pool())
+        .await?;
+    Ok(result.rows_affected())
+}

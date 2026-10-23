@@ -141,34 +141,9 @@ pub async fn chat_completions(
         .await
         .map_err(|e| ApiError::Internal(anyhow::anyhow!("quota check failed: {e}")))?
     {
-        let retry_after_secs = ((reset_at_ms - now) / 1000).max(1);
-        // Amended M4 done-when (D31): a quota cap must be demonstrable in
-        // the audit log — a cap with no trace is indistinguishable from an
-        // outage. Audit row only: a cap firing is house rules working, not
-        // a leak signal, so no review flag and no email.
-        tributary_control::audit::record(
-            &state.db,
-            tributary_control::audit::AuditEntry {
-                org_id: Some(&pool.org_id),
-                actor_id: "system",
-                actor_email: "system@tributary.internal",
-                action: "security.quota_denied",
-                target_kind: tributary_control::audit::TargetKind::PoolKey,
-                target_id: &auth.id,
-                before: None,
-                after: Some(json!({
-                    "key_prefix": auth.key_prefix,
-                    "message": message,
-                    "reset_at_ms": reset_at_ms,
-                })),
-                ip: Some(&client_ip),
-            },
-        )
-        .await;
-        return Err(ApiError::TooManyRequests {
-            message,
-            retry_after_secs,
-        });
+        return Err(
+            quota_denied(&state, &pool, &auth, message, reset_at_ms, now, &client_ip).await,
+        );
     }
 
     // --- M4 per-key IP history + impossible travel (dormant default). ----
@@ -214,6 +189,9 @@ pub async fn chat_completions(
     // Runs AFTER this request's IP upsert so "now" counts; one row per
     // (key, ip) keeps the query the size of the active source set.
     // ALERT-ONLY by director directive: detection never denies here.
+    // De-duplication (A-021) is a DB invariant — the partial unique index
+    // on OPEN d32 flags (migration 0012) — not a count-then-insert race;
+    // `detect` resolves staleness/superseding on its own.
     {
         let window_secs = state
             .org_settings
@@ -231,14 +209,7 @@ pub async fn chat_completions(
             .collect();
         networks.sort();
         networks.dedup();
-        // De-duplication: one alert per key per window. A shared key can
-        // fire hundreds of requests in 5 minutes — the queue gets ONE
-        // row, not one per request. A DB count (not in-proc state) is the
-        // gate, so the dedupe survives a restart.
-        let dedupe =
-            tributary_control::db::concurrency_flags_for_key(&state.db, &auth.id, now - window_ms)
-                .await;
-        if networks.len() >= 2 && dedupe.unwrap_or(0) == 0 {
+        if networks.len() >= 2 {
             tributary_control::security::detect(
                 &state.db,
                 state.config.smtp.as_ref(),
@@ -282,6 +253,33 @@ pub async fn chat_completions(
         },
     );
 
+    // --- A-020: reserve BEFORE any upstream work (reserve→settle→release).
+    // `check` above is the cheap deny; this is the atomic one — a
+    // concurrent burst cannot fit N× through a cap sized for one, because
+    // each request's estimate is conditionally deducted from the window's
+    // bucket BEFORE the upstream call, in one row-locked UPDATE.
+    let estimate = crate::quota::estimate_tokens(&request_body);
+    let reservation = match state
+        .quota
+        .reserve(&state.db, &subject, estimate, now)
+        .await
+        .map_err(|e| ApiError::Internal(anyhow::anyhow!("quota reserve failed: {e}")))?
+    {
+        Ok(reservation) => reservation,
+        Err(decision) => {
+            let Decision::Deny {
+                message,
+                reset_at_ms,
+            } = decision
+            else {
+                unreachable!("reserve denies with Decision::Deny")
+            };
+            return Err(
+                quota_denied(&state, &pool, &auth, message, reset_at_ms, now, &client_ip).await,
+            );
+        }
+    };
+
     // --- Key selection + per-use decrypt (SPEC §5 steps 4–5). ------------
     let selected = routing::select_provider_key(&state.db, &auth.pool_id)
         .await
@@ -322,10 +320,16 @@ pub async fn chat_completions(
     if !is_stream {
         upstream = upstream.timeout(NON_STREAM_TIMEOUT);
     }
-    let response = upstream.send().await.map_err(|e| {
-        tracing::warn!("upstream request failed: {e:#}");
-        ApiError::BadGateway("upstream request failed".to_string())
-    })?;
+    let response = match upstream.send().await {
+        Ok(response) => response,
+        Err(e) => {
+            tracing::warn!("upstream request failed: {e:#}");
+            // A-020: the upstream never took the request — give the window
+            // back (no usage row will land for it).
+            state.quota.release(&state.db, &reservation).await;
+            return Err(ApiError::BadGateway("upstream request failed".to_string()));
+        }
+    };
 
     let admission = Admission {
         requested_model,
@@ -337,16 +341,74 @@ pub async fn chat_completions(
     let status = response.status();
     if !admission.is_stream || !status.is_success() {
         // Buffered path: non-streaming responses and upstream errors.
-        buffered_response(state, auth, admission, response, started).await
+        buffered_response(state, auth, admission, response, started, reservation).await
     } else {
         // Streaming success: SSE passthrough with metering.
-        streaming_response(state, auth, admission, response, started).await
+        streaming_response(state, auth, admission, response, started, reservation).await
+    }
+}
+
+/// The rule-4 deny: 429 + `Retry-After` + the audit row that makes a cap
+/// firing provable (M4 amended done-when, D31) — shared by the cheap
+/// `check` deny and A-020's reserve deny so both leave the same trace.
+async fn quota_denied(
+    state: &crate::state::AppState,
+    pool: &crate::routing::PoolInfo,
+    auth: &AuthedKey,
+    message: String,
+    reset_at_ms: i64,
+    now: i64,
+    client_ip: &str,
+) -> ApiError {
+    let retry_after_secs = ((reset_at_ms - now) / 1000).max(1);
+    // Audit row only: a cap firing is house rules working, not a leak
+    // signal — no review flag, no email.
+    tributary_control::audit::record(
+        &state.db,
+        tributary_control::audit::AuditEntry {
+            org_id: Some(&pool.org_id),
+            actor_id: "system",
+            actor_email: "system@tributary.internal",
+            action: "security.quota_denied",
+            target_kind: tributary_control::audit::TargetKind::PoolKey,
+            target_id: &auth.id,
+            before: None,
+            after: Some(json!({
+                "key_prefix": auth.key_prefix,
+                "message": message,
+                "reset_at_ms": reset_at_ms,
+            })),
+            ip: Some(client_ip),
+        },
+    )
+    .await;
+    ApiError::TooManyRequests {
+        message,
+        retry_after_secs,
     }
 }
 
 /// Forwards a fully-buffered upstream response (non-streaming or any error)
 /// and records its usage event.
 async fn buffered_response(
+    state: AppState,
+    auth: AuthedKey,
+    admission: Admission,
+    response: reqwest::Response,
+    started: Instant,
+    reservation: crate::quota::Reservation,
+) -> Result<Response, ApiError> {
+    let result = buffered_response_inner(state.clone(), auth, admission, response, started).await;
+    // A-020 settle: the usage row (if any) landed inside the inner call;
+    // the reservation decrements identically for success and error — the
+    // window must never keep credit pinned by a finished request.
+    state.quota.release(&state.db, &reservation).await;
+    result
+}
+
+/// The buffered path's work, separated so the reservation settle/release
+/// above runs on EVERY exit without duplicating it at each `?`.
+async fn buffered_response_inner(
     state: AppState,
     auth: AuthedKey,
     admission: Admission,
@@ -406,6 +468,7 @@ async fn streaming_response(
     admission: Admission,
     response: reqwest::Response,
     started: Instant,
+    reservation: crate::quota::Reservation,
 ) -> Result<Response, ApiError> {
     let content_type = response
         .headers()
@@ -416,6 +479,7 @@ async fn streaming_response(
 
     let (tx, rx) = mpsc::channel::<Result<Bytes, Infallible>>(32);
     let db = state.db.clone();
+    let quota = state.quota.clone();
     let pool_key_id = auth.id;
     let user_id = auth.user_id;
     let pool_id = auth.pool_id;
@@ -461,6 +525,10 @@ async fn streaming_response(
             // The response is already streaming; metering loss is logged loudly.
             tracing::error!("usage insert failed after stream: {err}");
         }
+        // A-020 settle: the stream (and therefore the request) is over —
+        // in every outcome, including client disconnects and metering
+        // failures, the reservation must go back to the window.
+        quota.release(&db, &reservation).await;
     });
 
     let body_stream =

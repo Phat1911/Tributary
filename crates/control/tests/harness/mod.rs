@@ -268,6 +268,19 @@ pub fn get_json(uri: &str, token: Option<&str>) -> Request<Body> {
     builder.body(Body::empty()).unwrap()
 }
 
+/// POST JSON arriving from an explicit TRANSPORT socket (A-019 adaptation:
+/// production derives the client IP from the peer address via
+/// `into_make_service_with_connect_info`; a spoofable header is no longer
+/// an IP source when no proxy is trusted). The port is arbitrary — the
+/// middleware reads only the IP.
+pub fn post_json_from_ip(uri: &str, token: Option<&str>, body: &Value, ip: &str) -> Request<Body> {
+    use axum::extract::ConnectInfo;
+    let socket: std::net::SocketAddr = format!("{ip}:41234").parse().expect("valid test socket");
+    let mut request = post_json(uri, token, body);
+    request.extensions_mut().insert(ConnectInfo(socket));
+    request
+}
+
 /// GET carrying a raw Cookie header (browser-session simulation).
 pub fn get_with_cookie(uri: &str, cookie: &str) -> Request<Body> {
     Request::builder()

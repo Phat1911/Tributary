@@ -25,18 +25,27 @@ pub mod sse;
 pub mod state;
 
 use axum::Router;
+use axum::middleware;
 use axum::routing::{get, post};
 use config::Config;
 use state::AppState;
+use std::sync::Arc;
 use tributary_common::db::Db;
 use tributary_control::ControlState;
 
 /// Builds the data-plane router over shared state.
 pub fn build_app(state: AppState) -> Router {
+    // A-019 client-IP sanitization: capture the trusted list before
+    // with_state moves the AppState; raw XFF dies at this layer.
+    let trusted = state.config.trusted_proxies.clone();
     Router::new()
         .route("/v1/chat/completions", post(chat::chat_completions))
         .route("/v1/models", get(models_api::list_models))
         .with_state(state)
+        .layer(middleware::from_fn_with_state(
+            Arc::new(trusted),
+            tributary_control::client_ip::sanitize_xff,
+        ))
 }
 
 /// Connects the DB, runs migrations, and builds a reqwest client.
@@ -57,11 +66,14 @@ pub async fn build_full_app(db: Db, config: Config) -> anyhow::Result<Router> {
         .connect_timeout(std::time::Duration::from_secs(10))
         .build()?;
     let app_state = AppState::new(db.clone(), http.clone(), config.clone());
-    let control_state = ControlState::new(
+    let mut control_state = ControlState::new(
         db,
         http,
         config.master_key.clone(),
         config.default_models.clone(),
     );
+    // A-019: both planes share ONE trust decision — the control router
+    // sanitizes XFF with the same trusted-proxy list as the data plane.
+    control_state.trusted_proxies = config.trusted_proxies.clone();
     Ok(build_app(app_state).merge(tributary_control::router(control_state)))
 }

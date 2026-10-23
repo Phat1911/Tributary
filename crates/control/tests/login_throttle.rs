@@ -76,13 +76,15 @@ async fn login_throttle_locks_the_bucket_not_the_account() {
         let (email, password) = provision_member(&db, "lock").await;
 
         let creds = |pw: &str| json!({"email": &email, "password": pw});
-        let ip1 = &[("x-forwarded-for", "203.0.113.7")];
+        // IPs arrive as TRANSPORT sockets (A-019): a bare header claim is
+        // attacker input the sanitizer strips when no proxy is trusted.
+        let ip1 = "203.0.113.7";
 
         // Three failures from IP 1: still 401 (generic) each time.
         for attempt in 0..3 {
             let (status, body) = send(
                 &app,
-                post_json_with_headers("/api/v1/auth/login", None, &creds("wrong"), ip1),
+                post_json_from_ip("/api/v1/auth/login", None, &creds("wrong"), ip1),
             )
             .await;
             assert_eq!(
@@ -98,7 +100,7 @@ async fn login_throttle_locks_the_bucket_not_the_account() {
         // Retry-After. The throttle gate runs before password work.
         let (status, headers, body) = send_full(
             &app,
-            post_json_with_headers("/api/v1/auth/login", None, &creds(&password), ip1),
+            post_json_from_ip("/api/v1/auth/login", None, &creds(&password), ip1),
         )
         .await;
         assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{}: {body}", db.name);
@@ -114,10 +116,10 @@ async fn login_throttle_locks_the_bucket_not_the_account() {
         );
 
         // Same email, different IP: unaffected (per-email+IP bucket).
-        let ip2 = &[("x-forwarded-for", "198.51.100.9")];
+        let ip2 = "198.51.100.9";
         let (status, body) = send(
             &app,
-            post_json_with_headers("/api/v1/auth/login", None, &creds("wrong"), ip2),
+            post_json_from_ip("/api/v1/auth/login", None, &creds("wrong"), ip2),
         )
         .await;
         assert_eq!(status, StatusCode::UNAUTHORIZED, "{}: {body}", db.name);
@@ -126,7 +128,7 @@ async fn login_throttle_locks_the_bucket_not_the_account() {
         let other = unique_email("throttle-ghost");
         let (status, _) = send(
             &app,
-            post_json_with_headers(
+            post_json_from_ip(
                 "/api/v1/auth/login",
                 None,
                 &json!({"email": &other, "password": "whatever123"}),
@@ -140,13 +142,13 @@ async fn login_throttle_locks_the_bucket_not_the_account() {
         // 1 more fail is allowed (count restarted, not accumulated to 4).
         let (status, _) = send(
             &app,
-            post_json_with_headers("/api/v1/auth/login", None, &creds(&password), ip2),
+            post_json_from_ip("/api/v1/auth/login", None, &creds(&password), ip2),
         )
         .await;
         assert_eq!(status, StatusCode::OK, "{}", db.name);
         let (status, _) = send(
             &app,
-            post_json_with_headers("/api/v1/auth/login", None, &creds("wrong"), ip2),
+            post_json_from_ip("/api/v1/auth/login", None, &creds("wrong"), ip2),
         )
         .await;
         assert_eq!(
@@ -166,12 +168,12 @@ async fn login_throttle_state_survives_restart() {
         let app = control_app_with_limit(db.pool.clone(), 2).await;
         let (email, password) = provision_member(&db, "restart").await;
         let creds = json!({"email": &email, "password": "wrong"});
-        let ip = &[("x-forwarded-for", "192.0.2.44")];
+        let ip = "192.0.2.44";
 
         for _ in 0..2 {
             send(
                 &app,
-                post_json_with_headers("/api/v1/auth/login", None, &creds, ip),
+                post_json_from_ip("/api/v1/auth/login", None, &creds, ip),
             )
             .await;
         }
@@ -179,7 +181,7 @@ async fn login_throttle_state_survives_restart() {
         let app2 = control_app_with_limit(db.pool.clone(), 2).await;
         let (status, _) = send(
             &app2,
-            post_json_with_headers("/api/v1/auth/login", None, &creds, ip),
+            post_json_from_ip("/api/v1/auth/login", None, &creds, ip),
         )
         .await;
         assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{}", db.name);
@@ -187,7 +189,7 @@ async fn login_throttle_state_survives_restart() {
         // the lock is per (email, ip) — a different IP gets a clean 200.
         let (status, _) = send(
             &app2,
-            post_json_with_headers(
+            post_json_from_ip(
                 "/api/v1/auth/login",
                 None,
                 &json!({"email": &email, "password": &password}),

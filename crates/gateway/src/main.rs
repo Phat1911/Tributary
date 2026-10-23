@@ -22,7 +22,9 @@ async fn main() -> anyhow::Result<()> {
                  \n\
                  serve         run gateway + control API (env: TRIBUTARY_DATABASE_URL,\n\
                  \x20             TRIBUTARY_MASTER_KEY [64-hex], [TRIBUTARY_BIND,\n\
-                 \x20             TRIBUTARY_MODELS, TRIBUTARY_LOG_FORMAT])\n\
+                 \x20             TRIBUTARY_MODELS, TRIBUTARY_LOG_FORMAT,\n\
+                 \x20             TRIBUTARY_TRUSTED_PROXIES=<cidr,...> — XFF honored\n\
+                 \x20             only from these proxies; unset ⇒ socket addr])\n\
                  migrate       run pending migrations, then exit\n\
                  create-admin  bootstrap the FIRST host admin (only when no users\n\
                  \x20             exist); further users are created via the admin API\n\
@@ -43,9 +45,15 @@ async fn serve() -> anyhow::Result<()> {
     let db = db::Db::connect(&config.database_url).await?;
     let app = build_full_app(db, config).await?;
     let listener = tokio::net::TcpListener::bind(&bind).await?;
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
+    // A-019: `with_connect_info` stamps each request with the REAL
+    // transport socket address (ConnectInfo) — the sanitize middleware's
+    // trust decision needs the actual peer, not a header claim.
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .await?;
     Ok(())
 }
 

@@ -19,6 +19,7 @@ pub mod approvals;
 pub mod audit;
 pub mod auth;
 pub mod classifier;
+pub mod client_ip;
 pub mod db;
 pub mod error;
 pub mod me;
@@ -27,9 +28,13 @@ pub mod security;
 pub mod throttle;
 pub mod usage;
 
+use std::sync::Arc;
+
 use axum::Router;
+use axum::middleware;
 use axum::routing::{get, post};
 use tributary_common::db::Db;
+use tributary_common::net::Cidr;
 use tributary_crypto::MasterKey;
 
 /// Shared control-plane state, cloned into every handler.
@@ -51,6 +56,11 @@ pub struct ControlState {
     pub login_max_fails: i64,
     /// SMTP relay for detection emails; `None` ⇒ log-fallback (M4).
     pub smtp: Option<notify::SmtpConfig>,
+    /// Trusted reverse-proxy networks (A-019): XFF is honored only from
+    /// these CIDRs. Empty (the default) ⇒ the socket address is always
+    /// the client. The merged binary fills this from the gateway config;
+    /// control-only embeddings keep the fail-closed default.
+    pub trusted_proxies: Vec<Cidr>,
 }
 
 impl ControlState {
@@ -70,6 +80,7 @@ impl ControlState {
             login_throttle: throttle::LoginThrottle::new(),
             login_max_fails: 5,
             smtp: notify::SmtpConfig::from_env(),
+            trusted_proxies: Vec::new(),
         }
     }
 }
@@ -91,6 +102,9 @@ pub fn router(state: ControlState) -> Router {
             let _ = crate::audit::scrub_legacy_approval_audit(&db).await;
         });
     }
+    // Captured before `with_state` moves the state: the A-019 layer needs
+    // the trusted-proxy list as its own middleware state.
+    let trusted = state.trusted_proxies.clone();
     Router::new()
         .route("/api/v1/auth/login", post(api::login))
         .route("/api/v1/auth/logout", post(api::logout))
@@ -206,6 +220,14 @@ pub fn router(state: ControlState) -> Router {
             post(api::classifier_go_live),
         )
         .with_state(state)
+        // A-019 client-IP sanitization runs OUTERMOST-ish (after routing
+        // state is fixed, before any handler): raw XFF is replaced by the
+        // trusted-proxy-resolved client IP, so every `client_ip()` reader
+        // below the layer — audit rows, throttle buckets — is spoof-proof.
+        .layer(middleware::from_fn_with_state(
+            Arc::new(trusted),
+            client_ip::sanitize_xff,
+        ))
 }
 
 /// Creates the first host_admin user; errors if any user exists.

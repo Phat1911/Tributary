@@ -78,6 +78,14 @@ impl FromRequestParts<AppState> for AuthedKey {
         if row.status != "active" {
             return Err(ApiError::Unauthorized);
         }
+        if row.kind != "live" {
+            // A-022c defense-in-depth: D31 removed every product path
+            // that mints non-live kinds (honey keys are gone) — a row
+            // like this means a manual insert, a bad restore, or a future
+            // regression. Reject with the same opaque 401 as unknown keys
+            // (no probing) before any pool routing happens.
+            return Err(ApiError::Unauthorized);
+        }
         if let Some(expires_at) = row.expires_at
             && db::now_ms() >= expires_at
         {

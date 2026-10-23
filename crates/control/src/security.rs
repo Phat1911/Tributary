@@ -127,12 +127,108 @@ pub struct Detection<'a> {
 const SYSTEM_ACTOR_ID: &str = "system";
 const SYSTEM_ACTOR_EMAIL: &str = "system@tributary.internal";
 
+/// Result of the queue-insert stage: `Raised` continues down the pipeline
+/// (audit + email), `Deduped` ends the detection as a quiet no-op.
+enum FlagOutcome {
+    Raised,
+    Deduped,
+    Failed,
+}
+
+/// Stage 1 of [`detect`]: the review-queue insert. D32 detections take the
+/// A-021 deduped path — the partial unique index (migration 0012) is the
+/// race arbiter, and an OPEN flag older than the org's window is
+/// superseded (resolved + replaced) so a stale card can never swallow a
+/// NEW incident. All other kinds insert plainly (classifier flags are
+/// per-request evidence and may stack while open).
+async fn raise_flag(
+    db: &Db,
+    event: &Detection<'_>,
+    flag_id: &str,
+    severity: &str,
+    ts: i64,
+) -> FlagOutcome {
+    let flag = db::NewReviewFlag {
+        id: flag_id,
+        org_id: event.org_id,
+        pool_id: event.pool_id,
+        pool_key_id: event.pool_key_id,
+        user_id: event.user_id,
+        kind: event.kind.as_str(),
+        severity,
+        score_bp: event.score_bp,
+        detail_json: &event.detail,
+        created_at: ts,
+    };
+    // The deduped insert hard-codes kind = 'distinct_ip_concurrency' in
+    // its VALUES clause (it must match the partial index exactly), so it
+    // is only valid for D32 events that carry a key.
+    let is_d32 =
+        matches!(event.kind, DetectionKind::DistinctIpConcurrency) && event.pool_key_id.is_some();
+    if !is_d32 {
+        return match db::insert_review_flag(db, &flag).await {
+            Ok(()) => FlagOutcome::Raised,
+            Err(err) => {
+                tracing::error!(
+                    "review flag insert failed (kind={} org={}): {err:#}",
+                    event.kind.as_str(),
+                    event.org_id
+                );
+                FlagOutcome::Failed
+            }
+        };
+    }
+    match db::insert_review_flag_deduped(db, &flag).await {
+        Ok(true) => FlagOutcome::Raised,
+        Ok(false) => {
+            // An OPEN d32 flag already exists for this key. Same incident
+            // (flag is fresh) ⇒ stay quiet — one sharing event, one card.
+            let window_secs = db::org_settings(db, event.org_id)
+                .await
+                .map(|s| s.concurrency_window_secs)
+                .unwrap_or(db::DEFAULT_CONCURRENCY_WINDOW_SECS);
+            let existing = db::open_d32_flag_for_key(db, event.pool_key_id.unwrap_or(""))
+                .await
+                .ok()
+                .flatten();
+            let stale = existing
+                .as_ref()
+                .is_some_and(|f| ts.saturating_sub(f.created_at) > window_secs * 1000);
+            let Some(existing) = existing.filter(|_| stale) else {
+                return FlagOutcome::Deduped;
+            };
+            // Stale card from a PREVIOUS incident: resolve it and raise a
+            // NEW flag. Concurrent superseders are safe — the resolve is
+            // conditional on 'open' and the retry still races the index.
+            let _ = db::supersede_d32_flag(db, &existing.id, ts).await;
+            match db::insert_review_flag_deduped(db, &flag).await {
+                Ok(true) => FlagOutcome::Raised,
+                Ok(false) => FlagOutcome::Deduped,
+                Err(err) => {
+                    tracing::error!("d32 supersede re-insert failed: {err:#}");
+                    FlagOutcome::Failed
+                }
+            }
+        }
+        Err(err) => {
+            tracing::error!(
+                "review flag insert failed (kind={} org={}): {err:#}",
+                event.kind.as_str(),
+                event.org_id
+            );
+            FlagOutcome::Failed
+        }
+    }
+}
+
 /// Fires the full detection pipeline. Returns the created flag id (or
 /// `None` when even the queue write failed — logged loudly).
 ///
 /// Best-effort by design: each write logs its own failure and the pipeline
 /// continues, because the caller's response shape (e.g. an allowlist 403)
 /// must not depend on detection plumbing (honey keys are gone — D31).
+/// D32 duplicates (same incident already flagged) also return `None` —
+/// quietly, by design (A-021).
 pub async fn detect(db: &Db, smtp: Option<&SmtpConfig>, event: &Detection<'_>) -> Option<String> {
     let flag_id = new_id();
     let ts = now_ms();
@@ -142,29 +238,9 @@ pub async fn detect(db: &Db, smtp: Option<&SmtpConfig>, event: &Detection<'_>) -
         .unwrap_or_else(|| event.kind.default_severity());
 
     // 1) Review queue — the admin's one place to look.
-    if let Err(err) = db::insert_review_flag(
-        db,
-        &db::NewReviewFlag {
-            id: &flag_id,
-            org_id: event.org_id,
-            pool_id: event.pool_id,
-            pool_key_id: event.pool_key_id,
-            user_id: event.user_id,
-            kind: event.kind.as_str(),
-            severity,
-            score_bp: event.score_bp,
-            detail_json: &event.detail,
-            created_at: ts,
-        },
-    )
-    .await
-    {
-        tracing::error!(
-            "review flag insert failed (kind={} org={}): {err:#}",
-            event.kind.as_str(),
-            event.org_id
-        );
-        return None;
+    match raise_flag(db, event, &flag_id, severity, ts).await {
+        FlagOutcome::Raised => {}
+        FlagOutcome::Deduped | FlagOutcome::Failed => return None,
     }
 
     // 2) Audit row — the immutable trail (sanitized detail only).

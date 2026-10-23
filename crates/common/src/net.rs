@@ -12,14 +12,16 @@ use std::net::IpAddr;
 /// pulling the small crate keeps `common` free of a web-framework dep.
 use http::HeaderMap;
 
-/// Best-effort client IP: the FIRST `X-Forwarded-For` hop (written by the
-/// deployment's reverse proxy, SPEC §8 TLS edge) or `"local"` for direct
-/// un-proxied connections.
+/// Best-effort client IP reader for the SANITIZED header (A-019): reads
+/// the single `X-Forwarded-For` hop rewritten by the sanitize middleware
+/// (the resolved real client IP), or `"local"` when absent.
 ///
-/// Trust model: only the edge proxy writes XFF in a sane deployment; a
-/// client-forged XFF can claim a fake IP, which is exactly why the
-/// allowlist decision ALSO treats unparseable values as non-matching
-/// (fail-closed) rather than trusting blindly.
+/// A-019 trust model (director ruling 2026-10-22): raw `X-Forwarded-For`
+/// is attacker-controlled input. The middleware overwrites it with the
+/// output of [`resolve_client_ip`] — so THIS function must only ever be
+/// called on requests that passed through it. New code needing the client
+/// IP reads the header via this reader (post-sanitization), never the raw
+/// transport header.
 pub fn client_ip(headers: &HeaderMap) -> String {
     headers
         .get("x-forwarded-for")
@@ -29,6 +31,67 @@ pub fn client_ip(headers: &HeaderMap) -> String {
         .filter(|ip| !ip.is_empty())
         .unwrap_or("local")
         .to_string()
+}
+
+/// Resolves the REAL client IP under the trusted-proxy model (A-019,
+/// `TRIBUTARY_TRUSTED_PROXIES`):
+///
+/// - No socket info available ⇒ the header cannot be verified, so it is
+///   ignored entirely (`"local"` — fail-closed).
+/// - Socket NOT in the trusted set ⇒ the header is ignored; the socket
+///   address IS the client. A client can never talk its way past an
+///   allowlist by forging hops.
+/// - Socket IS trusted ⇒ the proxy chain wrote `X-Forwarded-For`; take
+///   the RIGHTMOST hop that is not itself a trusted proxy — the address
+///   the nearest trusted proxy actually observed, not a forged left hop.
+///   Every hop trusted (internal chain) ⇒ the leftmost hop (the origin
+///   the innermost proxy recorded). No header at all ⇒ the proxy itself
+///   is the client.
+pub fn resolve_client_ip(headers: &HeaderMap, socket: Option<IpAddr>, trusted: &[Cidr]) -> String {
+    let Some(socket) = socket else {
+        // No transport info: an unverifiable header claim is worthless.
+        return "local".to_string();
+    };
+    let is_trusted = |ip: IpAddr| trusted.iter().any(|cidr| cidr.contains(ip));
+    if !is_trusted(socket) {
+        return socket.to_string();
+    }
+    let hops = xff_hops(headers);
+    if hops.is_empty() {
+        // The trusted proxy connected directly and appended nothing.
+        return socket.to_string();
+    }
+    // Rightmost untrusted hop = the client the nearest proxy observed.
+    for hop in hops.iter().rev() {
+        match hop.parse::<IpAddr>() {
+            Ok(ip) if !is_trusted(ip) => return ip.to_string(),
+            _ => continue,
+        }
+    }
+    // All hops are trusted proxies (chained internal tier): the leftmost
+    // entry is the original source as the innermost proxy recorded it.
+    hops.iter()
+        .find_map(|hop| hop.parse::<IpAddr>().ok())
+        .map(|ip| ip.to_string())
+        .unwrap_or_else(|| socket.to_string())
+}
+
+/// Every XFF hop across ALL header lines (multiple `X-Forwarded-For:`
+/// lines are one comma-separated list per RFC 7230 semantics — a single
+/// `get()` would let a duplicated header smuggle a preferred first hop).
+fn xff_hops(headers: &HeaderMap) -> Vec<String> {
+    let mut hops = Vec::new();
+    for value in headers.get_all("x-forwarded-for") {
+        if let Ok(text) = value.to_str() {
+            for hop in text.split(',') {
+                let hop = hop.trim();
+                if !hop.is_empty() {
+                    hops.push(hop.to_string());
+                }
+            }
+        }
+    }
+    hops
 }
 
 /// The "shared network" an address belongs to, for concurrency grouping
@@ -161,6 +224,74 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert("x-forwarded-for", xff.parse().unwrap());
         client_ip(&headers)
+    }
+
+    #[test]
+    fn a019_resolve_client_ip_trust_matrix() {
+        use std::net::IpAddr;
+        let headers = |xff: &str| {
+            let mut headers = HeaderMap::new();
+            headers.insert("x-forwarded-for", xff.parse().unwrap());
+            headers
+        };
+        let trusted = [Cidr::parse("172.16.0.0/12").unwrap()];
+        let proxy: IpAddr = "172.16.0.1".parse().unwrap();
+        let outside: IpAddr = "203.0.113.9".parse().unwrap();
+
+        // No socket info: the header cannot be verified, so it is ignored.
+        assert_eq!(
+            resolve_client_ip(&headers("10.0.0.5"), None, &trusted),
+            "local"
+        );
+        // Untrusted peer: its header claims are worthless — socket rules.
+        assert_eq!(
+            resolve_client_ip(&headers("10.0.0.5"), Some(outside), &trusted),
+            "203.0.113.9"
+        );
+        assert_eq!(
+            resolve_client_ip(&HeaderMap::new(), Some(outside), &trusted),
+            "203.0.113.9"
+        );
+        // Trusted proxy: the rightmost UNTRUSTED hop is the client.
+        assert_eq!(
+            resolve_client_ip(&headers("10.0.0.5"), Some(proxy), &trusted),
+            "10.0.0.5"
+        );
+        assert_eq!(
+            resolve_client_ip(&headers("10.0.0.5, 198.51.100.7"), Some(proxy), &trusted),
+            "198.51.100.7"
+        );
+        // A second trusted proxy in the chain is walked past.
+        assert_eq!(
+            resolve_client_ip(&headers("10.0.0.5, 172.16.5.5"), Some(proxy), &trusted),
+            "10.0.0.5"
+        );
+        // Every hop trusted (internal tier): leftmost hop is the origin.
+        assert_eq!(
+            resolve_client_ip(&headers("172.16.1.1, 172.16.2.2"), Some(proxy), &trusted),
+            "172.16.1.1"
+        );
+        // Trusted proxy, empty header: the proxy itself is the client.
+        assert_eq!(
+            resolve_client_ip(&HeaderMap::new(), Some(proxy), &trusted),
+            "172.16.0.1"
+        );
+        // Empty trust list: header ignored everywhere (the safe default).
+        assert_eq!(
+            resolve_client_ip(&headers("10.0.0.5"), Some(proxy), &[]),
+            "172.16.0.1"
+        );
+        // Garbage hops are skipped, not fatal.
+        assert_eq!(
+            resolve_client_ip(&headers("garbage, 10.0.0.5"), Some(proxy), &trusted),
+            "10.0.0.5"
+        );
+        // Multi-line headers join in order — no preferred-hop smuggling
+        // through a duplicated header field.
+        let mut multi = HeaderMap::new();
+        multi.append("x-forwarded-for", "198.51.100.7".parse().unwrap());
+        multi.append("x-forwarded-for", "10.0.0.5".parse().unwrap());
+        assert_eq!(resolve_client_ip(&multi, Some(proxy), &trusted), "10.0.0.5");
     }
 
     #[test]

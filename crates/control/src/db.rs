@@ -1493,6 +1493,10 @@ pub struct OrgSettings {
     /// Distinct-IP concurrency window in seconds (D32). 300 (5 min) by
     /// default; clamped at the API on write.
     pub concurrency_window_secs: i64,
+    /// Minimum shadow age in seconds before classifier go_live may
+    /// execute (A-028). 0 (the default) disables the gate — dormant by
+    /// design; an org that wants enforced shadow time opts in.
+    pub classifier_min_shadow_secs: i64,
     pub updated_at: i64,
 }
 
@@ -1502,8 +1506,10 @@ pub const DEFAULT_CONCURRENCY_WINDOW_SECS: i64 = 300;
 
 /// Reads an org's settings, falling back to defaults without inserting.
 pub async fn org_settings(db: &Db, org_id: &str) -> sqlx::Result<OrgSettings> {
-    let sql =
-        db.sql("SELECT concurrency_window_secs, updated_at FROM org_settings WHERE org_id = ?");
+    let sql = db.sql(
+        "SELECT concurrency_window_secs, classifier_min_shadow_secs, updated_at \
+         FROM org_settings WHERE org_id = ?",
+    );
     match sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
         .bind(org_id)
         .fetch_optional(db.pool())
@@ -1515,10 +1521,12 @@ pub async fn org_settings(db: &Db, org_id: &str) -> sqlx::Result<OrgSettings> {
             concurrency_window_secs: row
                 .try_get("concurrency_window_secs")
                 .unwrap_or(DEFAULT_CONCURRENCY_WINDOW_SECS),
+            classifier_min_shadow_secs: row.try_get("classifier_min_shadow_secs").unwrap_or(0),
             updated_at: row.get("updated_at"),
         }),
         None => Ok(OrgSettings {
             concurrency_window_secs: DEFAULT_CONCURRENCY_WINDOW_SECS,
+            classifier_min_shadow_secs: 0,
             updated_at: 0,
         }),
     }
@@ -1530,22 +1538,58 @@ pub async fn upsert_org_settings(
     db: &Db,
     org_id: &str,
     concurrency_window_secs: i64,
+    classifier_min_shadow_secs: i64,
     updated_at: i64,
 ) -> sqlx::Result<()> {
     let sql = db.sql(
-        "INSERT INTO org_settings (org_id, concurrency_window_secs, updated_at) \
-         VALUES (?, ?, ?) \
+        "INSERT INTO org_settings \
+           (org_id, concurrency_window_secs, classifier_min_shadow_secs, updated_at) \
+         VALUES (?, ?, ?, ?) \
          ON CONFLICT (org_id) DO UPDATE SET \
              concurrency_window_secs = excluded.concurrency_window_secs, \
+             classifier_min_shadow_secs = excluded.classifier_min_shadow_secs, \
              updated_at = excluded.updated_at",
     );
     sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
         .bind(org_id)
         .bind(concurrency_window_secs)
+        .bind(classifier_min_shadow_secs)
         .bind(updated_at)
         .execute(db.pool())
         .await?;
     Ok(())
+}
+
+/// Bumps the per-org classifier epoch watermark and returns its new value
+/// (A-028). Every classifier mutation — configure, go_live, remove — calls
+/// this and stamps the result into the row, so epochs are monotonic per
+/// org even across delete+recreate cycles (a stale approval's expected
+/// epoch can never collide with a fresh row's).
+///
+/// The upsert-bump is ONE statement: fresh org ⇒ inserted at 1; existing
+/// org ⇒ incremented. Concurrency-safe for the same reason any
+/// read-modify-write UPDATE is: the arithmetic rides in the UPDATE.
+pub async fn bump_classifier_epoch(db: &Db, org_id: &str) -> sqlx::Result<i64> {
+    use sqlx::Row;
+    let bump = db.sql(
+        "INSERT INTO org_settings \
+           (org_id, concurrency_window_secs, classifier_epoch_watermark, updated_at) \
+         VALUES (?, ?, 1, ?) \
+         ON CONFLICT (org_id) DO UPDATE SET \
+             classifier_epoch_watermark = org_settings.classifier_epoch_watermark + 1",
+    );
+    sqlx::query(sqlx::AssertSqlSafe(bump.as_str()))
+        .bind(org_id)
+        .bind(DEFAULT_CONCURRENCY_WINDOW_SECS)
+        .bind(tributary_common::db::now_ms())
+        .execute(db.pool())
+        .await?;
+    let sql = db.sql("SELECT classifier_epoch_watermark AS e FROM org_settings WHERE org_id = ?");
+    let row = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
+        .bind(org_id)
+        .fetch_one(db.pool())
+        .await?;
+    Ok(row.get("e"))
 }
 
 /// How many distinct-IP concurrency flags this key already has inside the
@@ -1942,6 +1986,80 @@ pub async fn insert_review_flag(db: &Db, flag: &NewReviewFlag<'_>) -> sqlx::Resu
     Ok(())
 }
 
+/// Writes one review flag with D32 dedupe (A-021, migration 0012): the
+/// insert races on the partial unique index `uq_review_flags_open_d32`
+/// instead of a count-then-insert check, so concurrent detections of one
+/// sharing event can never both win. Returns `false` when an OPEN d32
+/// flag already exists for the key (the caller decides between "same
+/// incident — stay quiet" and "stale incident — supersede and retry").
+pub async fn insert_review_flag_deduped(db: &Db, flag: &NewReviewFlag<'_>) -> sqlx::Result<bool> {
+    // The conflict target names the indexed columns + the partial-index
+    // predicate — the exact form SQLite and PostgreSQL both require to
+    // match THIS index (a bare (pool_key_id) target would be ambiguous
+    // with any future index and is rejected on partial-index grounds).
+    let sql = db.sql(
+        "INSERT INTO review_flags \
+         (id, org_id, pool_id, pool_key_id, user_id, kind, severity, score_bp, detail_json, \
+          status, created_at) \
+         VALUES (?, ?, ?, ?, ?, 'distinct_ip_concurrency', ?, ?, ?, 'open', ?) \
+         ON CONFLICT (pool_key_id) \
+         WHERE kind = 'distinct_ip_concurrency' AND status = 'open' \
+         DO NOTHING",
+    );
+    let result = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
+        .bind(flag.id)
+        .bind(flag.org_id)
+        .bind(flag.pool_id)
+        .bind(flag.pool_key_id)
+        .bind(flag.user_id)
+        .bind(flag.severity)
+        .bind(flag.score_bp)
+        .bind(flag.detail_json.to_string())
+        .bind(flag.created_at)
+        .execute(db.pool())
+        .await?;
+    Ok(result.rows_affected() > 0)
+}
+
+/// The OPEN d32 flag for a key, if one exists — the dedupe arbiter's
+/// read side (staleness check before superseding).
+pub async fn open_d32_flag_for_key(
+    db: &Db,
+    pool_key_id: &str,
+) -> sqlx::Result<Option<ReviewFlagRow>> {
+    let sql = db.sql(
+        "SELECT id, org_id, pool_id, pool_key_id, user_id, kind, severity, score_bp, \
+          detail_json, status, created_at, resolved_at, resolved_by \
+         FROM review_flags \
+         WHERE pool_key_id = ? AND kind = 'distinct_ip_concurrency' AND status = 'open'",
+    );
+    let row = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
+        .bind(pool_key_id)
+        .fetch_optional(db.pool())
+        .await?
+        .map(review_flag_from_row);
+    Ok(row)
+}
+
+/// Resolves an OPEN d32 flag as superseded by a NEWER incident (A-021):
+/// the unique index would otherwise silence every future detection for
+/// this key behind last week's unresolved card. Conditional on
+/// `status = 'open'` so concurrent superseders are idempotent — exactly
+/// one wins, the loser's update affects 0 rows harmlessly.
+pub async fn supersede_d32_flag(db: &Db, flag_id: &str, now_ms: i64) -> sqlx::Result<u64> {
+    let sql = db.sql(
+        "UPDATE review_flags \
+         SET status = 'resolved', resolved_at = ?, resolved_by = 'system:d32-supersede' \
+         WHERE id = ? AND status = 'open'",
+    );
+    let result = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
+        .bind(now_ms)
+        .bind(flag_id)
+        .execute(db.pool())
+        .await?;
+    Ok(result.rows_affected())
+}
+
 /// Lists review flags newest-first, optionally filtered by org and status.
 pub async fn list_review_flags(
     db: &Db,
@@ -2167,6 +2285,11 @@ pub struct ClassifierConfigRow {
     pub shadow_started_at: Option<i64>,
     pub sampling_per_hour: i64,
     pub updated_at: i64,
+    /// Monotonic mutation counter (A-028). On WRITE this field is the
+    /// epoch the writer OBSERVED (prior row's, or 0 for none) — the
+    /// upsert stamps the row with the freshly bumped watermark instead.
+    /// On READ it is the row's current epoch.
+    pub config_epoch: i64,
 }
 
 /// The masked, API-facing classifier view — no ciphertext, plus the shadow
@@ -2192,6 +2315,9 @@ pub struct PublicClassifierConfig {
     pub shadow_would_have_blocked: i64,
     /// Distinct members those samples came from (the "from M members").
     pub shadow_distinct_members: i64,
+    /// Current config epoch (A-028) — informational; the dashboard shows
+    /// it so an admin can see why a stale approval was refused.
+    pub config_epoch: i64,
 }
 
 /// Maps a raw row into the public view, computing shadow stats from the
@@ -2226,6 +2352,7 @@ pub async fn public_classifier_config(
         updated_at: row.updated_at,
         shadow_would_have_blocked: stat_row.get("n"),
         shadow_distinct_members: stat_row.get("m"),
+        config_epoch: row.config_epoch,
     })
 }
 
@@ -2237,7 +2364,7 @@ pub async fn classifier_config_by_org(
     let sql = db.sql(
         "SELECT org_id, base_url, dialect, model, ciphertext, dek_wrapped, key_prefix, \
           purpose_statement, mode, alert_threshold_bp, block_threshold_bp, \
-          auto_block_live, shadow_started_at, sampling_per_hour, updated_at \
+          auto_block_live, shadow_started_at, sampling_per_hour, updated_at, config_epoch \
          FROM classifier_config WHERE org_id = ?",
     );
     let row = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
@@ -2250,6 +2377,9 @@ pub async fn classifier_config_by_org(
 
 /// Upserts (replace via delete+insert in one tx, mirroring quota rules —
 /// avoids ON CONFLICT dialect differences) an org's classifier config.
+/// A-028: the write bumps the epoch watermark and stamps it into the row
+/// (the caller's `row.config_epoch` is IGNORED here — it records what the
+/// caller observed, which is exactly what pending payloads need).
 pub async fn upsert_classifier_config(db: &Db, row: &ClassifierConfigRow) -> sqlx::Result<()> {
     let mut tx = db.pool().begin().await?;
     let del = db.sql("DELETE FROM classifier_config WHERE org_id = ?");
@@ -2257,12 +2387,34 @@ pub async fn upsert_classifier_config(db: &Db, row: &ClassifierConfigRow) -> sql
         .bind(&row.org_id)
         .execute(&mut *tx)
         .await?;
+    // Bump the watermark INSIDE the same tx so row and watermark move
+    // atomically (a crash between the two can't leave a row stamped with
+    // an epoch the watermark never reached).
+    let bump = db.sql(
+        "INSERT INTO org_settings \
+           (org_id, concurrency_window_secs, classifier_epoch_watermark, updated_at) \
+         VALUES (?, ?, 1, ?) \
+         ON CONFLICT (org_id) DO UPDATE SET \
+             classifier_epoch_watermark = org_settings.classifier_epoch_watermark + 1",
+    );
+    sqlx::query(sqlx::AssertSqlSafe(bump.as_str()))
+        .bind(&row.org_id)
+        .bind(DEFAULT_CONCURRENCY_WINDOW_SECS)
+        .bind(tributary_common::db::now_ms())
+        .execute(&mut *tx)
+        .await?;
+    let read = db.sql("SELECT classifier_epoch_watermark AS e FROM org_settings WHERE org_id = ?");
+    let stamped: i64 = sqlx::query(sqlx::AssertSqlSafe(read.as_str()))
+        .bind(&row.org_id)
+        .fetch_one(&mut *tx)
+        .await?
+        .get("e");
     let ins = db.sql(
         "INSERT INTO classifier_config \
          (org_id, base_url, dialect, model, ciphertext, dek_wrapped, key_prefix, purpose_statement, \
           mode, alert_threshold_bp, block_threshold_bp, auto_block_live, shadow_started_at, \
-          sampling_per_hour, updated_at) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+          sampling_per_hour, updated_at, config_epoch) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     );
     sqlx::query(sqlx::AssertSqlSafe(ins.as_str()))
         .bind(&row.org_id)
@@ -2283,6 +2435,7 @@ pub async fn upsert_classifier_config(db: &Db, row: &ClassifierConfigRow) -> sql
         .bind(row.shadow_started_at)
         .bind(row.sampling_per_hour)
         .bind(row.updated_at)
+        .bind(stamped)
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;
@@ -2290,7 +2443,10 @@ pub async fn upsert_classifier_config(db: &Db, row: &ClassifierConfigRow) -> sql
 }
 
 /// Deletes an org's classifier config — the feature goes dormant again.
+/// A-028: the epoch watermark still bumps, so a config recreated later
+/// carries an epoch no pre-delete approval can match.
 pub async fn delete_classifier_config(db: &Db, org_id: &str) -> sqlx::Result<u64> {
+    let _ = bump_classifier_epoch(db, org_id).await?;
     let sql = db.sql("DELETE FROM classifier_config WHERE org_id = ?");
     let res = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
         .bind(org_id)
@@ -2301,14 +2457,17 @@ pub async fn delete_classifier_config(db: &Db, org_id: &str) -> sqlx::Result<u64
 
 /// Flips auto-block from shadow to live (admin decision after reviewing
 /// the would-have-blocked stats). Returns rows affected (0 = no config,
-/// wrong mode, or already live).
+/// wrong mode, or already live). A-028: the flip bumps the epoch — go_live
+/// is a config mutation too, so approvals requested before it go stale.
 pub async fn classifier_go_live(db: &Db, org_id: &str, at: i64) -> sqlx::Result<u64> {
+    let stamped = bump_classifier_epoch(db, org_id).await?;
     let sql = db.sql(
-        "UPDATE classifier_config SET auto_block_live = 1, updated_at = ? \
+        "UPDATE classifier_config SET auto_block_live = 1, updated_at = ?, config_epoch = ? \
          WHERE org_id = ? AND mode = 'auto_block' AND auto_block_live = 0",
     );
     let res = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
         .bind(at)
+        .bind(stamped)
         .bind(org_id)
         .execute(db.pool())
         .await?;
@@ -2334,6 +2493,7 @@ fn classifier_row_from_row(row: sqlx::any::AnyRow) -> ClassifierConfigRow {
         shadow_started_at: row.get("shadow_started_at"),
         sampling_per_hour: row.get("sampling_per_hour"),
         updated_at: row.get("updated_at"),
+        config_epoch: row.try_get("config_epoch").unwrap_or(0),
     }
 }
 
