@@ -28,6 +28,17 @@ pub struct PoolKeyRow {
 }
 
 /// Fetch a pool key by its storage hash (constant-time verify after fetch).
+/// Liveness probe backing /healthz: one portable SELECT 1 (M5). Answers
+/// whether the pool can serve — reads no data, safe unauthenticated.
+pub async fn ping(db: &Db) -> sqlx::Result<bool> {
+    use sqlx::Row;
+    let sql = db.sql("SELECT 1 AS one");
+    let row = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
+        .fetch_one(db.pool())
+        .await?;
+    Ok(row.get::<i64, _>("one") == 1)
+}
+
 pub async fn lookup_pool_key(db: &Db, key_hash: &str) -> sqlx::Result<Option<PoolKeyRow>> {
     let sql = db.sql(
         "SELECT id, key_hash, key_prefix, kind, status, expires_at, user_id, pool_id \

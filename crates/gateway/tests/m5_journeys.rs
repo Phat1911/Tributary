@@ -91,6 +91,31 @@ where
     panic!("condition never held: {what}");
 }
 
+/// /healthz (M5): the compose healthcheck target — the FULL app (both
+/// planes) answers 200 unauthenticated while the DB answers, so
+/// orchestration can restart a DB-less zombie instead of routing to it.
+#[tokio::test]
+async fn healthz_serves_on_the_full_app() {
+    for db in test_dbs().await {
+        let mock = spawn_mock(MockMode::NonStream).await;
+        let app = test_app(db.pool.clone(), &mock).await;
+        let (status, body) = call(
+            &app,
+            axum::http::Request::builder()
+                .uri("/healthz")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(
+            status,
+            axum::http::StatusCode::OK,
+            "{}: healthz must answer 200 on a live DB: {body}",
+            db.name
+        );
+    }
+}
+
 /// Bootstrap host admin (direct create — the product's bootstrap path,
 /// pre-login by design) + session login.
 async fn bootstrap_admin_and_login(pool: &db::Db, app: &axum::Router) -> String {

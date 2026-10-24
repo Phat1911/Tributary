@@ -75,5 +75,25 @@ pub async fn build_full_app(db: Db, config: Config) -> anyhow::Result<Router> {
     // A-019: both planes share ONE trust decision — the control router
     // sanitizes XFF with the same trusted-proxy list as the data plane.
     control_state.trusted_proxies = config.trusted_proxies.clone();
-    Ok(build_app(app_state).merge(tributary_control::router(control_state)))
+    // /healthz (M5): the compose healthcheck's target. Unauthenticated by
+    // design — it leaks no data (a SELECT 1 + status) and must answer
+    // before any admin exists; DB down ⇒ 503 so orchestration restarts
+    // the container instead of routing to a zombie. State is CAPTURED
+    // (the merged router is stateless — an extractor would find no
+    // provider), so the probe owns its own Db clone.
+    let healthz_db = app_state.db.clone();
+    Ok(build_app(app_state)
+        .merge(tributary_control::router(control_state))
+        .route(
+            "/healthz",
+            get(move || {
+                let db = healthz_db.clone();
+                async move {
+                    match db::ping(&db).await {
+                        Ok(true) => axum::http::StatusCode::OK,
+                        _ => axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                    }
+                }
+            }),
+        ))
 }
