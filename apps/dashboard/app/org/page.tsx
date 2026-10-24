@@ -368,7 +368,7 @@ export default function OrgPage() {
                 <TableRow key={pool.id}>
                   <TableCell className="font-medium">
                     <Link
-                      href={`/org/pools/${pool.id}`}
+                      href={`/org/pools/?id=${pool.id}`}
                       className="hover:text-primary hover:underline"
                     >
                       {pool.name}

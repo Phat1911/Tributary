@@ -26,6 +26,11 @@ serde_json = "1"
 sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "any", "sqlite", "postgres", "migrate", "macros"] }
 thiserror = "2"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "signal"] }
+# tower-http: ServeDir ONLY (static dashboard export at "/", M5
+# packaging). Axum's sibling crate; hand-rolling static serving would
+# re-implement MIME types + path traversal guards. Justified in PLAN
+# (workflow step 10).
+tower-http = { version = "0.6", features = ["fs"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 tributary-common = { path = "../common" }

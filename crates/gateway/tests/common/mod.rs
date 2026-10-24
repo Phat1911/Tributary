@@ -307,6 +307,8 @@ pub async fn test_app_with_trusted(pool: db::Db, _mock: &MockUpstream, trusted: 
             .iter()
             .filter_map(|c| tributary_common::net::Cidr::parse(c))
             .collect(),
+        // No static layer in tests — ServeDir is opt-in (TRIBUTARY_STATIC_DIR).
+        static_dir: None,
     };
     build_full_app(pool, config).await.expect("build full app")
 }

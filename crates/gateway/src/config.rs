@@ -25,6 +25,10 @@ pub struct Config {
     pub log_json: bool,
     /// SMTP relay for detection emails (M4); `None` ⇒ log-fallback.
     pub smtp: Option<tributary_control::notify::SmtpConfig>,
+    /// Directory of the dashboard static export (M5 packaging). Set by
+    /// the container (/usr/share/tributary/dashboard); None ⇒ no static
+    /// layer (dev, or API-only deployments).
+    pub static_dir: Option<String>,
     /// Optional GeoLite2-Country db path — activates the impossible-travel
     /// check ONLY when the `geoip` feature is also compiled in (dormant
     /// otherwise; see `geo`).
@@ -78,6 +82,10 @@ impl Config {
                 .ok()
                 .filter(|p| !p.trim().is_empty()),
             trusted_proxies: trusted_proxies()?,
+            static_dir: env::var("TRIBUTARY_STATIC_DIR")
+                .ok()
+                .map(|p| p.trim().to_string())
+                .filter(|p| !p.is_empty()),
         })
     }
 
@@ -152,6 +160,7 @@ mod tests {
             smtp: None,
             geoip_db_path: None,
             trusted_proxies: Vec::new(),
+            static_dir: None,
         };
         let rendered = format!("{config:?}");
         assert!(!rendered.contains("supersecret"));

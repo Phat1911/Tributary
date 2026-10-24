@@ -1,0 +1,47 @@
+# Tributary — the one-command self-hosted deployment (M5 packaging).
+#
+# Usage from the repo root:
+#   cp deploy/.env.example .env   # then set TRIBUTARY_MASTER_KEY
+#   docker compose up -d --build
+#
+# Dashboard/API: http://localhost:8111  (see README.md "Deploy in one command")
+
+services:
+  tributary:
+    # Context must be the REPO ROOT: the image build needs both apps/
+    # (dashboard stage) and crates/ + migrations/ (Rust stage). The
+    # Dockerfile itself lives in deploy/.
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile
+    image: tributary:local
+    container_name: tributary
+
+    ports:
+      # host : container. Host port is 8111 — NEVER 8080 on the host:
+      # this machine already runs the "photcot-backend" project on host
+      # 8080, and a port clash fails the container at start. Change the
+      # LEFT side only; the container always listens on 8080.
+      - "8111:8080"
+
+    # Secrets come from the gitignored repo-root .env — never baked into
+    # the image. Copy deploy/.env.example to start.
+    env_file: .env
+
+    volumes:
+      # SQLite lives here (/data/tributary.db) — everything to back up.
+      - tributary-data:/data
+
+    restart: unless-stopped
+
+    healthcheck:
+      # /healthz: DB-backed liveness in the M5 binary — 200 while the
+      # database answers, 503 (and a restart) when it does not.
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+volumes:
+  tributary-data:

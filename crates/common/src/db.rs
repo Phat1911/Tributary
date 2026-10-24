@@ -48,6 +48,21 @@ impl Db {
                 .connect(url)
                 .await?
         } else {
+            // M5 packaging fix (2026-10-24): sqlx defaults
+            // create_if_missing=false — a fresh /data volume could never
+            // create tributary.db, so the container would boot-loop on
+            // "unable to open database file" (found live-testing the
+            // compose deployment). connect_with takes an options object
+            // (not a URL) so the flag can be set; in-memory DBs are
+            // unaffected.
+            // sqlx 0.9's Any layer takes URLs, not engine option
+            // structs — create_if_missing rides as the standard
+            // `mode=rwc` query parameter instead.
+            let sqlite_url = if url.contains("mode=") {
+                url.to_string()
+            } else {
+                format!("{url}{}mode=rwc", if url.contains('?') { '&' } else { '?' })
+            };
             AnyPoolOptions::new()
                 .max_connections(5)
                 .after_connect(|conn, _| {
@@ -63,7 +78,7 @@ impl Db {
                         Ok(())
                     })
                 })
-                .connect(url)
+                .connect(&sqlite_url)
                 .await?
         };
         Ok(Self { pool, postgres })

@@ -30,6 +30,7 @@ use axum::routing::{get, post};
 use config::Config;
 use state::AppState;
 use std::sync::Arc;
+use tower_http::services::ServeDir;
 use tributary_common::db::Db;
 use tributary_control::ControlState;
 
@@ -82,7 +83,12 @@ pub async fn build_full_app(db: Db, config: Config) -> anyhow::Result<Router> {
     // (the merged router is stateless — an extractor would find no
     // provider), so the probe owns its own Db clone.
     let healthz_db = app_state.db.clone();
-    Ok(build_app(app_state)
+    // Dashboard static export (M5 packaging): when TRIBUTARY_STATIC_DIR
+    // points at a Next.js `out/` directory, it is served at "/" — the
+    // container sets the default (/usr/share/tributary/dashboard);
+    // dev/blank deployments leave it unset and skip the layer entirely.
+    let static_dir = config.static_dir.clone();
+    let mut app = build_app(app_state)
         .merge(tributary_control::router(control_state))
         .route(
             "/healthz",
@@ -95,5 +101,12 @@ pub async fn build_full_app(db: Db, config: Config) -> anyhow::Result<Router> {
                     }
                 }
             }),
-        ))
+        );
+    if let Some(dir) = static_dir {
+        // `not_found_service` makes unmatched "/"-routes fall through to
+        // the file server: "/" → index.html, assets, and 404.html for
+        // genuinely unknown paths (ServeDir's own fallback).
+        app = app.fallback_service(ServeDir::new(&dir).append_index_html_on_directories(true));
+    }
+    Ok(app)
 }

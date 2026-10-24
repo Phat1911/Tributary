@@ -1,0 +1,28 @@
+# Keep the docker build context lean and secret-free (M5 packaging).
+# Nothing here is needed to build the image — and .env* must never enter
+# an image layer.
+
+# Rust build artifacts (huge; rebuilt inside the image)
+target/
+
+# Node / pnpm
+node_modules/
+.pnpm-store/
+apps/dashboard/node_modules
+apps/dashboard/.next*
+# local static-export output (regenerated in the image)
+apps/dashboard/out
+
+# VCS + internal notes
+.git/
+STRATEGY.md
+M3-FINAL-REPORT.md
+
+# Local databases / runtime state
+*.db
+*.db-shm
+*.db-wal
+
+# Secrets — NEVER bake into the image
+.env*
+deploy/.env*

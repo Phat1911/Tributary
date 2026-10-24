@@ -4,8 +4,8 @@
 // per-member filter + sparkline.
 "use client";
 
-import { useState } from "react";
-import { useParams } from "next/navigation";
+import { Suspense, useState } from "react";
+import { useSearchParams } from "next/navigation";
 import {
   CalendarClock,
   KeyRound,
@@ -682,8 +682,20 @@ function ExpiryDialog({
 }
 
 export default function PoolDetailPage() {
-  const params = useParams<{ id: string }>();
-  const poolId = params.id;
+  return (
+    <Suspense>
+      <PoolDetail />
+    </Suspense>
+  );
+}
+
+function PoolDetail() {
+  // Static export (M5 packaging): dynamic route segments are not
+  // exportable, so the pool id rides as ?id=<pool>. The component is
+  // still client-only; useSearchParams requires a Suspense boundary,
+  // provided by the wrapper export below.
+  const searchParams = useSearchParams();
+  const poolId = searchParams.get("id") ?? "";
   const pool = useApi<PublicPool>(`/pools/${poolId}`);
   // GET /members REQUIRES ?org_id= (org-scoped) — the pool row names it.
   const orgId = pool.data?.org_id ?? null;
