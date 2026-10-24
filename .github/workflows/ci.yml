@@ -66,6 +66,23 @@ jobs:
       - name: Build dashboard
         run: pnpm -C apps/dashboard build
 
+  sdk-contract:
+    name: OpenAI SDK contract (J7)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Install the official SDKs
+        # Dev-only installs, outside package manifests on purpose (the
+        # contract is exercised with the OFFICIAL clients, not a vendored
+        # version): Python SDK into target/sdk-py, JS SDK via npm.
+        run: |
+          python3 -m pip install --target target/sdk-py openai
+          npm install openai
+      - name: Run the contract test
+        run: python3 scripts/contract_openai_sdk.py
+
   deny:
     name: Supply chain (cargo-deny)
     runs-on: ubuntu-latest
