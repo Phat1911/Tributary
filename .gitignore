@@ -1,6 +1,9 @@
 # Environment / secrets — never commit
 .env
 .env.*
+# Template ships (README step 1 copies it) — stranger-run catch
+# (2026-10-24): .env.* also hid deploy/.env.example from clones.
+!deploy/.env.example
 
 # Node / pnpm
 node_modules/
