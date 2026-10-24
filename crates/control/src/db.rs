@@ -1896,6 +1896,57 @@ pub async fn finalize_pending_action(
 /// SQLite serializes writers natively (one write lock) and has no
 /// `FOR UPDATE` — a plain read inside the transaction is equivalent.
 pub async fn demote_org_admin_guarded(db: &Db, org_id: &str, user_id: &str) -> sqlx::Result<u64> {
+    // SQLite arm (flake #3 fix, 2026-10-24): sqlx opens DEFERRED
+    // transactions — the SELECT below starts a read snapshot, and the
+    // later UPDATE must upgrade it to a write while a racing approval
+    // holds the write lock. SQLite refuses that upgrade IMMEDIATELY
+    // (BUSY_SNAPSHOT ignores busy_timeout — it is a deadlock-style
+    // refusal, not a wait), the execute bails, and the action is
+    // rejected: a mutual-demote pair could BOTH die (0,2) instead of
+    // one-wins-one-refuses. BEGIN IMMEDIATE takes the write lock BEFORE
+    // the read, so contenders queue on busy_timeout instead and the
+    // count guard arbitrates exactly as on Postgres.
+    if !db.postgres() {
+        let mut conn = db.pool().acquire().await?;
+        sqlx::query(sqlx::AssertSqlSafe("BEGIN IMMEDIATE"))
+            .execute(&mut *conn)
+            .await?;
+        // Same guarded UPDATE + same row order as the Postgres arm —
+        // one explicit SQL transaction on this held connection.
+        let lock = "SELECT id FROM users WHERE org_id = ? AND role = 'org_admin' ORDER BY id";
+        let guard_res = async {
+            sqlx::query(sqlx::AssertSqlSafe(lock))
+                .bind(org_id)
+                .fetch_all(&mut *conn)
+                .await?;
+            let sql = "UPDATE users SET role = 'member' \
+                 WHERE id = ? AND role = 'org_admin' \
+                   AND (SELECT COUNT(*) FROM users \
+                        WHERE org_id = ? AND role = 'org_admin') >= 2";
+            sqlx::query(sqlx::AssertSqlSafe(sql))
+                .bind(user_id)
+                .bind(org_id)
+                .execute(&mut *conn)
+                .await
+        }
+        .await;
+        match guard_res {
+            Ok(res) => {
+                sqlx::query(sqlx::AssertSqlSafe("COMMIT"))
+                    .execute(&mut *conn)
+                    .await?;
+                return Ok(res.rows_affected());
+            }
+            Err(e) => {
+                // Roll back (or release the implicit lock) before
+                // surfacing; failure here is best-effort.
+                let _ = sqlx::query(sqlx::AssertSqlSafe("ROLLBACK"))
+                    .execute(&mut *conn)
+                    .await;
+                return Err(e);
+            }
+        }
+    }
     let mut tx = db.pool().begin().await?;
     // ORDER BY id (round-2 deadlock fix): every contender locks the
     // bench in the SAME row order. Without it, two racing demotes could

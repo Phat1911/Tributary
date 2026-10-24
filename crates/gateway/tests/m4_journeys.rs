@@ -1337,12 +1337,14 @@ async fn j8_admin_four_eyes() {
             ),
         )
         .await;
+        // A-026: minting FOR another admin gates — B self-mints instead
+        // (own mint is routine), keeping the fixture on the public path.
         let (_, bkey) = call(
             &app,
             api(
                 "POST",
                 &format!("/api/v1/pools/{pool_id}/keys"),
-                &token_a,
+                &token_b,
                 Some(&json!({"user_id": b_id})),
             ),
         )
@@ -2004,12 +2006,13 @@ async fn adv_d33_identity_scope_matrix_and_restart() {
         )
         .await;
         let pool_id = pool["id"].as_str().unwrap().to_string();
+        // A-026: B self-mints (mint-for-another-admin gates).
         let (_, bkey) = call(
             &app,
             api(
                 "POST",
                 &format!("/api/v1/pools/{pool_id}/keys"),
-                &ta,
+                &tb,
                 Some(&json!({"user_id": b_id})),
             ),
         )
@@ -2257,12 +2260,13 @@ async fn adv_d33_race_reject_vs_execute_world_matches_row() {
         )
         .await;
         let pool_id = pool["id"].as_str().unwrap().to_string();
+        // A-026: B self-mints (mint-for-another-admin gates).
         let (_, bkey) = call(
             &app,
             api(
                 "POST",
                 &format!("/api/v1/pools/{pool_id}/keys"),
-                &ta,
+                &tb,
                 Some(&json!({"user_id": admin_ids[1]})),
             ),
         )
@@ -2656,12 +2660,13 @@ async fn adv_rotation_gated_and_carries_allowlist() {
         )
         .await;
         assert_eq!(st, StatusCode::CREATED);
+        // A-026: B self-mints (mint-for-another-admin gates).
         let (_, bkey) = call(
             &app,
             api(
                 "POST",
                 &format!("/api/v1/pools/{pool_id}/keys"),
-                &ta,
+                &tb,
                 Some(&json!({"user_id": ids[1]})),
             ),
         )
@@ -2673,7 +2678,7 @@ async fn adv_rotation_gated_and_carries_allowlist() {
             api(
                 "POST",
                 &format!("/api/v1/pools/{pool_id}/keys/{bkey_id}/allowlists"),
-                &ta,
+                &tb,
                 Some(&json!({"cidr": "10.0.0.0/8"})),
             ),
         )

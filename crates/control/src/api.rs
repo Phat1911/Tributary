@@ -335,6 +335,21 @@ pub async fn delete_org(
         .map_err(|e| ControlError::Internal(e.into()))?
         .ok_or(ControlError::NotFound)?;
     admin.ensure_org_scope(&org.id)?;
+    // A-026: org deletion is D33-sensitive in dual-admin orgs — gate
+    // BEFORE the content check so the 403 contract wins over the 409.
+    let SensitiveOutcome::Proceed {
+        solo: od_solo,
+        alert: od_alert,
+    } = gate_sensitive(
+        &state,
+        &admin,
+        &headers,
+        &org.id,
+        crate::approvals::SensitiveKind::OrgDelete,
+        &org.id,
+        serde_json::json!({ "org_id": org.id, "name": org.name }),
+    )
+    .await?;
     if db::count_pools_for_org(&state.db, &org.id)
         .await
         .unwrap_or(0)
@@ -359,7 +374,7 @@ pub async fn delete_org(
             target_id: &org.id,
             // Masked snapshot of what was removed (name/slug only).
             before: Some(serde_json::json!({ "name": org.name, "slug": org.slug })),
-            after: None,
+            after: after_with_marker(serde_json::json!({ "removed": true }), od_solo, &od_alert),
             ip: Some(&ip),
         },
     )
@@ -759,6 +774,25 @@ pub async fn issue_pool_key(
             "user does not belong to the pool's org".into(),
         ));
     }
+    // A-026: minting a credential FOR another admin is sensitive (their
+    // own self-mint stays routine — the actor owns the new secret).
+    let mut mint_gated = (false, None);
+    if member.role == "org_admin" && member.id != admin.user_id {
+        let SensitiveOutcome::Proceed { solo, alert } = gate_sensitive(
+            &state,
+            &admin,
+            &headers,
+            &pool.org_id,
+            crate::approvals::SensitiveKind::AdminKeyMint,
+            &member.id,
+            serde_json::json!({
+                "pool_id": pool.id, "user_id": member.id, "owner_email": member.email,
+            }),
+        )
+        .await?;
+        mint_gated = (solo, alert);
+    }
+    let (mint_solo, mint_alert) = mint_gated;
     let generated = generate_key();
     let key_id = new_id();
     db::insert_issued_pool_key(
@@ -789,13 +823,17 @@ pub async fn issue_pool_key(
             // Masked display prefix ONLY — the raw key is revealed to the
             // admin exactly once, in the HTTP response, and nowhere else
             // (audit sanitization invariant).
-            after: Some(serde_json::json!({
-                "pool_id": pool.id,
-                "user_id": member.id,
-                "key_prefix": generated.key_prefix,
-                "status": "active",
-                "expires_at": body.expires_at,
-            })),
+            after: after_with_marker(
+                serde_json::json!({
+                    "pool_id": pool.id,
+                    "user_id": member.id,
+                    "key_prefix": generated.key_prefix,
+                    "status": "active",
+                    "expires_at": body.expires_at,
+                }),
+                mint_solo,
+                &mint_alert,
+            ),
             ip: Some(&ip),
         },
     )
@@ -1048,6 +1086,23 @@ pub async fn revoke_provider_key(
     if row.pool_id != pool.id {
         return Err(ControlError::NotFound);
     }
+    // A-026 + director ruling 2026-10-24: provider revocation is 4-eyes
+    // ALWAYS at ≥2 admins — org-wide blast radius, NO containment
+    // exemption (suspending the flagged KEY is the proportionate solo
+    // containment). Solo orgs auto-pass with the audit marker.
+    let SensitiveOutcome::Proceed {
+        solo: pk_solo,
+        alert: pk_alert,
+    } = gate_sensitive(
+        &state,
+        &admin,
+        &headers,
+        &pool.org_id,
+        crate::approvals::SensitiveKind::ProviderKeyRevoke,
+        &key_id,
+        serde_json::json!({ "key_id": key_id, "pool_id": pool.id }),
+    )
+    .await?;
     db::revoke_provider_key(&state.db, &key_id)
         .await
         .map_err(|e| ControlError::Internal(e.into()))?;
@@ -1062,7 +1117,11 @@ pub async fn revoke_provider_key(
             target_kind: TargetKind::ProviderKey,
             target_id: &key_id,
             before: Some(serde_json::json!({ "status": row.status, "key_prefix": row.key_prefix })),
-            after: Some(serde_json::json!({ "status": "revoked", "key_prefix": row.key_prefix })),
+            after: after_with_marker(
+                serde_json::json!({ "status": "revoked", "key_prefix": row.key_prefix }),
+                pk_solo,
+                &pk_alert,
+            ),
             ip: Some(&ip),
         },
     )
@@ -1152,6 +1211,9 @@ pub struct UpsertQuotaRuleRequest {
 }
 
 /// Validates and inserts/replaces one quota rule.
+// clippy: the pool/pool_key gate arms read clearer nested than as
+// let-chains (the arms carry different error mappings).
+#[allow(clippy::collapsible_if)]
 pub async fn upsert_quota_rule(
     State(state): State<ControlState>,
     admin: AuthedAdmin,
@@ -1179,12 +1241,66 @@ pub async fn upsert_quota_rule(
         ));
     }
     // Scope: the subject must resolve inside the caller's org (host: all).
-    match db::subject_org(&state.db, &body.subject_kind, &body.subject_id).await {
-        Ok(Some(org)) => admin.ensure_org_scope(&org)?,
-        Ok(None) if admin.role == "host_admin" => {}
+    let subject_org = match db::subject_org(&state.db, &body.subject_kind, &body.subject_id).await {
+        Ok(Some(org)) => {
+            admin.ensure_org_scope(&org)?;
+            Some(org)
+        }
+        Ok(None) if admin.role == "host_admin" => None,
         Ok(None) => return Err(ControlError::NotFound),
         Err(e) => return Err(ControlError::Internal(e.into())),
+    };
+    // A-026: two classes are sensitive — a rule on ANOTHER admin's key,
+    // and a ZERO-limit rule on a POOL (that disables it org-wide).
+    let mut gated = (false, None);
+    if body.subject_kind == "pool_key" {
+        if let Some(org) = subject_org.clone() {
+            let key = db::pool_key_by_id(&state.db, &body.subject_id)
+                .await
+                .map_err(|e| ControlError::Internal(e.into()))?
+                .ok_or(ControlError::NotFound)?;
+            let SensitiveOutcome::Proceed { solo, alert } = gate_sensitive_key(
+                &state,
+                &admin,
+                &headers,
+                &org,
+                &key.id,
+                key.user_id.as_deref(),
+                crate::approvals::SensitiveKind::AdminKeyQuota,
+                serde_json::json!({
+                    "subject_kind": "pool_key", "subject_id": key.id,
+                    "period": body.period,
+                    "limit_tokens": body.limit_tokens,
+                    "limit_requests": body.limit_requests,
+                    "key_prefix": key.key_prefix,
+                }),
+            )
+            .await?;
+            gated = (solo, alert);
+        }
+    } else if body.subject_kind == "pool"
+        && (body.limit_tokens == Some(0) || body.limit_requests == Some(0))
+    {
+        if let Some(org) = subject_org.clone() {
+            let SensitiveOutcome::Proceed { solo, alert } = gate_sensitive(
+                &state,
+                &admin,
+                &headers,
+                &org,
+                crate::approvals::SensitiveKind::PoolQuotaDisable,
+                &body.subject_id,
+                serde_json::json!({
+                    "subject_kind": "pool", "subject_id": body.subject_id,
+                    "period": body.period,
+                    "limit_tokens": body.limit_tokens,
+                    "limit_requests": body.limit_requests,
+                }),
+            )
+            .await?;
+            gated = (solo, alert);
+        }
     }
+    let (gated_solo, gated_alert) = gated;
     let rule = db::QuotaRuleRow {
         id: new_id(),
         subject_kind: body.subject_kind,
@@ -1214,7 +1330,10 @@ pub async fn upsert_quota_rule(
             target_kind: TargetKind::QuotaRule,
             target_id: &rule.id,
             before: None,
-            after: serde_json::to_value(&rule).ok(),
+            // A-026: solo-auto-pass marker rides the write audit.
+            after: serde_json::to_value(&rule)
+                .ok()
+                .and_then(|v| after_with_marker(v, gated_solo, &gated_alert)),
             ip: Some(&ip),
         },
     )
@@ -1250,6 +1369,8 @@ pub async fn list_quota_rules(
 }
 
 /// Deletes one quota rule (scoped).
+// clippy: same as upsert_quota_rule — nested gate arms, documented.
+#[allow(clippy::collapsible_if)]
 pub async fn delete_quota_rule(
     State(state): State<ControlState>,
     admin: AuthedAdmin,
@@ -1269,6 +1390,58 @@ pub async fn delete_quota_rule(
     if let Some(org) = &org {
         admin.ensure_org_scope(org)?;
     }
+    // A-026: deleting a ZERO-limit rule is the sensitive class — it is the
+    // containment being lifted (admin-key rules and pool-disable rules).
+    let mut dq_gated = (false, None);
+    if rule.limit_tokens == Some(0) || rule.limit_requests == Some(0) {
+        if rule.subject_kind == "pool_key" {
+            if let Some(korg) = db::subject_org(&state.db, &rule.subject_kind, &rule.subject_id)
+                .await
+                .map_err(|e| ControlError::Internal(e.into()))?
+            {
+                let key = db::pool_key_by_id(&state.db, &rule.subject_id)
+                    .await
+                    .map_err(|e| ControlError::Internal(e.into()))?
+                    .ok_or(ControlError::NotFound)?;
+                let SensitiveOutcome::Proceed { solo, alert } = gate_sensitive_key(
+                    &state,
+                    &admin,
+                    &headers,
+                    &korg,
+                    &key.id,
+                    key.user_id.as_deref(),
+                    crate::approvals::SensitiveKind::AdminKeyQuotaDelete,
+                    serde_json::json!({
+                        "rule_id": rule.id, "subject_id": key.id,
+                        "key_prefix": key.key_prefix, "limit_tokens": rule.limit_tokens,
+                    }),
+                )
+                .await?;
+                dq_gated = (solo, alert);
+            }
+        } else if rule.subject_kind == "pool" {
+            if let Some(porg) = db::subject_org(&state.db, &rule.subject_kind, &rule.subject_id)
+                .await
+                .map_err(|e| ControlError::Internal(e.into()))?
+            {
+                let SensitiveOutcome::Proceed { solo, alert } = gate_sensitive(
+                    &state,
+                    &admin,
+                    &headers,
+                    &porg,
+                    crate::approvals::SensitiveKind::PoolQuotaRuleDelete,
+                    &rule.id,
+                    serde_json::json!({
+                        "rule_id": rule.id, "subject_id": rule.subject_id,
+                        "limit_tokens": rule.limit_tokens,
+                    }),
+                )
+                .await?;
+                dq_gated = (solo, alert);
+            }
+        }
+    }
+    let (dq_solo, dq_alert) = dq_gated;
     db::delete_quota_rule(&state.db, &id)
         .await
         .map_err(|e| ControlError::Internal(e.into()))?;
@@ -1283,7 +1456,8 @@ pub async fn delete_quota_rule(
             target_kind: TargetKind::QuotaRule,
             target_id: &rule.id,
             before: serde_json::to_value(&rule).ok(),
-            after: None,
+            // A-026: solo-auto-pass marker (zero-limit deletes only).
+            after: after_with_marker(serde_json::json!({ "removed": true }), dq_solo, &dq_alert),
             ip: Some(&ip),
         },
     )
@@ -1598,6 +1772,24 @@ pub async fn add_key_allowlist(
             body.cidr
         )));
     }
+    // A-026: allowlist edits on ANOTHER admin's key are sensitive (an
+    // admin must not quietly pre-open their own door through a peer).
+    let SensitiveOutcome::Proceed {
+        solo: al_solo,
+        alert: al_alert,
+    } = gate_sensitive_key(
+        &state,
+        &admin,
+        &headers,
+        &pool.org_id,
+        &key.id,
+        key.user_id.as_deref(),
+        crate::approvals::SensitiveKind::AdminKeyAllowlistAdd,
+        serde_json::json!({
+            "key_id": key.id, "cidr": body.cidr.trim(), "key_prefix": key.key_prefix,
+        }),
+    )
+    .await?;
     let id = new_id();
     db::insert_ip_allowlist(
         &state.db,
@@ -1623,11 +1815,15 @@ pub async fn add_key_allowlist(
             target_kind: TargetKind::PoolKey,
             target_id: &key.id,
             before: None,
-            after: Some(serde_json::json!({
-                "cidr": body.cidr.trim(),
-                "note": body.note,
-                "key_prefix": key.key_prefix,
-            })),
+            after: after_with_marker(
+                serde_json::json!({
+                    "cidr": body.cidr.trim(),
+                    "note": body.note,
+                    "key_prefix": key.key_prefix,
+                }),
+                al_solo,
+                &al_alert,
+            ),
             ip: Some(&ip),
         },
     )
@@ -1672,6 +1868,24 @@ pub async fn remove_key_allowlist(
         .iter()
         .find(|e| e.id == entry_id)
         .ok_or(ControlError::NotFound)?;
+    // A-026: symmetric gate on removal.
+    let SensitiveOutcome::Proceed {
+        solo: rm_solo,
+        alert: rm_alert,
+    } = gate_sensitive_key(
+        &state,
+        &admin,
+        &headers,
+        &pool.org_id,
+        &key.id,
+        key.user_id.as_deref(),
+        crate::approvals::SensitiveKind::AdminKeyAllowlistRemove,
+        serde_json::json!({
+            "key_id": key.id, "entry_id": entry.id,
+            "cidr": entry.cidr, "key_prefix": key.key_prefix,
+        }),
+    )
+    .await?;
     let removed = entry.clone();
     db::delete_ip_allowlist(&state.db, &entry.id)
         .await
@@ -1689,7 +1903,7 @@ pub async fn remove_key_allowlist(
             before: Some(serde_json::json!({
                 "cidr": removed.cidr, "key_prefix": key.key_prefix,
             })),
-            after: None,
+            after: after_with_marker(serde_json::json!({ "removed": true }), rm_solo, &rm_alert),
             ip: Some(&ip),
         },
     )
@@ -2638,6 +2852,37 @@ async fn request_scoped_key(
     Ok(key)
 }
 
+/// A-026: loads a pool key and verifies it is the sensitive class — owned
+/// by a DIFFERENT org admin of THIS org (own/member keys are routine).
+/// Returns the (masked key, owner email) the approvals card shows.
+async fn require_other_admin_key(
+    state: &ControlState,
+    org_id: &str,
+    admin_user_id: &str,
+    key_id: &str,
+) -> ApiResult<(db::PublicPoolKey, String)> {
+    let key = request_scoped_key(state, org_id, key_id).await?;
+    let owner_id = key
+        .user_id
+        .as_deref()
+        .ok_or_else(|| ControlError::BadRequest("org-level keys have no owner".into()))?;
+    if owner_id == admin_user_id {
+        return Err(ControlError::BadRequest(
+            "own keys are routine — use the direct endpoint".into(),
+        ));
+    }
+    let owner = db::user_by_id(&state.db, owner_id)
+        .await
+        .map_err(|e| ControlError::Internal(e.into()))?
+        .ok_or(ControlError::NotFound)?;
+    if owner.role != "org_admin" || owner.org_id.as_deref() != Some(org_id) {
+        return Err(ControlError::BadRequest(
+            "this kind applies to OTHER ADMINS' keys only".into(),
+        ));
+    }
+    Ok((key, owner.email))
+}
+
 /// POST /api/v1/orgs/{id}/pending-actions — request a D33-class action
 /// (A-022b). In dual-admin orgs this is the ONLY way sensitive writes
 /// happen: direct endpoints 403 with a pointer here. Every kind is
@@ -2812,6 +3057,246 @@ pub async fn request_pending_action(
                     )));
                 }
             }
+        }
+        // --- A-026 kinds ------------------------------------------------
+        crate::approvals::SensitiveKind::AdminKeyQuota
+        | crate::approvals::SensitiveKind::PoolQuotaDisable => {
+            // Shared shape: a quota-rule row. The SUBJECT decides the
+            // class (admin key vs pool); both freeze every column.
+            let subject_kind = params["subject_kind"].as_str().unwrap_or("pool_key");
+            let period = params["period"].as_str().unwrap_or("day");
+            let limit_tokens = params["limit_tokens"].as_i64();
+            let limit_requests = params["limit_requests"].as_i64();
+            let subject_id = params["subject_id"]
+                .as_str()
+                .or(params["pool_id"].as_str())
+                .ok_or_else(|| ControlError::BadRequest("params.subject_id is required".into()))?
+                .to_string();
+            if !matches!(subject_kind, "pool_key" | "pool") {
+                return Err(ControlError::BadRequest(
+                    "this kind accepts subject_kind pool_key or pool only".into(),
+                ));
+            }
+            if subject_kind == "pool" {
+                // Pool-subject = the disabling kind: zero limit required.
+                let pool = db::pool_by_id(&state.db, &subject_id)
+                    .await
+                    .map_err(|e| ControlError::Internal(e.into()))?
+                    .ok_or(ControlError::NotFound)?;
+                if pool.org_id != org.id {
+                    return Err(ControlError::NotFound);
+                }
+                if kind == crate::approvals::SensitiveKind::AdminKeyQuota {
+                    return Err(ControlError::BadRequest(
+                        "admin_key_quota needs subject_kind pool_key".into(),
+                    ));
+                }
+                if limit_tokens != Some(0) && limit_requests != Some(0) {
+                    return Err(ControlError::BadRequest(
+                        "pool_quota_disable requires a zero limit (that is the disable)".into(),
+                    ));
+                }
+                (
+                    subject_id.clone(),
+                    serde_json::json!({
+                        "rule_id": new_id(),
+                        "subject_kind": "pool", "subject_id": subject_id,
+                        "period": period,
+                        "limit_tokens": limit_tokens, "limit_requests": limit_requests,
+                        "limit_cost": 0,
+                        "pool_name": pool.name,
+                    }),
+                )
+            } else {
+                if kind == crate::approvals::SensitiveKind::PoolQuotaDisable {
+                    return Err(ControlError::BadRequest(
+                        "pool_quota_disable needs subject_kind pool".into(),
+                    ));
+                }
+                let (key, owner_email) =
+                    require_other_admin_key(&state, &org.id, &admin.user_id, &subject_id).await?;
+                (
+                    key.id.clone(),
+                    serde_json::json!({
+                        "rule_id": new_id(),
+                        "subject_kind": "pool_key", "subject_id": key.id,
+                        "period": period,
+                        "limit_tokens": limit_tokens, "limit_requests": limit_requests,
+                        "limit_cost": 0,
+                        "key_prefix": key.key_prefix, "owner_email": owner_email,
+                    }),
+                )
+            }
+        }
+        crate::approvals::SensitiveKind::AdminKeyQuotaDelete
+        | crate::approvals::SensitiveKind::PoolQuotaRuleDelete => {
+            let rule_id = params["rule_id"]
+                .as_str()
+                .ok_or_else(|| ControlError::BadRequest("params.rule_id is required".into()))?
+                .to_string();
+            let rule = db::quota_rule_by_id(&state.db, &rule_id)
+                .await
+                .map_err(|e| ControlError::Internal(e.into()))?
+                .ok_or(ControlError::NotFound)?;
+            if rule.limit_tokens != Some(0) && rule.limit_requests != Some(0) {
+                return Err(ControlError::BadRequest(
+                    "only ZERO-limit (containment) rules need approval to delete".into(),
+                ));
+            }
+            if rule.subject_kind == "pool_key"
+                && kind == crate::approvals::SensitiveKind::AdminKeyQuotaDelete
+            {
+                let (key, owner_email) =
+                    require_other_admin_key(&state, &org.id, &admin.user_id, &rule.subject_id)
+                        .await?;
+                (
+                    rule.id.clone(),
+                    serde_json::json!({
+                        "rule_id": rule.id, "subject_id": key.id,
+                        "key_prefix": key.key_prefix, "owner_email": owner_email,
+                        "limit_tokens": rule.limit_tokens,
+                    }),
+                )
+            } else if rule.subject_kind == "pool"
+                && kind == crate::approvals::SensitiveKind::PoolQuotaRuleDelete
+            {
+                let pool = db::pool_by_id(&state.db, &rule.subject_id)
+                    .await
+                    .map_err(|e| ControlError::Internal(e.into()))?
+                    .ok_or(ControlError::NotFound)?;
+                if pool.org_id != org.id {
+                    return Err(ControlError::NotFound);
+                }
+                (
+                    rule.id.clone(),
+                    serde_json::json!({
+                        "rule_id": rule.id, "subject_id": pool.id,
+                        "pool_name": pool.name, "limit_tokens": rule.limit_tokens,
+                    }),
+                )
+            } else {
+                return Err(ControlError::BadRequest(
+                    "rule subject does not match this kind".into(),
+                ));
+            }
+        }
+        crate::approvals::SensitiveKind::AdminKeyAllowlistAdd
+        | crate::approvals::SensitiveKind::AdminKeyAllowlistRemove => {
+            let key_id = params["key_id"]
+                .as_str()
+                .ok_or_else(|| ControlError::BadRequest("params.key_id is required".into()))?
+                .to_string();
+            let (key, owner_email) =
+                require_other_admin_key(&state, &org.id, &admin.user_id, &key_id).await?;
+            if kind == crate::approvals::SensitiveKind::AdminKeyAllowlistAdd {
+                let cidr = params["cidr"]
+                    .as_str()
+                    .ok_or_else(|| ControlError::BadRequest("params.cidr is required".into()))?;
+                if tributary_common::net::Cidr::parse(cidr).is_none() {
+                    return Err(ControlError::BadRequest(format!(
+                        "cidr '{cidr}' is not a valid IPv4/IPv6 network"
+                    )));
+                }
+                (
+                    key.id.clone(),
+                    serde_json::json!({
+                        "key_id": key.id, "cidr": cidr,
+                        "key_prefix": key.key_prefix, "owner_email": owner_email,
+                    }),
+                )
+            } else {
+                let entry_id = params["entry_id"].as_str().ok_or_else(|| {
+                    ControlError::BadRequest("params.entry_id is required".into())
+                })?;
+                let entries = db::ip_allowlists_for_key(&state.db, &key.id)
+                    .await
+                    .map_err(|e| ControlError::Internal(e.into()))?;
+                if !entries.iter().any(|e| e.id == entry_id) {
+                    return Err(ControlError::NotFound);
+                }
+                (
+                    key.id.clone(),
+                    serde_json::json!({
+                        "key_id": key.id, "entry_id": entry_id,
+                        "key_prefix": key.key_prefix, "owner_email": owner_email,
+                    }),
+                )
+            }
+        }
+        crate::approvals::SensitiveKind::AdminKeyMint => {
+            let pool_id = params["pool_id"]
+                .as_str()
+                .ok_or_else(|| ControlError::BadRequest("params.pool_id is required".into()))?;
+            let user_id = params["user_id"]
+                .as_str()
+                .ok_or_else(|| ControlError::BadRequest("params.user_id is required".into()))?;
+            let pool = db::pool_by_id(&state.db, pool_id)
+                .await
+                .map_err(|e| ControlError::Internal(e.into()))?
+                .ok_or(ControlError::NotFound)?;
+            if pool.org_id != org.id {
+                return Err(ControlError::NotFound);
+            }
+            let target = db::user_by_id(&state.db, user_id)
+                .await
+                .map_err(|e| ControlError::Internal(e.into()))?
+                .ok_or(ControlError::NotFound)?;
+            if target.role != "org_admin"
+                || target.org_id.as_deref() != Some(org.id.as_str())
+                || target.id == admin.user_id
+            {
+                return Err(ControlError::BadRequest(
+                    "mint targets another admin of this org only".into(),
+                ));
+            }
+            (
+                target.id.clone(),
+                serde_json::json!({
+                    "pool_id": pool.id, "user_id": target.id,
+                    "owner_email": target.email,
+                    "expires_at": params.get("expires_at").cloned()
+                        .unwrap_or(serde_json::Value::Null),
+                }),
+            )
+        }
+        crate::approvals::SensitiveKind::ProviderKeyRevoke => {
+            // ALWAYS 4-eyes at ≥2 admins (director ruling 2026-10-24):
+            // no containment exemption, no flag pretext.
+            let key_id = params["key_id"]
+                .as_str()
+                .ok_or_else(|| ControlError::BadRequest("params.key_id is required".into()))?;
+            let pool_id = params["pool_id"]
+                .as_str()
+                .ok_or_else(|| ControlError::BadRequest("params.pool_id is required".into()))?;
+            let pool = db::pool_by_id(&state.db, pool_id)
+                .await
+                .map_err(|e| ControlError::Internal(e.into()))?
+                .ok_or(ControlError::NotFound)?;
+            if pool.org_id != org.id {
+                return Err(ControlError::NotFound);
+            }
+            (
+                key_id.to_string(),
+                serde_json::json!({ "key_id": key_id, "pool_id": pool.id }),
+            )
+        }
+        crate::approvals::SensitiveKind::OrgDelete => {
+            // Mirror the direct endpoint's contract: pool-bearing orgs
+            // cannot be deleted — refuse at REQUEST time too (the
+            // approver would only see an un-executable action).
+            if db::count_pools_for_org(&state.db, &org.id)
+                .await
+                .unwrap_or(0)
+                > 0
+            {
+                return Err(ControlError::Conflict(
+                    "org still has pools — disable and migrate them first".into(),
+                ));
+            }
+            (
+                org.id.clone(),
+                serde_json::json!({ "org_id": org.id, "name": org.name }),
+            )
         }
     };
 

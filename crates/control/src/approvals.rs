@@ -41,6 +41,24 @@ pub enum SensitiveKind {
     OrgPolicy,
     /// Disable (delete) a pool.
     PoolDisable,
+    /// A-026: quota rule whose subject is ANOTHER admin's key.
+    AdminKeyQuota,
+    /// A-026: deleting a ZERO-limit (containment) rule on an admin key.
+    AdminKeyQuotaDelete,
+    /// A-026: allowlist edits on another admin's key.
+    AdminKeyAllowlistAdd,
+    AdminKeyAllowlistRemove,
+    /// A-026: minting a key FOR another admin (reveal-once at execute).
+    AdminKeyMint,
+    /// A-026: a zero-limit rule on the POOL (disables it org-wide).
+    PoolQuotaDisable,
+    /// A-026: deleting such a disabling rule (re-enables the pool).
+    PoolQuotaRuleDelete,
+    /// A-026: provider-key revocation — 4-eyes ALWAYS (director ruling
+    /// 2026-10-24: no containment exemption; org-wide blast radius).
+    ProviderKeyRevoke,
+    /// A-026: org deletion.
+    OrgDelete,
 }
 
 impl SensitiveKind {
@@ -52,6 +70,15 @@ impl SensitiveKind {
             SensitiveKind::AdminKeyRotate => "admin_key_rotate",
             SensitiveKind::OrgPolicy => "org_policy",
             SensitiveKind::PoolDisable => "pool_disable",
+            SensitiveKind::AdminKeyQuota => "admin_key_quota",
+            SensitiveKind::AdminKeyQuotaDelete => "admin_key_quota_delete",
+            SensitiveKind::AdminKeyAllowlistAdd => "admin_key_allowlist_add",
+            SensitiveKind::AdminKeyAllowlistRemove => "admin_key_allowlist_remove",
+            SensitiveKind::AdminKeyMint => "admin_key_mint",
+            SensitiveKind::PoolQuotaDisable => "pool_quota_disable",
+            SensitiveKind::PoolQuotaRuleDelete => "pool_quota_rule_delete",
+            SensitiveKind::ProviderKeyRevoke => "provider_key_revoke",
+            SensitiveKind::OrgDelete => "org_delete",
         }
     }
 
@@ -64,6 +91,15 @@ impl SensitiveKind {
             SensitiveKind::AdminKeyRotate => "Rotate admin key",
             SensitiveKind::OrgPolicy => "Org policy change",
             SensitiveKind::PoolDisable => "Disable pool",
+            SensitiveKind::AdminKeyQuota => "Set quota on admin key",
+            SensitiveKind::AdminKeyQuotaDelete => "Remove containment quota",
+            SensitiveKind::AdminKeyAllowlistAdd => "Allowlist CIDR on admin key",
+            SensitiveKind::AdminKeyAllowlistRemove => "Remove allowlist CIDR on admin key",
+            SensitiveKind::AdminKeyMint => "Mint admin key",
+            SensitiveKind::PoolQuotaDisable => "Disable pool by quota",
+            SensitiveKind::PoolQuotaRuleDelete => "Remove pool-disabling quota",
+            SensitiveKind::ProviderKeyRevoke => "Revoke provider key",
+            SensitiveKind::OrgDelete => "Delete org",
         }
     }
 
@@ -75,6 +111,15 @@ impl SensitiveKind {
             "admin_key_rotate" => Some(SensitiveKind::AdminKeyRotate),
             "org_policy" => Some(SensitiveKind::OrgPolicy),
             "pool_disable" => Some(SensitiveKind::PoolDisable),
+            "admin_key_quota" => Some(SensitiveKind::AdminKeyQuota),
+            "admin_key_quota_delete" => Some(SensitiveKind::AdminKeyQuotaDelete),
+            "admin_key_allowlist_add" => Some(SensitiveKind::AdminKeyAllowlistAdd),
+            "admin_key_allowlist_remove" => Some(SensitiveKind::AdminKeyAllowlistRemove),
+            "admin_key_mint" => Some(SensitiveKind::AdminKeyMint),
+            "pool_quota_disable" => Some(SensitiveKind::PoolQuotaDisable),
+            "pool_quota_rule_delete" => Some(SensitiveKind::PoolQuotaRuleDelete),
+            "provider_key_revoke" => Some(SensitiveKind::ProviderKeyRevoke),
+            "org_delete" => Some(SensitiveKind::OrgDelete),
             _ => None,
         }
     }
@@ -447,6 +492,120 @@ pub async fn execute(db: &Db, action: &db::PendingActionRow, now: i64) -> anyhow
                 reveal: None,
             })
         }
+        // A-026: quota-rule kinds share one row shape — the payload froze
+        // every column at request time, so execution is a faithful
+        // upsert/delete of exactly what the approver saw.
+        Some(SensitiveKind::AdminKeyQuota) | Some(SensitiveKind::PoolQuotaDisable) => {
+            let rule = quota_rule_from_payload(&payload, now);
+            db::upsert_quota_rule(db, &rule).await?;
+            Ok(Executed {
+                summary: json!({
+                    "rule_id": rule.id,
+                    "subject_kind": rule.subject_kind,
+                    "subject_id": rule.subject_id,
+                    "period": rule.period,
+                    "limit_tokens": rule.limit_tokens,
+                    "limit_requests": rule.limit_requests,
+                }),
+                reveal: None,
+            })
+        }
+        Some(SensitiveKind::AdminKeyQuotaDelete) | Some(SensitiveKind::PoolQuotaRuleDelete) => {
+            let rule_id = payload["rule_id"].as_str().unwrap_or(&action.target_id);
+            let affected = db::delete_quota_rule(db, rule_id).await?;
+            if affected == 0 {
+                anyhow::bail!("refused: quota rule already gone");
+            }
+            Ok(Executed {
+                summary: json!({ "rule_id": rule_id, "removed": true }),
+                reveal: None,
+            })
+        }
+        Some(SensitiveKind::AdminKeyAllowlistAdd) => {
+            let key_id = payload["key_id"].as_str().unwrap_or(&action.target_id);
+            let cidr = payload["cidr"].as_str().unwrap_or_default();
+            let id = tributary_common::db::new_id();
+            db::insert_ip_allowlist(db, &id, key_id, cidr, None, now).await?;
+            Ok(Executed {
+                summary: json!({ "entry_id": id, "key_id": key_id, "cidr": cidr }),
+                reveal: None,
+            })
+        }
+        Some(SensitiveKind::AdminKeyAllowlistRemove) => {
+            let entry_id = payload["entry_id"].as_str().unwrap_or(&action.target_id);
+            let affected = db::delete_ip_allowlist(db, entry_id).await?;
+            if affected == 0 {
+                anyhow::bail!("refused: allowlist entry already gone");
+            }
+            Ok(Executed {
+                summary: json!({ "entry_id": entry_id, "removed": true }),
+                reveal: None,
+            })
+        }
+        Some(SensitiveKind::AdminKeyMint) => {
+            // Nothing was generated at request time; execution mints and
+            // reveals ONCE to the approver (the rotate contract).
+            let user_id = payload["user_id"]
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("mint payload lost its owner"))?;
+            let generated = tributary_common::keys::generate_key();
+            let new_id = tributary_common::db::new_id();
+            db::insert_issued_pool_key(
+                db,
+                &db::NewPoolKey {
+                    id: new_id.clone(),
+                    pool_id: payload["pool_id"].as_str().unwrap_or_default().to_string(),
+                    key_hash: generated.key_hash,
+                    key_prefix: generated.key_prefix.clone(),
+                    user_id: user_id.to_string(),
+                    expires_at: payload["expires_at"].as_i64(),
+                    created_at: now,
+                },
+            )
+            .await?;
+            Ok(Executed {
+                summary: json!({
+                    "key_id": new_id,
+                    "key_prefix": generated.key_prefix,
+                    "user_id": user_id,
+                    "status": "active",
+                }),
+                reveal: Some(json!({
+                    "key_id": new_id,
+                    "raw": generated.raw,
+                    "key_prefix": generated.key_prefix,
+                })),
+            })
+        }
+        Some(SensitiveKind::ProviderKeyRevoke) => {
+            // 4-eyes ALWAYS (director ruling 2026-10-24): no containment
+            // exemption for provider keys — org-wide blast radius.
+            let key_id = payload["key_id"].as_str().unwrap_or(&action.target_id);
+            let affected = db::revoke_provider_key(db, key_id).await?;
+            if affected == 0 {
+                anyhow::bail!("refused: provider key already revoked or gone");
+            }
+            Ok(Executed {
+                summary: json!({ "provider_key_id": key_id, "status": "revoked" }),
+                reveal: None,
+            })
+        }
+        Some(SensitiveKind::OrgDelete) => {
+            // Mirror the direct endpoint's contract: a pool-bearing org
+            // refuses deletion (approve → rejected, nothing removed).
+            if db::count_pools_for_org(db, &action.org_id)
+                .await
+                .unwrap_or(0)
+                > 0
+            {
+                anyhow::bail!("refused: org still has pools — disable and migrate first");
+            }
+            db::delete_org(db, &action.org_id).await?;
+            Ok(Executed {
+                summary: json!({ "org_id": action.org_id, "removed": true }),
+                reveal: None,
+            })
+        }
         None => anyhow::bail!("unknown pending action kind {}", action.kind),
     }
 }
@@ -487,6 +646,29 @@ fn classifier_row_from_payload(payload: &Value) -> db::ClassifierConfigRow {
         // A-028: the epoch the REQUESTER observed — carried through so the
         // execute-side guard can compare it with the present row.
         config_epoch: payload["config_epoch"].as_i64().unwrap_or(-1),
+    }
+}
+
+/// Rebuilds a `QuotaRuleRow` from the frozen payload (A-026) — the same
+/// field-by-field explicitness as [`classifier_row_from_payload`]: the
+/// payload is OUR construction, and a tampered field must not invent
+/// columns.
+fn quota_rule_from_payload(payload: &Value, now: i64) -> db::QuotaRuleRow {
+    db::QuotaRuleRow {
+        id: payload["rule_id"].as_str().unwrap_or_default().to_string(),
+        subject_kind: payload["subject_kind"]
+            .as_str()
+            .unwrap_or("pool_key")
+            .to_string(),
+        subject_id: payload["subject_id"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string(),
+        period: payload["period"].as_str().unwrap_or("day").to_string(),
+        limit_tokens: payload["limit_tokens"].as_i64(),
+        limit_requests: payload["limit_requests"].as_i64(),
+        limit_cost: payload["limit_cost"].as_i64().unwrap_or(0),
+        created_at: now,
     }
 }
 
