@@ -22,10 +22,10 @@ services:
     container_name: tributary
 
     ports:
-      # host : container. Host port is 8111 — NEVER 8080 on the host:
-      # this machine already runs the "photcot-backend" project on host
-      # 8080, and a port clash fails the container at start. Change the
-      # LEFT side only; the container always listens on 8080.
+      # host : container. Host 8111 (not 8080): 8080 is the most commonly
+      # occupied port on dev machines and homelabs, and a clash fails the
+      # container at start. Change the LEFT side only; the container
+      # always listens on 8080.
       - "8111:8080"
 
     # Secrets come from the gitignored repo-root .env — never baked into
