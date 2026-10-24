@@ -117,13 +117,28 @@ async fn j5_stale_classifier_approval_arms_nothing() {
         let (org_id, token2, _token3) = dual_admin_org(&app, &token).await;
         let align = spawn_align_mock().await;
 
-        // First configure (observed epoch 0 — no row yet) defers.
-        let (status, p1) = send(
+        // A-022b: in a dual-admin org the direct PUT is not a write path
+        // — it must refuse with 403 approval_required first.
+        let (status, body) = send(
             &app,
             put_classifier(&org_id, &token, &classifier_body(&align, "purpose v1")),
         )
         .await;
-        assert_eq!(status, StatusCode::ACCEPTED, "{}: {p1}", db.name);
+        assert_eq!(
+            status,
+            StatusCode::FORBIDDEN,
+            "{}: direct PUT must 403 in dual-admin orgs: {body}",
+            db.name
+        );
+
+        // First configure (observed epoch 0 — no row yet) via the request
+        // endpoint: 201 + pending row.
+        let (status, p1) = send(
+            &app,
+            request_org_policy(&org_id, &token, &classifier_body(&align, "purpose v1")),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{}: {p1}", db.name);
 
         // Approve #1: the row appears at epoch 1.
         let (status, body) = send(
@@ -141,16 +156,18 @@ async fn j5_stale_classifier_approval_arms_nothing() {
         assert_eq!(status, StatusCode::OK, "{}: approve #1: {body}", db.name);
 
         // Two configures against the SAME observed epoch (1).
-        let (_, p2) = send(
+        let (status, p2) = send(
             &app,
-            put_classifier(&org_id, &token, &classifier_body(&align, "purpose v2")),
+            request_org_policy(&org_id, &token, &classifier_body(&align, "purpose v2")),
         )
         .await;
-        let (_, p3) = send(
+        assert_eq!(status, StatusCode::CREATED, "{}: {p2}", db.name);
+        let (status, p3) = send(
             &app,
-            put_classifier(&org_id, &token, &classifier_body(&align, "purpose v3")),
+            request_org_policy(&org_id, &token, &classifier_body(&align, "purpose v3")),
         )
         .await;
+        assert_eq!(status, StatusCode::CREATED, "{}: {p3}", db.name);
         assert_eq!(p2["status"], "pending", "{}", db.name);
         assert_eq!(p3["status"], "pending", "{}", db.name);
 
@@ -225,11 +242,12 @@ async fn j5_stale_classifier_approval_arms_nothing() {
         );
 
         // Recovery: a FRESH request observes epoch 2 and executes cleanly.
-        let (_, p4) = send(
+        let (status, p4) = send(
             &app,
-            put_classifier(&org_id, &token, &classifier_body(&align, "purpose v4")),
+            request_org_policy(&org_id, &token, &classifier_body(&align, "purpose v4")),
         )
         .await;
+        assert_eq!(status, StatusCode::CREATED, "{}: {p4}", db.name);
         let (status, body) = send(
             &app,
             post_json(
@@ -336,6 +354,33 @@ async fn j5_min_shadow_age_gates_go_live() {
         .await;
         assert_eq!(view["auto_block_live"], true, "{}: {view}", db.name);
     }
+}
+
+/// POST /pending-actions {kind: org_policy, params: {policy_action:
+/// configure, config}} — the A-022b request path for classifier config.
+fn request_org_policy(
+    org_id: &str,
+    token: &str,
+    config: &Value,
+) -> axum::http::Request<axum::body::Body> {
+    use axum::body::Body;
+    use axum::http::Request;
+    Request::builder()
+        .method("POST")
+        .uri(format!("/api/v1/orgs/{org_id}/pending-actions"))
+        .header("content-type", "application/json")
+        .header("authorization", format!("Bearer {token}"))
+        .body(Body::from(
+            json!({
+                "kind": "org_policy",
+                "params": {
+                    "policy_action": "configure",
+                    "config": config,
+                }
+            })
+            .to_string(),
+        ))
+        .unwrap()
 }
 
 /// PUT /classifier (an actual PUT, unlike the harness's post helpers).

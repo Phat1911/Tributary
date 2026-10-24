@@ -154,6 +154,13 @@ async fn two_pools_isolated_token_quota_exhaustion_never_blocks_the_other() {
 
         // Member-of-A token quota: one mock call = 18 tokens (11+7), so a
         // limit of 18 exhausts exactly after the first request.
+        // A-020 note: admission now RESERVES pessimistically (prompt
+        // estimate + declared completion cap, default 256) — an unbounded
+        // request would estimate ~257 tokens and never fit an 18-token
+        // cap. Declaring `max_tokens: 17` makes the estimate 1+17=18 ≤ 18,
+        // so the FIRST request is admitted, metered at the mock's actual
+        // 18, and everything after denies — the isolation property this
+        // test pins is unchanged.
         let (status, _) = call(
             &app,
             api(
@@ -172,7 +179,12 @@ async fn two_pools_isolated_token_quota_exhaustion_never_blocks_the_other() {
         assert_eq!(status, StatusCode::CREATED, "{}", test_db.name);
 
         // A #1: served and metered.
-        let (status, body) = call(&app, chat_request(Some(&a.key_raw), &chat_body())).await;
+        let bounded = serde_json::json!({
+            "model": "m-test",
+            "max_tokens": 17,
+            "messages": [{"role": "user", "content": "hi"}],
+        });
+        let (status, body) = call(&app, chat_request(Some(&a.key_raw), &bounded)).await;
         assert_eq!(status, StatusCode::OK, "{}: {body}", test_db.name);
 
         // A #2: 429 BEFORE upstream (rule 4) with a reset hint.

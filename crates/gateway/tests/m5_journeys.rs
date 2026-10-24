@@ -94,17 +94,20 @@ where
 /// Bootstrap host admin (direct create — the product's bootstrap path,
 /// pre-login by design) + session login.
 async fn bootstrap_admin_and_login(pool: &db::Db, app: &axum::Router) -> String {
-    let email = format!("root-{}@tributary.dev", db::new_id());
-    tributary_control::create_host_admin(pool, &email, "hunter2hunter2")
-        .await
-        .expect("bootstrap");
+    // SHARED host admin (m4's pattern): tests in this binary run in
+    // parallel against the same PG database, and the product's
+    // bootstrap-once guard refuses a second host — so first-winner-wins
+    // and every test logs in as the same host. Orgs/pools/keys stay
+    // unique per test; the host identity is deliberately shared.
+    let _ =
+        tributary_control::create_host_admin(pool, "root@tributary.dev", "hunter2hunter2").await;
     let (status, body) = call(
         app,
         api(
             "POST",
             "/api/v1/auth/login",
             "",
-            Some(&json!({"email": email, "password": "hunter2hunter2"})),
+            Some(&json!({"email": "root@tributary.dev", "password": "hunter2hunter2"})),
         ),
     )
     .await;

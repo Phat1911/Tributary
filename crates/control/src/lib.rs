@@ -185,7 +185,9 @@ pub fn router(state: ControlState) -> Router {
         // D33 admin four-eyes: the pending-action list + decision API.
         .route(
             "/api/v1/orgs/{id}/pending-actions",
-            get(api::list_pending_actions),
+            get(api::list_pending_actions)
+                // A-022b: requesting a sensitive action (dual-admin orgs).
+                .post(api::request_pending_action),
         )
         .route(
             "/api/v1/orgs/{id}/pending-actions/{action_id}/approve",

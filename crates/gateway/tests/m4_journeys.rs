@@ -69,16 +69,28 @@ async fn call_raw(app: &axum::Router, req: Request<Body>) -> (StatusCode, axum::
 }
 
 /// A chat request with a chosen key, optional XFF, and optional model.
-fn chat_req(key: &str, xff: Option<&str>, body: &Value) -> Request<Body> {
-    let mut builder = Request::builder()
+fn chat_req(key: &str, ip: Option<&str>, body: &Value) -> Request<Body> {
+    let builder = Request::builder()
         .method("POST")
         .uri("/v1/chat/completions")
         .header(header::AUTHORIZATION, format!("Bearer {key}"))
         .header(header::CONTENT_TYPE, "application/json");
-    if let Some(xff) = xff {
-        builder = builder.header("x-forwarded-for", xff);
+    let mut req = builder.body(Body::from(body.to_string())).unwrap();
+    // A-019: client IPs come from the TRANSPORT SOCKET — XFF is only
+    // honored when a trusted proxy sent it, so tests can no longer
+    // simulate distinct IPs by typing header text. Attach a fake socket
+    // instead (the extension the resolver actually reads in production).
+    if let Some(ip) = ip {
+        // v6 needs brackets when a port is appended ([…]:port), v4 does
+        // not — IpAddr → SocketAddr handles both without string surgery:
+        let addr = std::net::SocketAddr::new(
+            ip.parse().expect("test IP must be a bare IP literal"),
+            54321,
+        );
+        req.extensions_mut()
+            .insert(axum::extract::ConnectInfo(addr));
     }
-    builder.body(Body::from(body.to_string())).unwrap()
+    req
 }
 
 /// Polls an async predicate (detection writes, classifier scoring) until it
@@ -795,7 +807,13 @@ async fn j5_quota_cap_audited() {
         .await;
         assert_eq!(status, StatusCode::CREATED);
 
-        let body = json!({"model": "m-test", "messages": [{"role": "user", "content": "hi"}]});
+        // A-020: declare max_tokens so the first request's RESERVATION
+        // (1 + declared cap) fits the 10-token cap — unbounded requests
+        // estimate ~257 and would deny on admission, not on the cap.
+        let body = json!({
+            "model": "m-test", "max_tokens": 8,
+            "messages": [{"role": "user", "content": "hi"}]
+        });
         // First request passes the check (0 used), burns 18 tokens.
         let (status, _) = call(&app, chat_req(&stack.key_raw, None, &body)).await;
         assert_eq!(status, StatusCode::OK);
@@ -1333,8 +1351,10 @@ async fn j8_admin_four_eyes() {
         let bkey_raw = bkey["raw"].as_str().unwrap().to_string();
 
         // -- LEG 1: A expires B's key → PENDING, nothing executes. ------
+        // (A-022b/M5 contract: the direct endpoint REFUSES with 403
+        // approval_required; the request moves to the queue endpoint.)
         let expires_at = db::now_ms() + 3 * 24 * 3600 * 1000;
-        let (status, pending) = call(
+        let (status, refusal) = call(
             &app,
             api(
                 "POST",
@@ -1344,7 +1364,33 @@ async fn j8_admin_four_eyes() {
             ),
         )
         .await;
-        assert_eq!(status, StatusCode::ACCEPTED, "sensitive action defers");
+        assert_eq!(
+            status,
+            StatusCode::FORBIDDEN,
+            "direct expiry must refuse in a dual-admin org: {refusal}"
+        );
+        assert_eq!(
+            refusal["error"]["code"], "approval_required",
+            "the 403 names itself: {refusal}"
+        );
+        let (status, pending) = call(
+            &app,
+            api(
+                "POST",
+                &format!("/api/v1/orgs/{org_id}/pending-actions"),
+                &token_a,
+                Some(&json!({
+                    "kind": "admin_key_expiry",
+                    "params": {"key_id": bkey_id, "expires_at": expires_at},
+                })),
+            ),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::CREATED,
+            "sensitive action requested via the queue: {pending}"
+        );
         assert_eq!(pending["kind"], "admin_key_expiry");
         assert_eq!(pending["status"], "pending");
         // The approvals card must NAME the target (founder UX report
@@ -1500,8 +1546,9 @@ async fn j8_admin_four_eyes() {
             "mode": "auto_block",
             "acknowledge_auto_block": true,
         });
-        // A's request → deferred (202)…
-        let (status, p_cfg) = call(
+        // A's request: the direct PUT refuses (A-022b), so A files it via
+        // the queue…
+        let (status, refusal) = call(
             &app,
             api(
                 "PUT",
@@ -1511,7 +1558,29 @@ async fn j8_admin_four_eyes() {
             ),
         )
         .await;
-        assert_eq!(status, StatusCode::ACCEPTED, "org policy defers too");
+        assert_eq!(
+            status,
+            StatusCode::FORBIDDEN,
+            "policy PUT refuses in dual-admin org: {refusal}"
+        );
+        let (status, p_cfg) = call(
+            &app,
+            api(
+                "POST",
+                &format!("/api/v1/orgs/{org_id}/pending-actions"),
+                &token_a,
+                Some(&json!({
+                    "kind": "org_policy",
+                    "params": {"policy_action": "configure", "config": cfg},
+                })),
+            ),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::CREATED,
+            "org policy requested via the queue: {p_cfg}"
+        );
         let cfg_action = p_cfg["id"].as_str().unwrap().to_string();
         // …B approves → configured (probe already ran at request time).
         let (status, _) = call(
@@ -1538,8 +1607,9 @@ async fn j8_admin_four_eyes() {
         assert_eq!(live_cfg["mode"], "auto_block");
         assert_eq!(live_cfg["auto_block_live"], false, "shadow first (D28)");
 
-        // Go-live is itself auto-block config → defers, then approves.
-        let (status, p_live) = call(
+        // Go-live is itself auto-block config → refuses directly, files
+        // via the queue, then approves.
+        let (status, refusal) = call(
             &app,
             api(
                 "POST",
@@ -1549,7 +1619,29 @@ async fn j8_admin_four_eyes() {
             ),
         )
         .await;
-        assert_eq!(status, StatusCode::ACCEPTED, "go-live is sensitive policy");
+        assert_eq!(
+            status,
+            StatusCode::FORBIDDEN,
+            "go-live refuses in dual-admin org: {refusal}"
+        );
+        let (status, p_live) = call(
+            &app,
+            api(
+                "POST",
+                &format!("/api/v1/orgs/{org_id}/pending-actions"),
+                &token_a,
+                Some(&json!({
+                    "kind": "org_policy",
+                    "params": {"policy_action": "go_live"},
+                })),
+            ),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::CREATED,
+            "go-live requested via the queue: {p_live}"
+        );
         let live_action = p_live["id"].as_str().unwrap().to_string();
         let (status, _) = call(
             &app,
@@ -1925,7 +2017,7 @@ async fn adv_d33_identity_scope_matrix_and_restart() {
         let bkey_id = bkey["id"].as_str().unwrap().to_string();
 
         let at = db::now_ms() + 86_400_000;
-        let (st, pend) = call(
+        let (st, _) = call(
             &app,
             api(
                 "POST",
@@ -1935,7 +2027,21 @@ async fn adv_d33_identity_scope_matrix_and_restart() {
             ),
         )
         .await;
-        assert_eq!(st, StatusCode::ACCEPTED);
+        assert_eq!(st, StatusCode::FORBIDDEN, "direct expiry refuses");
+        let (st, pend) = call(
+            &app,
+            api(
+                "POST",
+                &format!("/api/v1/orgs/{org1}/pending-actions"),
+                &ta,
+                Some(&json!({
+                    "kind": "admin_key_expiry",
+                    "params": {"key_id": bkey_id, "expires_at": at},
+                })),
+            ),
+        )
+        .await;
+        assert_eq!(st, StatusCode::CREATED, "queued via request endpoint");
         let action = pend["id"].as_str().unwrap().to_string();
 
         // MEMBER approve → 403 (extractor, before any handler logic).
@@ -2169,13 +2275,16 @@ async fn adv_d33_race_reject_vs_execute_world_matches_row() {
                 &app,
                 api(
                     "POST",
-                    &format!("/api/v1/pools/{pool_id}/keys/{bkey_id}/expiry"),
+                    &format!("/api/v1/orgs/{org_id}/pending-actions"),
                     &ta,
-                    Some(&json!({"expires_at": at})),
+                    Some(&json!({
+                        "kind": "admin_key_expiry",
+                        "params": {"key_id": bkey_id, "expires_at": at},
+                    })),
                 ),
             )
             .await;
-            assert_eq!(st, StatusCode::ACCEPTED);
+            assert_eq!(st, StatusCode::CREATED);
             let action = pend["id"].as_str().unwrap().to_string();
 
             let app1 = app.clone();
@@ -2305,29 +2414,36 @@ async fn adv_d33_mutual_demote_never_leaves_org_adminless() {
             let ta = member_login(&app, &emails[0]).await;
             let tb = member_login(&app, &emails[1]).await;
 
-            // Cross requests: A demotes B, B demotes A — both legal rows.
+            // Cross requests: A demotes B, B demotes A — both legal rows
+            // (filed via the A-022b queue endpoint; direct refuses).
             let (st, p1) = call(
                 &app,
                 api(
                     "POST",
-                    &format!("/api/v1/orgs/{org_id}/admins/{}/demote", ids[1]),
+                    &format!("/api/v1/orgs/{org_id}/pending-actions"),
                     &ta,
-                    None,
+                    Some(&json!({
+                        "kind": "admin_demote",
+                        "params": {"user_id": ids[1]},
+                    })),
                 ),
             )
             .await;
-            assert_eq!(st, StatusCode::ACCEPTED);
+            assert_eq!(st, StatusCode::CREATED);
             let (st, p2) = call(
                 &app,
                 api(
                     "POST",
-                    &format!("/api/v1/orgs/{org_id}/admins/{}/demote", ids[0]),
+                    &format!("/api/v1/orgs/{org_id}/pending-actions"),
                     &tb,
-                    None,
+                    Some(&json!({
+                        "kind": "admin_demote",
+                        "params": {"user_id": ids[0]},
+                    })),
                 ),
             )
             .await;
-            assert_eq!(st, StatusCode::ACCEPTED);
+            assert_eq!(st, StatusCode::CREATED);
             let d1 = p1["id"].as_str().unwrap().to_string();
             let d2 = p2["id"].as_str().unwrap().to_string();
 
@@ -2564,8 +2680,9 @@ async fn adv_rotation_gated_and_carries_allowlist() {
         .await;
         assert_eq!(st, StatusCode::CREATED);
 
-        // A rotating B's key: DEFERS, nothing disclosed, nothing executed.
-        let (st, pend) = call(
+        // A rotating B's key: direct refuses (A-022b), queue request
+        // creates the action — nothing disclosed, nothing executed.
+        let (st, refusal) = call(
             &app,
             api(
                 "POST",
@@ -2575,7 +2692,29 @@ async fn adv_rotation_gated_and_carries_allowlist() {
             ),
         )
         .await;
-        assert_eq!(st, StatusCode::ACCEPTED, "rotation of an admin key defers");
+        assert_eq!(
+            st,
+            StatusCode::FORBIDDEN,
+            "direct rotation refuses: {refusal}"
+        );
+        let (st, pend) = call(
+            &app,
+            api(
+                "POST",
+                &format!("/api/v1/orgs/{org_id}/pending-actions"),
+                &ta,
+                Some(&json!({
+                    "kind": "admin_key_rotate",
+                    "params": {"key_id": bkey_id},
+                })),
+            ),
+        )
+        .await;
+        assert_eq!(
+            st,
+            StatusCode::CREATED,
+            "rotation requested via the queue: {pend}"
+        );
         assert_eq!(pend["kind"], "admin_key_rotate");
         assert!(
             pend.get("raw").is_none() && !pend.to_string().contains(&bkey_raw),
@@ -2752,18 +2891,21 @@ async fn adv_rotation_gated_and_carries_allowlist() {
         .await;
         assert_eq!(st, StatusCode::CREATED, "B self-rotates routinely");
         let b2_id = r2["id"].as_str().unwrap().to_string();
-        // A requests rotating B's (new) key → defers.
+        // A requests rotating B's (new) key → via the queue (A-022b).
         let (st, p3) = call(
             &app,
             api(
                 "POST",
-                &format!("/api/v1/pools/{}/keys/{}/rotate", pool_id, b2_id),
+                &format!("/api/v1/orgs/{org_id}/pending-actions"),
                 &ta,
-                None,
+                Some(&json!({
+                    "kind": "admin_key_rotate",
+                    "params": {"key_id": b2_id},
+                })),
             ),
         )
         .await;
-        assert_eq!(st, StatusCode::ACCEPTED);
+        assert_eq!(st, StatusCode::CREATED);
         let action3 = p3["id"].as_str().unwrap().to_string();
         // B kills their own key BEFORE approval: self-revoke via the
         // member self-service surface.

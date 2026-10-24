@@ -250,11 +250,12 @@ impl QuotaEngine {
                     let limit = rule
                         .limit_tokens
                         .unwrap_or_else(|| rule.limit_requests.unwrap_or(0));
-                    return Ok(Err(deny_decision(
+                    return Ok(Err(deny_reservation_decision(
                         limit,
                         period,
                         reset,
                         rule.limit_tokens.is_some(),
+                        estimate_tokens,
                     )));
                 }
             }
@@ -340,6 +341,38 @@ fn deny_decision(limit: i64, period: Period, reset_ms: i64, tokens: bool) -> Dec
             "Limit reached: {limit} {unit} per {}. Resets at {human}.",
             period.as_str()
         ),
+        reset_at_ms: reset_ms,
+    }
+}
+
+/// The A-020 reserve-path Deny — deliberately a DIFFERENT message from
+/// [`deny_decision`] (director note 2026-10-24): a request refused because
+/// its ESTIMATE cannot fit the remaining window is not the same event as a
+/// cap exhausted on ACTUAL usage, and admins debugging tiny caps must be
+/// able to tell them apart at a glance.
+fn deny_reservation_decision(
+    limit: i64,
+    period: Period,
+    reset_ms: i64,
+    tokens: bool,
+    estimate_tokens: i64,
+) -> Decision {
+    let human = tributary_common::time::rfc3339_utc(reset_ms);
+    let message = if tokens {
+        format!(
+            "Estimated {estimate_tokens} tokens (prompt chars/4 + max_completion_tokens, \
+             default 256) exceeds the remaining budget of the {limit}-token {} window. \
+             Declare max_tokens to lower the estimate. Resets at {human}.",
+            period.as_str()
+        )
+    } else {
+        format!(
+            "Request would exceed the {limit}-request {} window. Resets at {human}.",
+            period.as_str()
+        )
+    };
+    Decision::Deny {
+        message,
         reset_at_ms: reset_ms,
     }
 }

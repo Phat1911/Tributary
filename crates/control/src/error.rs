@@ -19,6 +19,17 @@ pub enum ControlError {
     /// Authenticated but not allowed to do this (e.g. member self-service, M3).
     #[error("forbidden")]
     Forbidden,
+    /// A-022b (M5): the org has ≥2 admins, so this D33-class action may
+    /// not execute via the direct endpoint — it must be REQUESTED and
+    /// approved through the pending-actions queue. The body names the
+    /// kind and the request path so a client can act without guessing.
+    #[error("approval required")]
+    ApprovalRequired {
+        /// The pending-action `kind` to POST (e.g. `admin_key_revoke`).
+        kind: String,
+        /// The org-scoped request endpoint, verbatim.
+        request_uri: String,
+    },
     /// Resource does not exist *within the caller's scope* — also returned
     /// for other orgs' resources so existence is not leaked.
     #[error("not found")]
@@ -63,6 +74,17 @@ impl IntoResponse for ControlError {
                 StatusCode::FORBIDDEN,
                 "forbidden",
                 "You may not perform this action.".to_string(),
+            ),
+            Self::ApprovalRequired { kind, request_uri } => (
+                StatusCode::FORBIDDEN,
+                "approval_required",
+                // The actionable hint IS the contract (A-022b): direct
+                // endpoints have no write effect in dual-admin orgs; the
+                // write path is the approvals queue.
+                format!(
+                    "This org requires a second admin's approval for '{kind}'. \
+                     POST {{\"kind\": \"{kind}\", \"params\": {{…}}}} to {request_uri}."
+                ),
             ),
             Self::NotFound => (
                 StatusCode::NOT_FOUND,

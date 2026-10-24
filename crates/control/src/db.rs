@@ -632,6 +632,29 @@ pub struct PublicPoolKey {
     pub created_at: i64,
 }
 
+/// Loads one pool key by id (masked view) — the pending-action request
+/// path (A-022b) re-validates a key's existence/scope before freezing a
+/// payload; org scope is the CALLER's check (pool → org).
+pub async fn pool_key_by_id(db: &Db, key_id: &str) -> sqlx::Result<Option<PublicPoolKey>> {
+    use sqlx::Row;
+    let sql = db.sql(
+        "SELECT id, pool_id, key_prefix, user_id, status, created_at \
+         FROM pool_keys WHERE id = ?",
+    );
+    let row = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
+        .bind(key_id)
+        .fetch_optional(db.pool())
+        .await?;
+    Ok(row.map(|row| PublicPoolKey {
+        id: row.get("id"),
+        pool_id: row.get("pool_id"),
+        key_prefix: row.get("key_prefix"),
+        user_id: row.get("user_id"),
+        status: row.get("status"),
+        created_at: row.get("created_at"),
+    }))
+}
+
 /// Lists a pool's keys (masked).
 pub async fn pool_keys_by_pool(db: &Db, pool_id: &str) -> sqlx::Result<Vec<PublicPoolKey>> {
     let sql = db.sql(
