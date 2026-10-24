@@ -15,3 +15,6 @@ out/
 # Internal notes — intentionally untracked; NEVER `git add -f`
 STRATEGY.md
 M3-FINAL-REPORT.md
+# Playwright E2E artifacts (J6) — reports/screenshots are local evidence
+apps/dashboard/test-results/
+apps/dashboard/playwright-report/
