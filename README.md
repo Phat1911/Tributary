@@ -2,45 +2,52 @@
 
 **Small streams. Pooled power.**
 
-Self-hostable AI token pools — govern your org's AI usage with per-member keys,
-quotas, and leak detection; or deposit surplus credits into a Solana-settled
-marketplace.
+**Status: v0.1.0 — self-hostable AI token pools** (gateway, org pools,
+dashboard). Pre-alpha software, real release: every org gets per-user
+keys over pooled provider capacity, with quotas, audit, and leak
+signals. Roadmap lives in [`SPEC.md`](SPEC.md) §14.
 
-> **Status:** pre-alpha (milestones M0–M4 landed; M5 — packaging, docs,
-> hardening — in flight). See [`SPEC.md`](SPEC.md) §14 for the roadmap.
-
-## Deploy in one command
+## Quickstart
 
 ```sh
 git clone https://github.com/Phat1911/Tributary.git && cd Tributary
-cp deploy/.env.example .env
-# set the one required secret — paste the output of: openssl rand -hex 32
-$EDITOR .env          # TRIBUTARY_MASTER_KEY=<that output>
-docker compose up -d --build
+cp deploy/.env.example .env   # set TRIBUTARY_MASTER_KEY=<output of: openssl rand -hex 32>
+docker compose up -d          # prefers the prebuilt image; builds from source only as fallback
+docker exec -it -e TRIBUTARY_DATABASE_URL=sqlite:///data/tributary.db \
+  tributary tributary create-admin --email you@example.com --password '<generated>'
 ```
 
-- Gateway + dashboard: **http://localhost:8111** (host port 8111 →
-  container 8080; see the note in `docker-compose.yml` if you already use
-  host 8080).
-- First admin, out-of-band by design:
+**Login at http://localhost:8111** — time to first login is **~2 minutes
+with the prebuilt image** (the first `up` pulls ~110 MB); **~10–15
+minutes if it builds from source** instead (cold Rust + dashboard
+compile).
 
-  ```sh
-  docker exec -it \
-    -e TRIBUTARY_DATABASE_URL=sqlite:///data/tributary.db \
-    tributary tributary create-admin --email you@example.com --password '<generated>'
-  ```
+> **Trusted-proxy note:** if you front Tributary with a reverse proxy,
+> set `TRIBUTARY_TRUSTED_PROXIES` to that proxy's CIDR — IP-derived
+> controls (allowlists, sharing detection) are only sound then; without
+> it, X-Forwarded-For is ignored and the socket address is used. Details:
+> [`deploy/README.md`](deploy/README.md).
 
-- SQLite state lives in one file (`/data/tributary.db`); upgrades are
-  `git pull && docker compose up -d --build` — migrations run on boot.
+## What it is
 
-> **Trusted-proxy warning:** IP-derived controls (allowlists, sharing
-> detection) are only sound when Tributary runs behind a reverse proxy you
-> control **AND** `TRIBUTARY_TRUSTED_PROXIES` is set to that proxy's CIDR;
-> without it, X-Forwarded-For is ignored and the socket address is used.
+A tributary is a small stream that feeds a larger river — and that is
+the whole design: members' small, governed streams of AI usage flowing
+into one pooled upstream capacity. Each member gets their own API key;
+every request is metered, quota-checked, and IP-fingerprinted at the
+gateway **before** any upstream call. The pool's owner holds the
+provider keys (envelope-encrypted at rest) and decides who draws how
+much; odd signals — impossible travel, key sharing across countries —
+surface as review flags, not silent surprises.
 
-Full guide — ports, proxies, backups, Postgres, healthchecks:
-[`deploy/README.md`](deploy/README.md). Found something exploitable? It
-goes to [`SECURITY.md`](SECURITY.md), never the issue tracker.
+## Where to go next
+
+| | |
+|---|---|
+| [`deploy/README.md`](deploy/README.md) | Detailed ops: ports, reverse proxies (the trusted-proxy setting matters), backups, Postgres, healthchecks, quota behavior |
+| [`SPEC.md`](SPEC.md) | Architecture, security/economic rules, milestone roadmap |
+| [`SECURITY.md`](SECURITY.md) | Private disclosure by email; finder credit |
+| [`CONTRIBUTING.md`](CONTRIBUTING.md) | Conventions (teaching comments, dual-DB rule) and dev setup |
+| [`LICENSE`](LICENSE) | FSL-1.1-ALv2 — each version converts to Apache-2.0 after two years |
 
 ## Repository layout
 
@@ -48,7 +55,7 @@ goes to [`SECURITY.md`](SECURITY.md), never the issue tracker.
 crates/            Rust workspace (gateway, control, ledger, crypto, common)
 apps/dashboard/    Next.js + TypeScript dashboard (pnpm workspace)
 deploy/            Dockerfile, entrypoint, .env.example — single-container deploy
-docker-compose.yml the one-command deployment (root; reads a gitignored .env)
+docker-compose.yml the quickstart deployment (root; reads a gitignored .env)
 ```
 
 ## Developing
@@ -68,7 +75,8 @@ pnpm install
 pnpm -C apps/dashboard build
 ```
 
-CI (`.github/workflows/ci.yml`) runs all of the above plus `cargo-deny`.
+CI (`.github/workflows/ci.yml`) runs all of the above, `cargo-deny`,
+and the OpenAI SDK contract test.
 
 ## License
 

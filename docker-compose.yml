@@ -11,10 +11,14 @@ services:
     # Context must be the REPO ROOT: the image build needs both apps/
     # (dashboard stage) and crates/ + migrations/ (Rust stage). The
     # Dockerfile itself lives in deploy/.
+    # Prefer the PREBUILT image (fast path, ~2 min to first login);
+    # fall back to building from source on the first tagged release or
+    # if the registry is unreachable and the local cache is empty.
+    image: ghcr.io/phat1911/tributary:latest
+    pull_policy: missing
     build:
       context: .
       dockerfile: deploy/Dockerfile
-    image: tributary:local
     container_name: tributary
 
     ports:
