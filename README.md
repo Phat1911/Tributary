@@ -17,12 +17,24 @@ signals. Roadmap lives in [`SPEC.md`](SPEC.md) §14.
 > continuations, and generate the key in WSL/Git Bash
 > (`openssl rand -hex 32`). **CMD is not supported.**
 
+> **No compose plugin?** (`docker compose up -d` says
+> `unknown shorthand flag: 'd'`) — the plugin is missing from your
+> Docker install. Fix: Docker Desktop → Settings → Resources → **WSL
+> Integration** on, or `apt install docker-compose-plugin`; or skip
+> compose entirely:
+
 ```sh
 git clone https://github.com/Phat1911/Tributary.git && cd Tributary
 cp deploy/.env.example .env   # set TRIBUTARY_MASTER_KEY=<output of: openssl rand -hex 32>
 docker compose up -d          # prefers the prebuilt image; builds from source only as fallback
 docker exec -it -e TRIBUTARY_DATABASE_URL=sqlite:///data/tributary.db \
   tributary tributary create-admin --email you@example.com --password '<generated>'
+```
+
+```sh
+# compose-free equivalent (same container, same volume, shipped image):
+docker run -d --name tributary -p 8111:8080 --env-file .env \
+  -v tributary-data:/data --restart unless-stopped ghcr.io/phat1911/tributary:latest
 ```
 
 **Login at http://localhost:8111** — time to first login is **~2 minutes
