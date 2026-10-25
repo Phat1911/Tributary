@@ -25,7 +25,8 @@ signals. Roadmap lives in [`SPEC.md`](SPEC.md) §14.
 
 ```sh
 git clone https://github.com/Phat1911/Tributary.git && cd Tributary
-cp deploy/.env.example .env   # set TRIBUTARY_MASTER_KEY=<output of: openssl rand -hex 32>
+cp deploy/.env.example .env
+echo "TRIBUTARY_MASTER_KEY=$(openssl rand -hex 32)" >> .env   # REQUIRED — your vault key; keep it secret
 docker compose up -d          # prefers the prebuilt image; builds from source only as fallback
 docker exec -it -e TRIBUTARY_DATABASE_URL=sqlite:///data/tributary.db \
   tributary tributary create-admin --email you@example.com --password '<generated>'
