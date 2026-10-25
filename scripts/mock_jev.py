@@ -127,9 +127,13 @@ class AlignHandler(BaseHTTPRequestHandler):
 
 
 def main() -> None:
+    # argv: [port] [bind] — bind defaults to loopback; pass 0.0.0.0 when a
+    # Docker container must reach the mock (staged demo stacks point the
+    # container at the host's docker0 address, e.g. 172.17.0.1:8098).
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 8098
-    server = HTTPServer(("127.0.0.1", port), AlignHandler)
-    print(f"mock classifier+upstream listening on http://127.0.0.1:{port}")
+    bind = sys.argv[2] if len(sys.argv) > 2 else "127.0.0.1"
+    server = HTTPServer((bind, port), AlignHandler)
+    print(f"mock classifier+upstream listening on http://{bind}:{port}")
     print('marker: include "OFF-PURPOSE" in a prompt to score 0.05')
     server.serve_forever()
 

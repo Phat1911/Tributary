@@ -4,9 +4,9 @@
 
 ## Current state
 
-- **Date:** 2026-10-22 · **Spec:** v0.3 (decisions D1–D33)
-- **Next milestone:** M5 — hardening block (A-019…A-022, A-026, A-028) + public packaging (compose, GHCR, docs, landing, OpenAI-SDK contract tests, Playwright)
-- **Code:** M4 complete and director-verified (two adversarial waves, 12 journeys, zero open High) at 38caee5 + round-2 fixes; member-keys chore (expiry + cap surfacing) at 314ceb1 — 132/132 dual-DB, dashboard green. Director's uncommitted edits (SPEC/AGENTS/.gitignore/PLAN) await the M5 housekeeping sweep.
+- **Date:** 2026-10-25 · **Spec:** v0.3 (decisions D1–D35)
+- **Next milestone:** M5.5 (landing page + demo video + Tailscale docs rung — zero cost, on founder trigger) → M6 (pilot onboarding; adoption focus, V1 entirely free per D35)
+- **Code:** M5 complete and director-verified (2026-10-25): full hardening block red-first (A-019/020/021/022bc/026/028), packaging + GHCR v0.1.0 live, SDK contract tests in CI, public scrub + full-history rewrite clean, founder stranger run PASSED. Close-out 53c0430. Known leftovers: stopwatch number (optional, M5.5), D32 sequential-sharing blind spot (documented), concurrency_flags_for_key cleanup decision (open, pre-M5 leftover).
 
 ## Milestone status
 
@@ -37,6 +37,75 @@
 | M12–M14 | pending | V3 — Operator network |
 
 ## Milestone log (append per completed milestone; keep the most recent 10)
+
+### 2026-10-25 — CHORE: launch-post assets — staged stack + scripted screenshots (M5.5 slice 1)
+
+**Scope.** Director mini-kickoff (chore-grade, pre-M5.5, no milestone
+tick, M5 untouched): stage a REAL running stack for the founder's public
+launch post and script its screenshots via the J6 rig. Deliverables: (A)
+a pull-path container left up with the fictional "Example Labs" org
+seeded through the public API only (workflow step 12 — host bootstrap →
+org → pool → members → keys → quota rules; metering history via the one
+sanctioned exception, gateway owning the sole write path), staged stories
+(a D32 two-/24 flag, a live classifier auto-block, a real 429 quota
+denial, a rotation, D33 approval pairs), and a VISIT.md; (B) S1 review
+queue + S2 audit log PNGs (dark-native, 1440px, 2× + 1× real shots, no
+image editing) via a reusable in-repo rig.
+
+**Staging facts.** The founder's stranger-run container was preserved
+(stopped, renamed `tributary-stranger-run`, own volume) and a fresh
+`tributary` container run from `ghcr.io/phat1911/tributary:latest`
+(compose plugin still absent on this box — README's compose-free
+`docker run` equivalent, decision 1). The host firewall blocks
+container→host-gateway traffic here, so the mock (jev dialect + OpenAI
+upstream roles, one port) runs as the `demo-upstream` container on a
+second Docker network `demo-net` — which also gives the D32 story its
+two GENUINE /24s: published-port traffic sources from 172.17.0.1, a
+helper container on demo-net from 172.28.0.4 (decision 2). Classifier
+configure + go-live each rode the D33 pending-action approvals
+(avery requests, blake approves — two pairs in the audit log) before the
+live off-purpose catch (decision 3). No header spoofing anywhere; every
+detection row came from real served traffic.
+
+**Files.** `scripts/mock_jev.py` (optional bind-host arg, default
+unchanged — containers need 0.0.0.0) · new `scripts/seed_post_demo.py`
+(stdlib; public-API provisioning + traffic stories; raw keys in memory
+only, masked prefixes in all output; idempotent-fresh, demo throwaway
+creds documented as demo-only) · new `scripts/post_shots.py` (J6-style
+runner: npx playwright@1.56.1, shared target/pw-browsers cache) · new
+`apps/dashboard/e2e/post_shots.spec.ts` (1440×900, deviceScaleFactor 2
+and 1, clean context, dark palette — the product's only palette; waits
+on real UI text, writes viewport + full-page variants) · `PLAN.md` (this
+entry). Assets themselves live OUTSIDE the repo by design:
+`~/my_project/Tributary-private/post-assets/` (8 PNGs + VISIT.md with
+URL, credentials, page→story map, mock-vs-real precision lines).
+
+**Tests/verification.** Seed script's own assertions all green:
+provider-key probe ok, 429 observed pre-upstream + `security.quota_denied`
+audited, exactly-one D32 flag, shadow counter ≥ 1, auto-block LIVE +
+suspension 403 with recovery hint, rotation 201, both story flags open,
+all five audit action kinds present. Screenshot spec 1/1 passed; both
+shots visually verified (both flags in frame, /24 detail line visible,
+masked keys only). Metering seed: 338 history rows inserted through a
+stopped-container copy (WAL replayed first — 11 real rows recovered;
+ownership restored to the container uid after docker cp).
+
+**No new dependencies** (workflow step 10 n/a — the rig reuses the J6
+playwright invocation and the existing browser cache; `python:3.13-alpine`
++ `node:20-alpine` are throwaway traffic-helper containers, not repo
+deps).
+
+**Notes.** Two staging lessons recorded for the M5.5 video re-stage: (1)
+`docker cp` restores host ownership — chown back to the container uid or
+every write 500s "readonly database"; (2) stopped containers may leave
+today's data in the WAL — copy db+wal+shm together and let SQLite replay
+before editing. The queue shows the live catch as two rows (score
+evidence `classifier_flag` + `classifier_auto_block`); the shadow-leg
+flag was dismissed to keep the queue at exactly the two stories. Stack
+intentionally LEFT RUNNING (tributary + demo-upstream, unless-stopped).
+Disclosure: the dashboard ships dark-only (by design, no toggle) — every
+shot is dark because no light mode exists.
+
 
 ### 2026-10-22 — CHORE: member keys table — surface expiry + cap (pre-M5)
 
@@ -252,6 +321,12 @@ exploitable FIXED, pinned red-first:
 - **limitations/notes:** crates are placeholder libs (`crate_name()` + one unit test each); crate names carry the `tributary-` prefix ahead of crates.io reservation (D19); dashboard is a TS-only placeholder page; `next build` auto-adjusted `tsconfig.json` (`jsx: react-jsx`, `.next/dev/types` include) — kept; local Rust builds on this machine run via Windows-cargo WSL interop (needs `WSLENV=CARGO_INCREMENTAL CARGO_INCREMENTAL=0`), or just use CI.
 
 ## Fast jump — most recent milestone → changed files
+
+**CHORE — launch-post assets: staged stack + scripted screenshots (2026-10-25):**
+
+- Scripts: `scripts/mock_jev.py` (bind arg) · new `scripts/seed_post_demo.py` · new `scripts/post_shots.py`
+- Shots: new `apps/dashboard/e2e/post_shots.spec.ts`
+- Docs: `PLAN.md` (this entry); assets outside the repo at `~/my_project/Tributary-private/post-assets/` (PNGs + VISIT.md)
 
 **CHORE — member keys expiry + cap surfacing (2026-10-22):**
 
