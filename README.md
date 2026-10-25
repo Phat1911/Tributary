@@ -9,6 +9,14 @@ signals. Roadmap lives in [`SPEC.md`](SPEC.md) §14.
 
 ## Quickstart
 
+> **Which terminal?** Run these in a **POSIX shell** — Linux, macOS, or
+> **WSL on Windows** (enable Docker Desktop's WSL integration, check
+> with `docker ps`) — and paste the block as-is. **Windows PowerShell**
+> works line-by-line instead: split the first line at `&&`, use
+> `Copy-Item deploy\.env.example .env`, drop the trailing `\`
+> continuations, and generate the key in WSL/Git Bash
+> (`openssl rand -hex 32`). **CMD is not supported.**
+
 ```sh
 git clone https://github.com/Phat1911/Tributary.git && cd Tributary
 cp deploy/.env.example .env   # set TRIBUTARY_MASTER_KEY=<output of: openssl rand -hex 32>
