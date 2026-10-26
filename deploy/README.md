@@ -11,7 +11,9 @@ proxies, backups, admins, upgrades.
 
 ## What you need
 
-- Docker Engine with the `docker compose` plugin (v2).
+- Docker Engine with the `docker compose` plugin (v2) — check with
+  `docker compose version`; on Ubuntu that plugin is the
+  `docker-compose-v2` package (`sudo apt install docker-compose-v2`).
 - A machine you can leave running (a small VPS is plenty — SQLite has no
   separate server to feed).
 - 10 minutes.
