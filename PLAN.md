@@ -183,7 +183,16 @@ workaround topology (Tailscale inside WSL + Windows app beside it,
 tailscale removed). Note rewritten to lead with the clean path +
 removal instructions; the two-node combo is now explicitly called
 out as the trap (peer→WSL-node hangs), aligned with the "one
-machine, one of each" topology rules. **Slice 1 CLOSED (2026-10-26 19:31):**
+machine, one of each" topology rules. **Session pause (2026-10-26
+20:36):** founder is mid-redo of the deploy journey on a
+stranger-state machine (verified: no containers/volumes/networks/
+images, `~/Tributary` gone incl. root-owned husk, port free, one
+engine, one Tailscale). One prep command outstanding on his side:
+`sudo apt install docker-compose-v2` (Ubuntu-native Docker ships
+without the compose plugin — prerequisite line now names it). Redo
+resumes from deploy/README.md "What you need"; landing A-clicks and
+Parts B/C remain PASSed from the first pass — the redo is confidence
+repetition, not a gate. **Slice 1 CLOSED (2026-10-26 19:31):**
 founder reports the A click-through done (no FAILs raised); closing
 self-check green — og:image 200, all landing hrefs point at real
 files, `#quickstart` matches README `## Quickstart`,
