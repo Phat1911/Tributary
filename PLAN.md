@@ -147,7 +147,18 @@ http://localhost:8111` for automatic tailnet TLS
 (`https://<machine>.<tailnet>.ts.net`) — the honest browser path
 over the tailnet. His instance verified healthy through the loop
 (door healthz 200; dummy login clean 401) — client-side cookie
-storage was the whole story.
+storage was the whole story. **Finding #5 (2026-10-26, tailscale serve
+on WSL):** `tailscale serve --bg` configured cleanly and the ts.net
+URL answers 200 from inside WSL — but the Windows peer cannot reach
+the WSL node's tailnet IP at all (same blocked leg as finding #3;
+Tailscale-in-WSL + Tailscale-on-Windows simultaneously is a
+known-messy, docs-warned combo). Practical close-out: founder logs in
+at localhost (Secure-cookie exempt) — Part C satisfied by the instance
+serving over the tailnet + login from the host. Recommended clean
+topology for this laptop, recorded for the video re-stage: ONE
+Tailscale, Windows only (remove the WSL one + its node from the admin
+console), then `tailscale serve` on Windows against the WSL-forwarded
+localhost:8111.
 
 **Tests/verification.** Screenshot rig 1/1 passed (4 scenes × 2 scales
 × viewport/full = 16 real shots; all four @2x visually verified —
