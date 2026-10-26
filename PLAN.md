@@ -175,7 +175,15 @@ https://laptop-ltr9teil.tail042447.ts.net/host/ as host admin
 (node renamed; `tailscale serve` on Windows — exactly the topology
 recommended in finding #5). Journey B + C: passed by fire
 (divergences = findings #1–#5, all fixed in-guide). Slice closes on
-the A1–A12 landing report. **Slice 1 CLOSED (2026-10-26 19:31):**
+the A1–A12 landing report. **Finding #6 (2026-10-26 ~20:25, founder
+redo journey):** rung 3's WSL note still taught the findings-#2/#3
+workaround topology (Tailscale inside WSL + Windows app beside it,
+"two nodes normal") instead of the summit path that actually worked
+(Tailscale on Windows only, `tailscale serve` from PowerShell, WSL
+tailscale removed). Note rewritten to lead with the clean path +
+removal instructions; the two-node combo is now explicitly called
+out as the trap (peer→WSL-node hangs), aligned with the "one
+machine, one of each" topology rules. **Slice 1 CLOSED (2026-10-26 19:31):**
 founder reports the A click-through done (no FAILs raised); closing
 self-check green — og:image 200, all landing hrefs point at real
 files, `#quickstart` matches README `## Quickstart`,

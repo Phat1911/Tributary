@@ -183,27 +183,34 @@ Never used Tailscale? The whole setup is about ten minutes:
    >    the toggle if it is off). Then the dashboard works from any
    >    tailnet device, cookie and all.
 
-   > **WSL note:** if the host runs Tributary inside WSL, steps 1–2
-   > put Tailscale on the *Linux* side only — a browser on the
-   > *Windows* side has no route to `100.x.y.z` and will time out
-   > (`ERR_CONNECTION_TIMED_OUT`). Install the Windows Tailscale app
-   > too and sign in with the same account; the machine will appear
-   > twice in the admin console (WSL node + Windows node) — that is
-   > normal and is the easiest way to test without a second device.
-   > Sanity check from inside WSL at any time:
-   > `curl -s -o /dev/null -w '%{http_code}\n' http://100.x.y.z:8111/healthz`
-   > → `200` means the host side is already correct.
+   > **WSL note — put Tailscale on the Windows side, not inside WSL.**
+   > If the host runs Tributary inside WSL, do **not** run steps 1–2
+   > inside WSL. Install the Windows Tailscale app
+   > ([tailscale.com/download](https://tailscale.com/download)),
+   > sign in, and expose the stack through it:
    >
-   > On many WSL + Docker Desktop setups the reverse surprise follows:
-   > the **Windows** node's address serves (Docker Desktop publishes
-   > the port on Windows as well) while the **WSL** node's own address
-   > hangs from peers — the tunnel ends inside WSL where the published
-   > port does not answer. Use whichever address passes the healthz
-   > check. Trade-off: through the Windows door every member arrives
-   > as the same proxy address, so IP-derived controls (allowlists,
+   > 1. WSL already publishes the port to Windows as
+   >    `localhost:8111` (WSL's own forwarding — nothing to set up).
+   > 2. In PowerShell: `tailscale serve --bg http://localhost:8111`
+   >    → `https://<machine>.<tailnet>.ts.net` — dashboard and API
+   >    from any tailnet device, real TLS, login cookie included.
+   > 3. Sanity check at any time, inside WSL:
+   >    `curl -s -o /dev/null -w '%{http_code}\n' http://localhost:8111/healthz`
+   >    → `200` means the stack side is correct.
+   >
+   > Why not Tailscale inside WSL as well? Two nodes on one laptop
+   > (WSL + Windows) cannot route to each other — peers' connections
+   > to the WSL node hang — so you get duplicated doors and silent
+   > timeouts. One machine, one Tailscale (the topology rule above).
+   > Already installed it in WSL? `sudo tailscale down && sudo apt
+   > remove -y tailscale`, then remove the WSL node from the admin
+   > console.
+   >
+   > Trade-off: through the `serve` tunnel every member arrives as
+   > the same proxy address, so IP-derived controls (allowlists,
    > sharing detection) cannot tell members apart — for a real member
-   > group prefer a Linux-host or VPS deployment (this guide's default
-   > topology).
+   > group prefer a Linux-host or VPS deployment (this guide's
+   > default topology).
 
 **The trust note (read this):** tailnet traffic reaches the container
 directly — there is no reverse proxy in the path. So leave
