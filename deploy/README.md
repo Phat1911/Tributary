@@ -76,6 +76,86 @@ URL to configure; whatever origin serves the API serves the UI:
 - Behind your own reverse proxy: proxy `/api/v1/*` to the container and
   serve the static files from the same origin.
 
+## Sharing ladder — who can reach your instance
+
+Four rungs, smallest first. The container never changes — only the
+network around it does. Climb as far as your group actually needs.
+
+### Rung 1 — just this machine (localhost)
+
+The default. `docker compose up -d`, then log in at
+http://localhost:8111. Nothing to configure, nothing exposed.
+
+### Rung 2 — your LAN
+
+For a trusted local network (home, office):
+
+1. Compose already publishes host port 8111 on every interface —
+   nothing to change in the compose file.
+2. Find the host's LAN address: `ip addr` on Linux (look for
+   `192.168.x.x` / `10.x.x.x`), or the router's device list.
+3. If the host runs a firewall, open the port:
+   `sudo ufw allow 8111/tcp` (or your firewall's equivalent).
+4. Everyone on the LAN uses `http://<that-address>:8111`.
+
+No proxy is involved, so leave `TRIBUTARY_TRUSTED_PROXIES` unset —
+the socket address IS each client's real LAN address, which is exactly
+what allowlists and sharing detection want to see.
+
+### Rung 3 — your tailnet (Tailscale)
+
+For a private group across the internet — **no public IP, no domain,
+no TLS certificates**. [Tailscale](https://tailscale.com) builds a
+private encrypted network (a "tailnet") over your existing internet;
+devices see each other as if on one LAN. A free plan covers small
+personal tailnets; you sign in with an existing account (Google,
+GitHub, …) — no payment involved.
+
+Never used Tailscale? The whole setup is about ten minutes:
+
+1. **Install it on the host** (the machine running Docker):
+   Linux: `curl -fsSL https://tailscale.com/install.sh | sh` —
+   macOS/Windows: the installer from
+   [tailscale.com/download](https://tailscale.com/download).
+2. **Bring it up**: `sudo tailscale up`, follow the printed link, sign
+   in. Name the machine something findable, e.g. `tributary-box`.
+3. **Let tailnet traffic reach port 8111** if the host runs a
+   firewall: `sudo ufw allow in on tailscale0` (`tailscale0` is the
+   interface Tailscale adds).
+4. **Find the host's tailnet address**: in the admin console at
+   [login.tailscale.com/admin/machines](https://login.tailscale.com/admin/machines)
+   — every tailnet device gets a stable address in the `100.x.y.z`
+   range. That address never changes; write it down.
+5. **Install Tailscale on each member's device** and sign in. Either
+   invite them to your tailnet (Users tab), or — better for a loose
+   group — use **node sharing**: on the host's row in the admin
+   console, "Share" → enter their address. Shared members can reach
+   this one machine only, not your other devices.
+6. **Use it**: with Tailscale connected, everyone opens
+   `http://100.x.y.z:8111` — browser, curl, SDK base URL, all the
+   same. Traffic is encrypted end-to-end (WireGuard) by Tailscale
+   itself, which is why no HTTPS setup is needed for a private group.
+
+**The trust note (read this):** tailnet traffic reaches the container
+directly — there is no reverse proxy in the path. So leave
+`TRIBUTARY_TRUSTED_PROXIES` **unset**: the socket address is the
+caller's real tailnet address, which is what IP-derived controls
+should see. Do **not** add `100.64.0.0/10` (the tailnet range) to the
+trusted list — that would tell the gateway to honor
+`X-Forwarded-For` headers from any tailnet device, and any member
+could then spoof their way past an IP allowlist with one header line.
+
+**Doctrine (D35):** founder tailnets are never a production
+dependency — this rung is a self-host option for a private group,
+nothing more. Tributary itself runs identically on all four rungs.
+
+### Rung 4 — a public VPS
+
+The guide's default topology: a small VPS, ports published, and your
+own reverse proxy with TLS in front (Caddy or nginx + a certificate).
+The proxy changes what the gateway should trust — that is exactly
+what the next section is about.
+
 ## Trusted proxies — the one security setting that matters
 
 > **IP-derived controls (allowlists, sharing detection) are only sound
