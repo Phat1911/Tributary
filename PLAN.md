@@ -96,7 +96,13 @@ script's pre-flight).
 step 3 on a WSL host): `ufw: command not found` — the step assumed a
 firewall tool exists. Step 3 now leads with `sudo ufw status` and the
 "command not found / inactive → skip (never install one just for
-this)" outcome.
+this)" outcome. #2 (2026-10-26, founder at rung 3 step 6 on WSL):
+`ERR_CONNECTION_TIMED_OUT` from the Windows browser — Tailscale lived
+only inside WSL, so Windows had no route to the 100.x address. Rung 3
+step 6 now carries a WSL note (install the Windows app on the same
+account; two nodes for one laptop is normal; plus the in-WSL healthz
+sanity check). Host-side verified good during diagnosis: HTTP 200
+over the tailnet IP, 0.0.0.0:8111 binding.
 
 **Tests/verification.** Screenshot rig 1/1 passed (4 scenes × 2 scales
 × viewport/full = 16 real shots; all four @2x visually verified —

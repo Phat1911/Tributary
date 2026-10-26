@@ -142,6 +142,17 @@ Never used Tailscale? The whole setup is about ten minutes:
    same. Traffic is encrypted end-to-end (WireGuard) by Tailscale
    itself, which is why no HTTPS setup is needed for a private group.
 
+   > **WSL note:** if the host runs Tributary inside WSL, steps 1–2
+   > put Tailscale on the *Linux* side only — a browser on the
+   > *Windows* side has no route to `100.x.y.z` and will time out
+   > (`ERR_CONNECTION_TIMED_OUT`). Install the Windows Tailscale app
+   > too and sign in with the same account; the machine will appear
+   > twice in the admin console (WSL node + Windows node) — that is
+   > normal and is the easiest way to test without a second device.
+   > Sanity check from inside WSL at any time:
+   > `curl -s -o /dev/null -w '%{http_code}\n' http://100.x.y.z:8111/healthz`
+   > → `200` means the host side is already correct.
+
 **The trust note (read this):** tailnet traffic reaches the container
 directly — there is no reverse proxy in the path. So leave
 `TRIBUTARY_TRUSTED_PROXIES` **unset**: the socket address is the
