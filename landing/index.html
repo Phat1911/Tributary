@@ -1,0 +1,189 @@
+<!doctype html>
+<!-- Tributary landing page (M5.5 slice 1).
+
+     Hand-editable by design: plain HTML + one stylesheet, no framework,
+     no build step, no external requests (fonts/CDNs would leak visitor
+     IPs and add recurring dependencies — neither is acceptable here).
+
+     Served by GitHub Pages at the project URL. Because this is a PROJECT
+     page (https://phat1911.github.io/Tributary/), every asset reference
+     below is RELATIVE so the page also works when previewed from disk.
+
+     Content posture (D35): everything free. No pricing, no tiers, no
+     "managed", no support offers, no waitlists — anywhere. -->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Tributary — self-hosted AI token pools</title>
+  <meta name="description" content="One shared provider key, per-member keys, quotas, and leak signals — a gateway you run yourself. Free — all of it.">
+
+  <!-- Share-preview tags: when this URL is pasted into LinkedIn, Discord,
+       or Product Hunt, the card below is the first impression. og:image
+       must be ABSOLUTE (scrapers do not resolve relative URLs); it is the
+       staged review-queue screenshot from the repo's own screenshot rig. -->
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="Tributary">
+  <meta property="og:title" content="Tributary — self-hosted AI token pools">
+  <meta property="og:description" content="One shared provider key, per-member keys, quotas, and leak signals — a gateway you run yourself. Free — all of it.">
+  <meta property="og:url" content="https://phat1911.github.io/Tributary/">
+  <meta property="og:image" content="https://phat1911.github.io/Tributary/assets/S1-review-queue.png">
+  <meta property="og:image:alt" content="Tributary's review queue: an auto-blocked key and a key used from two networks, each awaiting a human decision.">
+  <!-- twitter:* mirrors og:* — some scrapers read only one family. -->
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="Tributary — self-hosted AI token pools">
+  <meta name="twitter:description" content="One shared provider key, per-member keys, quotas, and leak signals — a gateway you run yourself. Free — all of it.">
+  <meta name="twitter:image" content="https://phat1911.github.io/Tributary/assets/S1-review-queue.png">
+
+  <link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <!-- ================= header ================= -->
+  <header class="site-header">
+    <a class="brand" href="">
+      <svg class="brand-mark" viewBox="0 0 24 24" aria-hidden="true"><use href="assets/favicon.svg#mark"/></svg>
+      Tributary
+    </a>
+    <nav>
+      <a href="https://github.com/Phat1911/Tributary">Code</a>
+      <a href="https://github.com/Phat1911/Tributary/blob/main/deploy/README.md">Deploy guide</a>
+      <a href="https://github.com/Phat1911/Tributary/blob/main/AUDIT.md">Audit</a>
+    </nav>
+  </header>
+
+  <main>
+    <!-- ================= hero ================= -->
+    <section class="hero">
+      <p class="eyebrow">Self-hosted · Source-available · v0.1.0</p>
+      <h1>Your team shares one AI key.<br>Everyone still gets their&nbsp;own.</h1>
+      <p class="lede">
+        Tributary is a gateway you run yourself. Upstream, one pooled
+        provider key; downstream, a personal key for every member. Each
+        request is metered, quota-checked, and IP-fingerprinted
+        <em>before</em> it leaves your building.
+      </p>
+      <p class="cta-row">
+        <a class="cta primary" href="https://github.com/Phat1911/Tributary#quickstart">Self-host it free today</a>
+        <a class="cta" href="https://github.com/Phat1911/Tributary">Read the code</a>
+      </p>
+      <!-- Real screenshot, staged demo data, masked keys only — taken by
+           the repo's own rig (scripts/post_shots.py), never image-edited. -->
+      <figure class="shot hero-shot">
+        <img src="assets/S3-pool-workbench.png"
+             alt="Tributary's pool workbench: one member key per person, masked (sk-pool-…), with statuses active, suspended, and rotated."
+             width="2880" height="1800">
+        <figcaption>Team Pool — every member key masked, every status live.</figcaption>
+      </figure>
+    </section>
+
+    <!-- ================= what it is ================= -->
+    <section class="metaphor">
+      <h2>A tributary is a small stream that feeds a river</h2>
+      <p>
+        Your provider key is the river. Your team's usage is the streams.
+        Tributary sits between the two: members draw small, governed
+        streams — the pool stays whole. The owner holds the provider key
+        (envelope-encrypted at rest) and decides who draws how much;
+        odd signals surface as review flags, not silent surprises.
+      </p>
+    </section>
+
+    <section class="features">
+      <article class="feature">
+        <h3>Per-member keys</h3>
+        <p>
+          Issue, rotate, expire, IP-allowlist. A member's key never
+          touches the provider credential — and the raw key is shown
+          exactly once, at issue time.
+        </p>
+        <figure class="shot">
+          <img src="assets/S0-org-home.png"
+               alt="The organization console: a five-member roster and one active pool."
+               width="2880" height="1800">
+          <figcaption>The org console — roster and pools.</figcaption>
+        </figure>
+      </article>
+
+      <article class="feature">
+        <h3>Leak signals, human responses</h3>
+        <p>
+          Key used from two networks? Off-purpose requests? Auto-block
+          suspends the key and waits for a person — detection never
+          silently bans anyone.
+        </p>
+        <figure class="shot">
+          <img src="assets/S1-review-queue.png"
+               alt="The review queue: an auto-blocked key and a key used from multiple networks, each with unblock, revoke, and dismiss actions."
+               width="2880" height="1800">
+          <figcaption>Every detection lands here; response stays human.</figcaption>
+        </figure>
+      </article>
+
+      <article class="feature">
+        <h3>A full audit log</h3>
+        <p>
+          Every control-plane mutation — who, what, when, from where.
+          Quota denials, rotations, approvals: all on the record.
+        </p>
+        <figure class="shot">
+          <img src="assets/S2-audit-log.png"
+               alt="The audit log: rows like security.quota_denied, pool_key.rotated, and approval.executed with actor, target, and IP."
+               width="2880" height="1800">
+          <figcaption>Who, what, when — from where.</figcaption>
+        </figure>
+      </article>
+    </section>
+
+    <!-- ================= quickstart ================= -->
+    <section class="quickstart">
+      <h2>Two minutes to first login</h2>
+      <p>
+        One container, one volume, SQLite inside — Docker does the rest.
+        (POSIX shell; Windows users: WSL.)
+      </p>
+      <pre><code>git clone https://github.com/Phat1911/Tributary.git &amp;&amp; cd Tributary
+cp deploy/.env.example .env
+echo "TRIBUTARY_MASTER_KEY=$(openssl rand -hex 32)" &gt;&gt; .env
+docker compose up -d
+docker exec -it -e TRIBUTARY_DATABASE_URL=sqlite:///data/tributary.db \
+  tributary tributary create-admin --email you@example.com --password '&lt;generated&gt;'</code></pre>
+      <p>
+        Then log in at <code>http://localhost:8111</code>. From there the
+        ladder is yours to climb: this machine → your LAN → your
+        tailnet → a public VPS — see the
+        <a href="https://github.com/Phat1911/Tributary/blob/main/deploy/README.md#sharing-ladder">sharing ladder</a>
+        in the deploy guide.
+      </p>
+    </section>
+
+    <!-- ================= come break it ================= -->
+    <section class="break-it">
+      <h2>Come break it</h2>
+      <p>
+        Every security finding this project discovers — fixed or still
+        open — is published in <a href="https://github.com/Phat1911/Tributary/blob/main/AUDIT.md">AUDIT.md</a>.
+        If you find a hole, it is yours to report:
+        <a href="https://github.com/Phat1911/Tributary/blob/main/SECURITY.md">private disclosure</a>,
+        finder credit, no auto-ban.
+      </p>
+    </section>
+
+    <!-- ================= next (one line, D35) ================= -->
+    <section class="next">
+      <p>What comes next: the network layer — many operators, one settlement rail (V2).</p>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <p>
+      <a href="https://github.com/Phat1911/Tributary">Code</a> ·
+      <a href="https://github.com/Phat1911/Tributary/blob/main/deploy/README.md">Deploy guide</a> ·
+      <a href="https://github.com/Phat1911/Tributary/blob/main/SPEC.md">SPEC</a> ·
+      <a href="https://github.com/Phat1911/Tributary/blob/main/AUDIT.md">Audit</a> ·
+      <a href="https://github.com/Phat1911/Tributary/blob/main/LICENSE">FSL-1.1-ALv2</a>
+    </p>
+    <p>Free to self-host — all of it. No analytics, no tracking, no cookies on this page.</p>
+  </footer>
+</body>
+</html>

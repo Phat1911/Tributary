@@ -1,0 +1,107 @@
+/* Tributary landing — one hand-editable stylesheet, no framework.
+   Palette mirrors the product's dashboard (dark is its only palette),
+   with its teal accent. System fonts only: zero external requests. */
+
+:root {
+  --bg: #0b1016;          /* page background — near-black blue */
+  --bg-raise: #111823;    /* raised panels (cards, code blocks) */
+  --line: #1e2a38;        /* hairline borders */
+  --ink: #e6edf3;         /* primary text */
+  --ink-dim: #8b98a5;     /* secondary text */
+  --accent: #2dd4bf;      /* teal — the product's action color */
+  --accent-ink: #06251f;  /* text on accent buttons */
+  --danger: #f87171;      /* sparingly: severity words */
+  --maxw: 62rem;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  /* System stack: renders natively everywhere, downloads nothing. */
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  line-height: 1.6;
+}
+
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+/* ---------- header / footer ---------- */
+.site-header {
+  display: flex; justify-content: space-between; align-items: center;
+  max-width: var(--maxw); margin: 0 auto; padding: 1.1rem 1.25rem;
+}
+.brand { display: flex; align-items: center; gap: .5rem; color: var(--ink); font-weight: 700; }
+.brand-mark { width: 1.4em; height: 1.4em; fill: var(--accent); }
+.site-header nav { display: flex; gap: 1.25rem; }
+.site-header nav a { color: var(--ink-dim); }
+.site-header nav a:hover { color: var(--ink); }
+
+main { max-width: var(--maxw); margin: 0 auto; padding: 0 1.25rem; }
+
+/* ---------- hero ---------- */
+.hero { text-align: center; padding: 3.5rem 0 2rem; }
+.eyebrow {
+  color: var(--ink-dim); text-transform: uppercase;
+  letter-spacing: .12em; font-size: .8rem; margin: 0 0 1rem;
+}
+.hero h1 {
+  font-size: clamp(2rem, 5vw, 3.2rem); line-height: 1.15; margin: 0 0 1rem;
+}
+.lede { color: var(--ink-dim); font-size: 1.15rem; max-width: 44rem; margin: 0 auto 1.75rem; }
+.lede em { color: var(--ink); font-style: normal; font-weight: 600; }
+
+.cta-row { display: flex; gap: .9rem; justify-content: center; flex-wrap: wrap; margin: 0 0 2.5rem; }
+.cta {
+  padding: .7rem 1.4rem; border-radius: 999px;
+  border: 1px solid var(--line); color: var(--ink);
+}
+.cta:hover { border-color: var(--accent); text-decoration: none; }
+.cta.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); font-weight: 600; }
+
+/* ---------- screenshots ---------- */
+.shot { margin: 0 0 2.5rem; }
+.shot img {
+  display: block; width: 100%; height: auto;
+  border: 1px solid var(--line); border-radius: .6rem;
+  background: var(--bg-raise);
+}
+.shot figcaption { color: var(--ink-dim); font-size: .85rem; margin-top: .5rem; text-align: center; }
+.hero-shot { box-shadow: 0 1.5rem 4rem rgba(0, 0, 0, .45); border-radius: .6rem; }
+
+/* ---------- sections ---------- */
+.metaphor { padding: 1.5rem 0 3rem; }
+.metaphor h2, .quickstart h2, .break-it h2 { font-size: 1.6rem; margin: 0 0 .8rem; }
+.metaphor p { color: var(--ink-dim); max-width: 46rem; margin: 0; }
+
+.features {
+  display: grid; gap: 2rem;
+  grid-template-columns: repeat(auto-fit, minmax(17rem, 1fr));
+  padding-bottom: 3rem;
+}
+.feature h3 { margin: 0 0 .5rem; font-size: 1.15rem; }
+.feature p { color: var(--ink-dim); margin: 0 0 1rem; }
+
+.quickstart { background: var(--bg-raise); border: 1px solid var(--line); border-radius: .8rem; padding: 1.75rem; margin-bottom: 3rem; }
+.quickstart p { color: var(--ink-dim); }
+.quickstart pre {
+  margin: 1rem 0; padding: 1rem 1.25rem; overflow-x: auto;
+  background: var(--bg); border: 1px solid var(--line); border-radius: .5rem;
+}
+.quickstart code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: .9rem; }
+
+.break-it { padding: .5rem 0 3rem; }
+.break-it p { color: var(--ink-dim); max-width: 46rem; }
+
+/* The V2 teaser is exactly one line (D35) — quiet by design. */
+.next { text-align: center; border-top: 1px solid var(--line); padding: 2rem 0 3rem; }
+.next p { color: var(--ink-dim); margin: 0; }
+
+.site-footer {
+  border-top: 1px solid var(--line); color: var(--ink-dim);
+  max-width: var(--maxw); margin: 0 auto; padding: 1.5rem 1.25rem 2.5rem;
+  font-size: .9rem; text-align: center;
+}
+.site-footer p { margin: .35rem 0; }

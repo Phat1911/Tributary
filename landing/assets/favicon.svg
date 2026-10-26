@@ -1,0 +1,10 @@
+<!-- Tributary mark: three small streams joining one river (the metaphor,
+     drawn small). Kept as an inline <symbol> so index.html can reuse it
+     for the header brand via <use href="assets/favicon.svg#mark">. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+  <symbol id="mark" viewBox="0 0 24 24">
+    <path d="M3 5c2.5 0 2.5 2 5 2s2.5-2 5-2 2.5 2 5 2"/>
+    <path d="M3 11c2.5 0 2.5 2 5 2s2.5-2 5-2 2.5 2 5 2"/>
+    <path d="M8 20c1.7-2.2 3.3-3.3 5-3.3s3.3 1.1 5 3.3"/>
+  </symbol>
+</svg>

@@ -1,0 +1,49 @@
+name: Landing (GitHub Pages)
+
+# Deploy the static landing page (M5.5 slice 1, D35: zero recurring cost).
+#
+# The landing is plain HTML+CSS committed at `landing/` — nothing is
+# built here; the directory is uploaded as-is. This workflow is the ONLY
+# new Actions usage in the slice (workflow-step-10 justification lives in
+# PLAN.md's slice log): the four steps below are GitHub's first-party
+# Pages actions, pinned to their current stable majors, same as the
+# checkout major used across this repo's workflows.
+#
+# Trigger: pushes to main that touch the page (plus manual runs from the
+# Actions tab, for "redeploy" without a commit).
+
+on:
+  push:
+    branches: [main]
+    paths: ["landing/**"]
+  workflow_dispatch:
+
+# Pages needs these: `pages` to create the deployment, `id-token` for the
+# short-lived deployment credential. Scope is deliberately minimal.
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One deployment in flight at a time; a new push supersedes it.
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+      - name: Upload landing/ as the site
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: landing
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
