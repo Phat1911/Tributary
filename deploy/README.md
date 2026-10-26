@@ -152,6 +152,17 @@ Never used Tailscale? The whole setup is about ten minutes:
    > Sanity check from inside WSL at any time:
    > `curl -s -o /dev/null -w '%{http_code}\n' http://100.x.y.z:8111/healthz`
    > → `200` means the host side is already correct.
+   >
+   > On many WSL + Docker Desktop setups the reverse surprise follows:
+   > the **Windows** node's address serves (Docker Desktop publishes
+   > the port on Windows as well) while the **WSL** node's own address
+   > hangs from peers — the tunnel ends inside WSL where the published
+   > port does not answer. Use whichever address passes the healthz
+   > check. Trade-off: through the Windows door every member arrives
+   > as the same proxy address, so IP-derived controls (allowlists,
+   > sharing detection) cannot tell members apart — for a real member
+   > group prefer a Linux-host or VPS deployment (this guide's default
+   > topology).
 
 **The trust note (read this):** tailnet traffic reaches the container
 directly — there is no reverse proxy in the path. So leave

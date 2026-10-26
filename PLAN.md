@@ -102,7 +102,17 @@ only inside WSL, so Windows had no route to the 100.x address. Rung 3
 step 6 now carries a WSL note (install the Windows app on the same
 account; two nodes for one laptop is normal; plus the in-WSL healthz
 sanity check). Host-side verified good during diagnosis: HTTP 200
-over the tailnet IP, 0.0.0.0:8111 binding.
+over the tailnet IP, 0.0.0.0:8111 binding. #3 (2026-10-26, founder
+at rung 3 step 6, WSL + Docker Desktop): from the Windows browser the
+WSL node's own tailnet address hangs while the WINDOWS node's address
+serves (Docker Desktop republishes the port on Windows); through that
+door every member arrives as the same proxy address, so IP-derived
+controls cannot distinguish members. WSL note extended (healthz
+decides which address; Linux-host/VPS is the honest topology for real
+member groups). Founder login confusion resolved inline: the staged
+demo stack answers only to its seeded throwaways (avery@labs.example /
+AveryLaunch-Demo2026, host@tributary.example / HostLaunch-Demo2026),
+not to his stranger-run volume's accounts.
 
 **Tests/verification.** Screenshot rig 1/1 passed (4 scenes × 2 scales
 × viewport/full = 16 real shots; all four @2x visually verified —
