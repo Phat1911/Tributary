@@ -5,7 +5,7 @@
 ## Current state
 
 - **Date:** 2026-10-26 · **Spec:** v0.3 (decisions D1–D36)
-- **Next milestone:** M5.5 — **slice 1 delivered 2026-10-26** (landing page live at https://phat1911.github.io/Tributary/ via Pages CI, Tailscale rung in the deploy ladder, demo-video script + founder journey shipped; founder journey PASS pending). Remaining: Gemini provider slice (kickoff ~2026-11-07), video recorded ~2026-11-12 (GDG deadline 2026-11-14) → M6 (pilot onboarding; adoption focus, V1 entirely free per D35)
+- **Next milestone:** M5.5 — **slice 1 CLOSED 2026-10-26** (landing page live at https://phat1911.github.io/Tributary/ via Pages CI; Tailscale rung stranger-proofed by founder journey findings #1–#5, all fixed in-guide; demo-video script + founder journey shipped; founder journey A1–A12 PASS + B PASS + C done — host-admin login over https://…ts.net after the two-daemon root cause was fixed; link/anchor/og self-verified at close). Remaining: Gemini provider slice (kickoff ~2026-11-07), video recorded ~2026-11-12 (GDG deadline 2026-11-14) → M6 (pilot onboarding; adoption focus, V1 entirely free per D35)
 - **Code:** M5 complete and director-verified (2026-10-25): full hardening block red-first (A-019/020/021/022bc/026/028), packaging + GHCR v0.1.0 live, SDK contract tests in CI, public scrub + full-history rewrite clean, founder stranger run PASSED. Close-out 53c0430. Known leftovers: stopwatch number (optional, M5.5), D32 sequential-sharing blind spot (documented), concurrency_flags_for_key cleanup decision (open, pre-M5 leftover).
 - **Post-close events (2026-10-25/26):** LinkedIn humble-launch post shipped (four ask doors per D34); launch-post assets chore done (79bbb80 — seed_post_demo.py, post_shots rig, stack staging); stranger-finding #4 fixed live: quickstart master-key step promoted to its own line (969cfdf); GDG hackathon entry recorded (D36); Product Hunt launch planned for early December post-M5.5 (feedback-not-upvotes; vault holds the doctrine).
 
@@ -175,7 +175,14 @@ https://laptop-ltr9teil.tail042447.ts.net/host/ as host admin
 (node renamed; `tailscale serve` on Windows — exactly the topology
 recommended in finding #5). Journey B + C: passed by fire
 (divergences = findings #1–#5, all fixed in-guide). Slice closes on
-the A1–A12 landing report.
+the A1–A12 landing report. **Slice 1 CLOSED (2026-10-26 19:31):**
+founder reports the A click-through done (no FAILs raised); closing
+self-check green — og:image 200, all landing hrefs point at real
+files, `#quickstart` matches README `## Quickstart`,
+`#sharing-ladder` matches the ladder heading. Journey verdict: A
+PASS, B PASS (earned by five findings, all fixed), C done (tailnet
+HTTPS host-admin login). M5.5 §14 tick stays reserved for the
+Gemini slice.
 
 **Tests/verification.** Screenshot rig 1/1 passed (4 scenes × 2 scales
 × viewport/full = 16 real shots; all four @2x visually verified —
