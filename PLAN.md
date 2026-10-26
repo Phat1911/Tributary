@@ -112,7 +112,15 @@ decides which address; Linux-host/VPS is the honest topology for real
 member groups). Founder login confusion resolved inline: the staged
 demo stack answers only to its seeded throwaways (avery@labs.example /
 AveryLaunch-Demo2026, host@tributary.example / HostLaunch-Demo2026),
-not to his stranger-run volume's accounts.
+not to his stranger-run volume's accounts. Root cause of the confusion
+(finding #3b): the laptop runs TWO docker engines — native dockerd in
+WSL (the staged demo, localhost:8111) and Docker Desktop on Windows
+(his stranger-run deployment, which is what the Windows tailnet
+address 100.64.11.1:8111 actually serves). Verified: identical
+credentials 200 at localhost, 401 at the tailnet door. His own
+deployment over the tailnet doubles as the honest Part-C journey
+proof. The bootstrap-once `create-admin` refusal he hit is by design
+(first admin only; further users via the admin API).
 
 **Tests/verification.** Screenshot rig 1/1 passed (4 scenes × 2 scales
 × viewport/full = 16 real shots; all four @2x visually verified —
