@@ -2,6 +2,9 @@
 
 **Small streams. Pooled power.**
 
+**Landing page:** <https://phat1911.github.io/Tributary/> — one screen,
+live screenshots, the two-minute quickstart.
+
 **Status: v0.1.0 — self-hostable AI token pools** (gateway, org pools,
 dashboard). Pre-alpha software, real release: every org gets per-user
 keys over pooled provider capacity, with quotas, audit, and leak
