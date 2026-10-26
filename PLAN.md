@@ -120,7 +120,23 @@ address 100.64.11.1:8111 actually serves). Verified: identical
 credentials 200 at localhost, 401 at the tailnet door. His own
 deployment over the tailnet doubles as the honest Part-C journey
 proof. The bootstrap-once `create-admin` refusal he hit is by design
-(first admin only; further users via the admin API).
+(first admin only; further users via the admin API). **Post-journey
+incident (2026-10-26 ~16:00):** resetting his throwaway, the founder
+ran the PowerShell-syntax commands inside WSL bash and `docker rm -f
+tributary` removed the tailnet-door instance AND collided with the
+staged demo's container name on the now-single effective engine
+(laptop topology: Docker Desktop WSL integration over a native
+dockerd; socket ownership flipped at 15:18 local). Recovery: demo
+re-staged collision-proof as `tributary-demo` on host port **8112**
+(`localhost:8112`, seed + shadow-flag dismissal re-run, stories
+green); usage-history parity NOT re-applied after the wipe (the
+sanctioned-exception script is throwaway; re-run before the Nov-12
+video if the pool page should show lived-in numbers — IDs in the
+/tmp script need refreshing first). His own fresh instance takes the
+name `tributary` / port 8111 (the tailnet door) — no further name or
+port collisions possible. Lesson recorded: laptop runs multiple
+docker engines; container names are per-engine but published ports
+are per-machine.
 
 **Tests/verification.** Screenshot rig 1/1 passed (4 scenes × 2 scales
 × viewport/full = 16 real shots; all four @2x visually verified —
