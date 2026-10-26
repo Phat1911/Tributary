@@ -23,6 +23,12 @@ signals. Roadmap lives in [`SPEC.md`](SPEC.md) §14.
 > Integration** on, or `apt install docker-compose-plugin`; or skip
 > compose entirely:
 
+> **`permission denied ... /var/run/docker.sock`?** your user isn't in the
+> docker group. Fix: `sudo usermod -aG docker $USER && newgrp docker`
+> (or restart WSL), then check `docker ps` runs **without sudo**.
+> WSL-native Docker also needs `sudo service docker start`; Docker Desktop
+> users: enable **WSL Integration** for this distro.
+
 ```sh
 git clone https://github.com/Phat1911/Tributary.git && cd Tributary
 cp deploy/.env.example .env

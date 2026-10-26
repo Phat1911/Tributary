@@ -4,9 +4,10 @@
 
 ## Current state
 
-- **Date:** 2026-10-25 · **Spec:** v0.3 (decisions D1–D35)
-- **Next milestone:** M5.5 (landing page + demo video + Tailscale docs rung — zero cost, on founder trigger) → M6 (pilot onboarding; adoption focus, V1 entirely free per D35)
+- **Date:** 2026-10-26 · **Spec:** v0.3 (decisions D1–D36)
+- **Next milestone:** M5.5 (landing page + demo video + Tailscale docs rung + **Gemini provider support per D36** — zero cost; deadline-anchored to the GDG hackathon 2026-11-14, Gemini kickoff ~2026-11-07, demo video by ~2026-11-12) → M6 (pilot onboarding; adoption focus, V1 entirely free per D35)
 - **Code:** M5 complete and director-verified (2026-10-25): full hardening block red-first (A-019/020/021/022bc/026/028), packaging + GHCR v0.1.0 live, SDK contract tests in CI, public scrub + full-history rewrite clean, founder stranger run PASSED. Close-out 53c0430. Known leftovers: stopwatch number (optional, M5.5), D32 sequential-sharing blind spot (documented), concurrency_flags_for_key cleanup decision (open, pre-M5 leftover).
+- **Post-close events (2026-10-25/26):** LinkedIn humble-launch post shipped (four ask doors per D34); launch-post assets chore done (79bbb80 — seed_post_demo.py, post_shots rig, stack staging); stranger-finding #4 fixed live: quickstart master-key step promoted to its own line (969cfdf); GDG hackathon entry recorded (D36); Product Hunt launch planned for early December post-M5.5 (feedback-not-upvotes; vault holds the doctrine).
 
 ## Milestone status
 
