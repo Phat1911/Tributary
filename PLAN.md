@@ -164,7 +164,18 @@ removed (containers tributary/tributary-demo/demo-upstream, volumes
 tributary-data/tributary-demo-data/tributary_tributary-data, network
 demo-net, /tmp staging files). Stack-down note: the ~Nov-12 video
 re-stage starts fresh per docs/demo-video-script.md pre-stage. The
-landing A-part of the journey needs no deploy — any browser.
+landing A-part of the journey needs no deploy — any browser. **Summit (same evening, ~19:05):**
+root cause of the whole afternoon = TWO docker daemons fighting over
+one socket (Docker Desktop + native dockerd both bound at different
+moments); fixed by quitting + disabling Docker Desktop, restarting
+docker.socket, re-clearing morning remnants on the native engine,
+then one clean compose up + create-admin + login 200. Founder
+logged in over the tailnet at
+https://laptop-ltr9teil.tail042447.ts.net/host/ as host admin
+(node renamed; `tailscale serve` on Windows — exactly the topology
+recommended in finding #5). Journey B + C: passed by fire
+(divergences = findings #1–#5, all fixed in-guide). Slice closes on
+the A1–A12 landing report.
 
 **Tests/verification.** Screenshot rig 1/1 passed (4 scenes × 2 scales
 × viewport/full = 16 real shots; all four @2x visually verified —
