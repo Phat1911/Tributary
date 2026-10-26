@@ -158,7 +158,13 @@ serving over the tailnet + login from the host. Recommended clean
 topology for this laptop, recorded for the video re-stage: ONE
 Tailscale, Windows only (remove the WSL one + its node from the admin
 console), then `tailscale serve` on Windows against the WSL-forwarded
-localhost:8111.
+localhost:8111. **Teardown (2026-10-26 ~16:40):** founder chose a
+clean-machine redo of the deploy journey; all session resources
+removed (containers tributary/tributary-demo/demo-upstream, volumes
+tributary-data/tributary-demo-data/tributary_tributary-data, network
+demo-net, /tmp staging files). Stack-down note: the ~Nov-12 video
+re-stage starts fresh per docs/demo-video-script.md pre-stage. The
+landing A-part of the journey needs no deploy — any browser.
 
 **Tests/verification.** Screenshot rig 1/1 passed (4 scenes × 2 scales
 × viewport/full = 16 real shots; all four @2x visually verified —
