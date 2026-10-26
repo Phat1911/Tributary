@@ -16,6 +16,27 @@ proxies, backups, admins, upgrades.
   separate server to feed).
 - 10 minutes.
 
+## One machine, one of each (read this if you use WSL or Docker Desktop)
+
+Two shadowing rules, learned the hard way on real deployments:
+
+1. **One Docker engine.** Run EITHER a native `dockerd` inside your
+   Linux environment OR Docker Desktop's engine — never both fighting
+   over the same `docker` command. Symptom of getting it wrong:
+   `docker ps` in one terminal shows a container another terminal
+   swears does not exist, and the same published port behaves
+   differently depending on which side traffic enters from.
+2. **One Tailscale.** Install it in your Linux environment *or* on
+   the host OS — not both. Symptom of getting it wrong: the machine
+   appears twice in the Tailscale admin console, and connections
+   between the two instances hang (each is a peer the other cannot
+   route to).
+
+Already have both? Keep the one that owns the door you actually use,
+remove the other (`sudo apt remove -y tailscale` on the Linux side,
+or uninstall the host-side app), then remove the orphan node from the
+[admin console](https://login.tailscale.com/admin/machines).
+
 ## Quick start
 
 From a fresh clone:
