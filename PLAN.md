@@ -192,7 +192,14 @@ engine, one Tailscale). One prep command outstanding on his side:
 without the compose plugin — prerequisite line now names it). Redo
 resumes from deploy/README.md "What you need"; landing A-clicks and
 Parts B/C remain PASSed from the first pass — the redo is confidence
-repetition, not a gate. **Slice 1 CLOSED (2026-10-26 19:31):**
+repetition, not a gate. **Finding #7 (2026-10-26 20:40, founder UX review):**
+notes must precede the step they protect, not trail the rung — a
+WSL stranger installed Tailscale inside WSL at rung-3 step 1 and met
+the WSL note only after. Fix: a "WSL host? Stop" callout now sits
+between the rung-3 intro and step 1, pointing at the Windows path;
+the full note stays at the end (serve instructions read best after
+the steps). Same ordering principle applied going forward: warnings
+live at the decision point. **Slice 1 CLOSED (2026-10-26 19:31):**
 founder reports the A click-through done (no FAILs raised); closing
 self-check green — og:image 200, all landing hrefs point at real
 files, `#quickstart` matches README `## Quickstart`,

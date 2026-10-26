@@ -136,6 +136,12 @@ GitHub, …) — no payment involved.
 
 Never used Tailscale? The whole setup is about ten minutes:
 
+> **WSL host? Stop — one thing first:** do steps 1–2 on the
+> **Windows** side, not inside WSL (install the Windows app, then
+> `tailscale serve` — full path in the WSL note at the end of this
+> rung). Installing inside WSL builds the broken two-node topology.
+> Everyone else: continue at step 1.
+
 1. **Install it on the host** (the machine running Docker):
    Linux: `curl -fsSL https://tailscale.com/install.sh | sh` —
    macOS/Windows: the installer from
