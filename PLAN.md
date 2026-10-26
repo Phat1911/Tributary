@@ -92,6 +92,12 @@ tier, public repo). Ops note: repo Settings → Pages must have source
 "GitHub Actions" (one-time founder UI flip; flagged in the journey
 script's pre-flight).
 
+**Journey findings, fixed live:** #1 (2026-10-26, founder at rung 3
+step 3 on a WSL host): `ufw: command not found` — the step assumed a
+firewall tool exists. Step 3 now leads with `sudo ufw status` and the
+"command not found / inactive → skip (never install one just for
+this)" outcome.
+
 **Tests/verification.** Screenshot rig 1/1 passed (4 scenes × 2 scales
 × viewport/full = 16 real shots; all four @2x visually verified —
 masked keys only, both story flags + /24 detail in frame, statuses

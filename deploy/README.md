@@ -119,9 +119,15 @@ Never used Tailscale? The whole setup is about ten minutes:
    [tailscale.com/download](https://tailscale.com/download).
 2. **Bring it up**: `sudo tailscale up`, follow the printed link, sign
    in. Name the machine something findable, e.g. `tributary-box`.
-3. **Let tailnet traffic reach port 8111** if the host runs a
-   firewall: `sudo ufw allow in on tailscale0` (`tailscale0` is the
-   interface Tailscale adds).
+3. **Let tailnet traffic reach port 8111** — only if the host already
+   runs a firewall. Check with `sudo ufw status`; three outcomes:
+   - `command not found` or `Status: inactive` → **no firewall is
+     filtering — skip this step** (and do not install one just for
+     this; a freshly enabled firewall can block Docker's ports).
+   - `Status: active` → allow the Tailscale interface:
+     `sudo ufw allow in on tailscale0`.
+   - A different firewall (firewalld, Windows Defender, …) → allow
+     inbound TCP 8111 on the `tailscale0` interface by its own means.
 4. **Find the host's tailnet address**: in the admin console at
    [login.tailscale.com/admin/machines](https://login.tailscale.com/admin/machines)
    — every tailnet device gets a stable address in the `100.x.y.z`
