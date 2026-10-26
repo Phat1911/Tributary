@@ -9,6 +9,8 @@ against it via the same npx-playwright invocation scripts/e2e_j6.py uses
 (Chromium comes from the shared target/pw-browsers cache).
 
 Output: PNGs into --out (default <repo>/target/post-shots, gitignored):
+  S0-org-home@2x.png        (+ -full)  roster + pools ("the console")
+  S3-pool-workbench@2x.png  (+ -full)  member keys (masked) + budgets
   S1-review-queue@2x.png (+ -full)   the review queue, both story flags
   S2-audit-log@2x.png     (+ -full)  quota_denied + rotation + approvals
   …plus @1x variants as clipboard-ready sizes (real shots, not resizes).

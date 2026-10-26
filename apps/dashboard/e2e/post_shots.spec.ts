@@ -1,8 +1,9 @@
-// Launch-post screenshots (M5.5 slice 1) — S1 review queue + S2 audit
-// log, driven through the same Playwright rig as J6: a REAL Chromium
-// against the REAL staged stack (E2E_BASE_URL, default the compose-free
-// docker container on http://localhost:8111). This is not fabrication:
-// every pixel on screen is the shipped image serving the staged org.
+// Launch-post screenshots (M5.5 slice 1) — S0 org home, S3 pool
+// workbench, S1 review queue + S2 audit log, driven through the same
+// Playwright rig as J6: a REAL Chromium against the REAL staged stack
+// (E2E_BASE_URL, default the compose-free docker container on
+// http://localhost:8111). This is not fabrication: every pixel on screen
+// is the shipped image serving the staged org.
 //
 // Rig choices (per the chore kickoff): dark mode (the product's only
 // palette — :root IS dark), 1440×900 viewport, clean context (fresh
@@ -28,7 +29,8 @@ if (!EMAIL || !PASSWORD) {
   throw new Error("E2E_ADMIN_EMAIL / E2E_ADMIN_PASSWORD are required");
 }
 
-// One pass at a given device scale: login → S1 review queue → S2 audit.
+// One pass at a given device scale: login → S0 org home → S3 pool
+// workbench → S1 review queue → S2 audit.
 async function shootScenes(browser: import("@playwright/test").Browser, scale: number) {
   const context = await browser.newContext({
     viewport: { width: 1440, height: 900 },
@@ -46,6 +48,32 @@ async function shootScenes(browser: import("@playwright/test").Browser, scale: n
   await page.getByRole("button", { name: /sign in/i }).click();
   // Org admins land on /org — the org console.
   await expect(page).toHaveURL(/\/org/);
+
+  // ---- S0: org home — roster + pools ("the console") ------------------
+  // Wait for real data, not skeletons: one member row + the pool link.
+  await expect(page.getByText("casey@labs.example")).toBeVisible();
+  await expect(page.getByRole("link", { name: "Team Pool" })).toBeVisible();
+  await page.waitForTimeout(500);
+  await page.screenshot({ path: `${OUT_DIR}/S0-org-home@${scale}x.png` });
+  await page.screenshot({
+    path: `${OUT_DIR}/S0-org-home@${scale}x-full.png`,
+    fullPage: true,
+  });
+
+  // ---- S3: pool workbench — member keys, masked, default "Keys" tab ---
+  // Navigate by clicking the pool link (not a hardcoded id) so a re-staged
+  // stack with different UUIDs still shoots.
+  await page.getByRole("link", { name: "Team Pool" }).click();
+  await expect(page).toHaveURL(/\/org\/pools/);
+  // The keys table renders masked forms only — waiting for the prefix
+  // proves real key rows are on screen (never a raw key).
+  await expect(page.getByText("sk-pool-").first()).toBeVisible();
+  await page.waitForTimeout(500);
+  await page.screenshot({ path: `${OUT_DIR}/S3-pool-workbench@${scale}x.png` });
+  await page.screenshot({
+    path: `${OUT_DIR}/S3-pool-workbench@${scale}x-full.png`,
+    fullPage: true,
+  });
 
   // ---- S1: review queue — BOTH story flags must be in frame ----------
   await page.goto("/org/review");
@@ -75,7 +103,7 @@ async function shootScenes(browser: import("@playwright/test").Browser, scale: n
   await context.close();
 }
 
-test("S1 + S2 launch-post shots (2x and 1x)", async ({ browser }) => {
+test("S0/S3/S1/S2 launch-post shots (2x and 1x)", async ({ browser }) => {
   mkdirSync(OUT_DIR, { recursive: true });
   await shootScenes(browser, 2);
   await shootScenes(browser, 1);
