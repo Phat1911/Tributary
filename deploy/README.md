@@ -138,9 +138,27 @@ Never used Tailscale? The whole setup is about ten minutes:
    console, "Share" → enter their address. Shared members can reach
    this one machine only, not your other devices.
 6. **Use it**: with Tailscale connected, everyone opens
-   `http://100.x.y.z:8111` — browser, curl, SDK base URL, all the
-   same. Traffic is encrypted end-to-end (WireGuard) by Tailscale
-   itself, which is why no HTTPS setup is needed for a private group.
+   `http://100.x.y.z:8111` — API clients, SDK base URLs, `curl`, all
+   the same. Traffic is encrypted end-to-end (WireGuard) by Tailscale
+   itself, so no certificates to buy or renew.
+
+   > **Dashboard logins need localhost or HTTPS (one command):** the
+   > session cookie is `Secure` (good hardening), and browsers refuse
+   > to store Secure cookies on plain `http://` — **except on
+   > `localhost`**. So: logging into the *dashboard* at
+   > `http://100.x.y.z:8111` silently loops back to the login page.
+   > API-key traffic (`sk-pool-…` keys against `/v1/*`) is NOT
+   > affected — it never uses the cookie. Two ways to log in over the
+   > tailnet:
+   >
+   > 1. Browse from the host itself at `http://localhost:8111`
+   >    (localhost is exempt).
+   > 2. `sudo tailscale serve --bg http://localhost:8111` — Tailscale
+   >    issues the tailnet a real certificate and serves
+   >    `https://<machine>.<tailnet>.ts.net` (needs MagicDNS + HTTPS
+   >    certificates in the admin console; `tailscale serve` prints
+   >    the toggle if it is off). Then the dashboard works from any
+   >    tailnet device, cookie and all.
 
    > **WSL note:** if the host runs Tributary inside WSL, steps 1–2
    > put Tailscale on the *Linux* side only — a browser on the

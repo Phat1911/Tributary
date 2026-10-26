@@ -136,7 +136,18 @@ video if the pool page should show lived-in numbers — IDs in the
 name `tributary` / port 8111 (the tailnet door) — no further name or
 port collisions possible. Lesson recorded: laptop runs multiple
 docker engines; container names are per-engine but published ports
-are per-machine.
+are per-machine. **Finding #4 (2026-10-26, founder login loop at
+rung 3 step 6):** the session cookie is `HttpOnly; Secure;
+SameSite=Lax` (correct hardening), and browsers refuse Secure cookies
+on plain http:// except localhost — so DASHBOARD login over
+`http://100.x.y.z:8111` silently loops back to /login. API-key
+traffic (`/v1/*`) is unaffected (no cookie involved). Rung 3 step 6
+rewritten: browse from localhost, or `sudo tailscale serve --bg
+http://localhost:8111` for automatic tailnet TLS
+(`https://<machine>.<tailnet>.ts.net`) — the honest browser path
+over the tailnet. His instance verified healthy through the loop
+(door healthz 200; dummy login clean 401) — client-side cookie
+storage was the whole story.
 
 **Tests/verification.** Screenshot rig 1/1 passed (4 scenes × 2 scales
 × viewport/full = 16 real shots; all four @2x visually verified —
