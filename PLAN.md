@@ -4,7 +4,8 @@
 
 ## Current state
 
-- **Date:** 2026-10-27 · **Spec:** v0.3 (decisions D1–D36)
+- **Date:** 2026-10-27 · **Spec:** v0.3 (decisions D1–D37)
+- **M6: IN PROGRESS — slice 1 DONE (2026-10-27, docs-only).** Pilot onboarding surface shipped against live v0.1.2: pilot-feedback issue template, deploy/README upgrade rung (pull REQUIRED, tag-pin, rollback verified 0.1.2→0.1.0→0.1.2), docs/pilot-support.md runbook, docs/onboarding-org-admin.md DRAFT v1 (empty box → first request, Playwright-verified green incl. pre-upstream quota proof). **Finding M6-S1-F1 open:** minute-budget dialog stores `limit_tokens` while labeled "(requests)" — bricks the member; documented as known defect, fix awaits a code slice. Slice 2 (guide rewrite) waits on founder pilot-1 friction log. M6 done-when unchanged: first real org daily-driving it.
 - **M5.5: DONE (closed 2026-10-27, slice 2 = Gemini)** — slice 1 (2026-10-26): landing live at https://phat1911.github.io/Tributary/, Tailscale rung stranger-proofed (findings #1–#7), video script, journeys A/B/C PASS. Slice 2 (2026-10-27): Gemini as a first-class pool provider — proven provider-agnostic by construction (no gateway-code change; base_url + Bearer already spoke the compat endpoint). J-A/B/C public-API journeys dual-DB green (`m55_gemini.rs`); J-D official-SDK contract legs vs mock Gemini-compat upstream green (same CI script); dashboard provider select + column; README/deploy/landing honest paragraphs + model-ID verify curl + rate-limit honesty; J-E founder real-key script shipped (`docs/founder-journey-m55-slice2.md`). Demo stack RE-STAGED collision-proof (`tributary-demo` @8112, dual-homed on demo-net, stories green, shadow flag dismissed, usage parity re-seeded: 281 rows / 15 days / 460K tokens). **Residue until real: demo video records ~2026-11-12, README link lands same day — Nov-7 director checkpoint chases it.** Next: M6 (pilot onboarding; adoption focus, V1 entirely free per D35).
 - **Code:** M5 complete and director-verified (2026-10-25): full hardening block red-first (A-019/020/021/022bc/026/028), packaging + GHCR v0.1.0 live, SDK contract tests in CI, public scrub + full-history rewrite clean, founder stranger run PASSED. Close-out 53c0430. Known leftovers: stopwatch number (optional, M5.5), D32 sequential-sharing blind spot (documented), concurrency_flags_for_key cleanup decision (open, pre-M5 leftover).
 - **Post-close events (2026-10-25/26):** LinkedIn humble-launch post shipped (four ask doors per D34); launch-post assets chore done (79bbb80 — seed_post_demo.py, post_shots rig, stack staging); stranger-finding #4 fixed live: quickstart master-key step promoted to its own line (969cfdf); GDG hackathon entry recorded (D36); Product Hunt launch planned for early December post-M5.5 (feedback-not-upvotes; vault holds the doctrine).
@@ -34,11 +35,84 @@
 - Journeys/tests: `scripts/contract_openai_sdk.py` (J7) `scripts/e2e_j6.py` (J6)
 - Records: `SPEC.md` (scrub f924d05 + D34/D35/M5.5/M6 + §14 tick) `PLAN.md` `AUDIT.md` (flake #3) `.gitignore`
 | M5.5 | **DONE (closed 2026-10-27)** | Slice 1 (landing/Tailscale/video script) 2026-10-26 + slice 2 (Gemini provider, J-A…E) 2026-10-27; §14 ticked. Residue: video records ~2026-11-12 |
-| M6 | pending | V1 — pilots |
+| M6 | **in progress — slice 1 DONE** (2026-10-27) | Pilot onboarding surface (docs, no code): feedback template, upgrade rung, support runbook, admin guide DRAFT v1. Finding **M6-S1-F1** open (minute-budget defect). Slice 2 waits on founder pilot friction log |
 | M7–M11 | pending | V2 — Root Pool |
 | M12–M14 | pending | V3 — Operator network |
 
 ## Milestone log (append per completed milestone; keep the most recent 10)
+
+### 2026-10-27 — M6 SLICE 1: pilot onboarding surface (evidence-independent half)
+
+**Scope.** Four docs, zero code (kickoff: dashboard friction = finding,
+never a patch): pilot feedback issue template, image-first upgrade rung
+in deploy/README, founder diagnostics runbook, admin first-day guide
+(DRAFT v1). Everything verified against a LIVE v0.1.2 GHCR image on
+throwaway stacks (ports 8113/8116, own volumes; founder 8111 + demo 8112
+untouched; local-registry stand-in for the drift proof; mock upstream =
+`scripts/mock_openai.py` in a container — repo contract-test method,
+disclosed in the guide's DRAFT banner per director approval).
+
+**Deliverables.** `.github/ISSUE_TEMPLATE/pilot-feedback.yml` (version +
+rung + worked/broke[steps+logs]/missing/keep-using; linked from README
+"Where to go next") · `deploy/README.md` **Upgrading** rewritten (pull
+REQUIRED — `pull_policy: missing` means plain `up -d` never consults the
+registry, proven live against a local registry; tag-pin tradeoff, pin
+recommended for pilots; worked example v0.1.0→v0.1.2; one-line rollback
+with the honest migration caveat — 0.1.0↔0.1.2 schemas are identical
+(verified: `git diff v0.1.0 v0.1.2 -- migrations/` empty), which is why
+that round trip is clean; volume/.env/master key untouched) ·
+`docs/pilot-support.md` (phone runbook: what-version probe (`docker
+compose images` — no `--version` flag exists) → healthz meanings →
+`docker logs` listening guide → audit log → review queue → fixes #1–#5:
+port conflict, docker-group, stale image, `store:false` on pre-D37
+images, WSL/two-engines) · `docs/onboarding-org-admin.md` (host→org
+admin handoff, member→pool→provider key (validate-on-save)→key shown
+once→budget→first request→usage→review-queue orientation; DRAFT v1,
+rewritten in slice 2 from pilot friction).
+
+**Journey verification (live 0.1.2, Playwright against the served
+dashboard, full journey green, 32.3 s).** Empty box → host login → org →
+mint org admin → org-admin login → member → pool (allowlist m-test) →
+provider key (Custom → mock, validated `ok` at save) → issue key (raw
+captured from the network response AND the reveal toggle) → day budget
+100k → first request **200 "Hello!"** → burst under a 300-token cap =
+`[200,200,429,429,429,429,429,429]` matching the reserve/settle
+arithmetic exactly → mock upstream hit accounting proves **every denial
+was pre-upstream** (hits = successes only — rule 4 at work). Screenshots
+at /tmp/m6s1/shots (session artifact, not committed).
+
+**Finding M6-S1-F1 (open — dashboard defect, NOT patched per kickoff
+rule).** The *Set budget* dialog's "Minute (requests)" window sends
+`limit_tokens` (never `limit_requests`) — wire-verified on 0.1.2:
+`{"period":"minute","limit_tokens":5,"limit_requests":null}` — so "5
+requests/minute" creates a 5-TOKEN-per-minute cap that denies **every**
+request at reserve time (live 429: "Estimated 258 tokens … exceeds the
+remaining budget of the 5-token minute window"), and the rule list even
+displays it back as "5 tokens". Recovery: delete the rule, wait ~5 s
+(RULES_TTL — below), member works again (verified). Cause in
+`apps/dashboard/app/org/pools/page.tsx` `AddBudgetDialog`; API accepts
+`limit_requests` (`UpsertQuotaRuleRequest`), so the fix is a dashboard
+one-liner + follow-up test — left for a code slice with director
+blessing. Docs handle it honestly: guide §budgets says don't use the
+minute window; runbook fix-table covers the all-429 symptom.
+
+**Non-finding, documented.** Quota-rule changes take ≤5 s to reach
+gateway admission (`RULES_TTL`, quota.rs, D9 in-proc cache) — my first
+"still 429 after delete" detour was exactly this, confirmed against
+source + live (fresh key 200s after the TTL passes). Now stated in both
+new docs. Also confirmed NOT provider rate-limiting: mock never
+rate-limits and denied requests never reached it.
+
+**Residue.** Spec §14 M6 stays open (done-when = first real org
+daily-driving); CI untouched; no SPEC change. Slice 2 = rewrite the
+guide + feedback loop from the founder's pilot-1 friction log (parallel
+lane, not this session). Scratch Playwright spec lived under
+`target/m6s1/` (gitignored, removed post-verification).
+
+**Fast jump — M6 slice 1 touched:** `.github/ISSUE_TEMPLATE/pilot-feedback.yml`
+(new) · `deploy/README.md` (Upgrading rewrite + pilot-docs pointer) ·
+`docs/pilot-support.md` (new) · `docs/onboarding-org-admin.md` (new) ·
+`README.md` (Where-to-go-next rows) · `PLAN.md` (this entry + status).
 
 ### 2026-10-27 — D37 + RELEASE v0.1.2 (director consolidated instructions)
 

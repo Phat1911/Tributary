@@ -1,0 +1,85 @@
+name: Pilot feedback
+description: Friction report from a pilot org — what worked, what broke, what's missing
+title: "[Pilot] "
+labels: ["pilot-feedback"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for running Tributary as a pilot. This form feeds directly
+        into the onboarding rewrite — specific beats polished. If something
+        broke, **steps + logs** are worth more than a paragraph of prose.
+  - type: input
+    id: version
+    attributes:
+      label: Version you're running
+      description: >-
+        On the machine hosting Tributary, run `docker compose images` and
+        read the TAG column (e.g. `0.1.2`). "latest" alone is not a version —
+        see the "Upgrading" section of deploy/README.md for pinning.
+      placeholder: "0.1.2"
+    validations:
+      required: true
+  - type: dropdown
+    id: rung
+    attributes:
+      label: How is your instance deployed?
+      description: The sharing rung from deploy/README.md — changes what we check first.
+      options:
+        - Just this machine (localhost)
+        - LAN (office / home network)
+        - Tailnet (Tailscale)
+        - Public VPS behind a reverse proxy
+        - Other / not sure
+    validations:
+      required: true
+  - type: textarea
+    id: worked
+    attributes:
+      label: What worked
+      description: The parts that felt right — what you'd tell another team to expect.
+    validations:
+      required: true
+  - type: textarea
+    id: broke
+    attributes:
+      label: What broke
+      description: >-
+        Exact steps (clicks or commands), what you expected, what happened.
+        Paste logs from the hosting machine — `docker logs --tail 200
+        tributary` — and any error text verbatim. Screenshots welcome.
+      placeholder: |
+        1. …
+        2. …
+        Expected: …
+        Got: …
+        Logs: …
+    validations:
+      required: false
+  - type: textarea
+    id: missing
+    attributes:
+      label: What's missing
+      description: >-
+        What you reached for and didn't find — a setting, a doc, a feature.
+        Fill this or "What broke" (or both).
+    validations:
+      required: false
+  - type: dropdown
+    id: keep-using
+    attributes:
+      label: Would you keep using it?
+      options:
+        - Yes
+        - Yes, with changes
+        - Not sure yet
+        - No
+    validations:
+      required: true
+  - type: textarea
+    id: anything-else
+    attributes:
+      label: Anything else
+      description: Context we didn't ask about — team size, what you use the pool for, surprises.
+    validations:
+      required: false

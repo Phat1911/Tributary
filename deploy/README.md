@@ -9,6 +9,11 @@ The fastest path lives in the repo-root [`README.md`](../README.md)
 ("Deploy in one command"). This guide is the complete version: ports,
 proxies, backups, admins, upgrades.
 
+Onboarding a pilot org? [`docs/onboarding-org-admin.md`](../docs/onboarding-org-admin.md)
+walks an admin's first day end-to-end (empty box → first request), and
+[`docs/pilot-support.md`](../docs/pilot-support.md) is the
+"it broke, over the phone" diagnostics runbook.
+
 ## What you need
 
 - Docker Engine with the `docker compose` plugin (v2) — check with
@@ -284,16 +289,95 @@ attacker needs both.
 
 ## Upgrading
 
+An upgrade replaces exactly one thing: **the container image**. The
+`/data` volume (orgs, keys, usage, audit — everything), your `.env`, and
+your `TRIBUTARY_MASTER_KEY` are untouched. Keep the master key exactly as
+it is — changing it invalidates every stored provider key.
+
+**What am I running?** `docker compose images` — the TAG column is the
+release (`0.1.2`, `0.1.0`, …). There is no `--version` flag in the
+container; this is the honest check.
+
+### `docker compose pull` is REQUIRED — `up -d` alone never updates you
+
+The shipped compose sets `pull_policy: missing`: if the image exists
+locally, **`docker compose up -d` never consults the registry**. Whatever
+image your tag resolved to at your *first* `up` is what every later plain
+`up -d` keeps running — silently, forever, even after new releases ship.
+(Verified live against a throwaway registry: moved the registry's `latest`
+to a newer build, ran plain `up -d` — the container stayed on the old
+image; then `pull && up -d` — it moved.)
+
+The upgrade command is therefore always:
+
 ```sh
-git pull
-docker compose pull || docker compose build
+docker compose pull && docker compose up -d
+```
+
+`pull` fetches the newer image; `up -d` recreates the container onto it;
+migrations run on every boot (the entrypoint runs `tributary migrate`
+before `serve`) — no manual step.
+
+### Pin the tag (recommended for pilots)
+
+The shipped compose references `:latest`. For a deployment people depend
+on, edit that one line to an explicit release tag:
+
+```yaml
+    image: ghcr.io/phat1911/tributary:0.1.2
+```
+
+The tradeoff, honestly:
+
+- **Pinned (recommended):** upgrades happen when *you* say so, `docker
+  compose images` answers "what are we running", and rollback is a
+  one-line edit. Cost: you learn about releases manually (watch the
+  repo's releases page).
+- **`latest`:** nothing to edit on upgrade — `pull && up -d` always takes
+  the newest release. Cost: silent drift — any `pull` (even an unrelated
+  script's) can change what you run, and "which release is this?" stops
+  having an answer.
+
+### Worked example: v0.1.0 → v0.1.2
+
+Starting from a pinned `0.1.0` (or an old `latest` — same steps, plus the
+pin while you're in there):
+
+```sh
+# 1. (pin, if you haven't) edit docker-compose.yml:
+#        image: ghcr.io/phat1911/tributary:0.1.2
+# 2. Take the backup you can roll back to (see "Backups" above).
+docker cp tributary:/data/tributary.db ./tributary-pre-upgrade.db
+# 3. Upgrade:
+docker compose pull && docker compose up -d
+# 4. Confirm what you're on and that it's healthy:
+docker compose images
+curl -s http://localhost:8111/healthz   # → 200
+```
+
+Your orgs, members, keys, usage history, and audit log come through
+untouched — the volume is the deployment.
+
+### Rollback: one line
+
+Edit the tag back to the previous release and recreate:
+
+```sh
+# image: ghcr.io/phat1911/tributary:0.1.2  →  :0.1.0
 docker compose up -d
 ```
 
-Migrations run **on every boot** (the entrypoint runs `tributary migrate`
-before `serve`), so a newer image upgrades the schema automatically before
-serving. SQLite makes no promises about downgrades — keep the backup you
-took before upgrading.
+The old image is still in the local cache, so no pull is needed (add
+`docker compose pull` if you had pruned it). Verified live on a
+`0.1.2 → 0.1.0 → 0.1.2` round trip: boots healthy each flip, data intact
+after every hop.
+
+**One honest caveat:** `0.1.0` and `0.1.2` happen to carry identical
+schemas, which is why that example round-trips cleanly. Rollback across a
+release that **added** migrations is not supported — SQLite makes no
+promises about downgrades — so in that case restore the pre-upgrade
+database backup instead (stop, swap the file into the volume, start).
+This is why step 2 takes the backup first.
 
 ## Postgres instead of SQLite
 
