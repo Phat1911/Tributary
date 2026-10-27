@@ -183,6 +183,31 @@ function IssueKeyCard({
   );
 }
 
+// Provider presets for the add-key dialog: the label rides the API as
+// `provider`, the base URL is the pool's upstream endpoint. Gemini uses
+// Google's OpenAI-COMPATIBLE endpoint (D36) — any OpenAI-compatible
+// endpoint works via "Custom".
+const PROVIDER_PRESETS = [
+  {
+    value: "openai",
+    label: "OpenAI",
+    baseUrl: "https://api.openai.com/v1",
+    keyHint: "sk-…",
+  },
+  {
+    value: "gemini",
+    label: "Gemini (AI Studio key)",
+    baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai",
+    keyHint: "AIza…",
+  },
+  {
+    value: "custom",
+    label: "Custom (OpenAI-compatible)",
+    baseUrl: "",
+    keyHint: "sk-…",
+  },
+] as const;
+
 function AddProviderKeyDialog({
   poolId,
   onAdded,
@@ -192,8 +217,21 @@ function AddProviderKeyDialog({
 }) {
   const [open, setOpen] = useState(false);
   const [key, setKey] = useState("");
+  // The select's value doubles as the API `provider` label.
+  const [provider, setProvider] = useState<string>("openai");
   const [baseUrl, setBaseUrl] = useState("https://api.openai.com/v1");
   const [busy, setBusy] = useState(false);
+  const preset = PROVIDER_PRESETS.find((p) => p.value === provider);
+
+  function chooseProvider(value: string) {
+    setProvider(value);
+    const next = PROVIDER_PRESETS.find((p) => p.value === value);
+    // Prefill the endpoint for known providers; "Custom" keeps whatever
+    // the admin already typed so nothing they entered is destroyed.
+    if (next && next.baseUrl) {
+      setBaseUrl(next.baseUrl);
+    }
+  }
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
@@ -201,7 +239,7 @@ function AddProviderKeyDialog({
     try {
       const created = await api.post<PublicProviderKey>(
         `/pools/${poolId}/provider-keys`,
-        { key, base_url: baseUrl },
+        { provider, key, base_url: baseUrl },
       );
       toast.success(
         created.health === "ok"
@@ -233,10 +271,26 @@ function AddProviderKeyDialog({
           <DialogTitle className="font-display">Add provider key</DialogTitle>
           <DialogDescription>
             Sealed with envelope encryption before storage; only the masked
-            prefix is ever displayed again.
+            prefix is ever displayed again. Any OpenAI-compatible endpoint
+            works (OpenAI, Gemini&apos;s compat endpoint, self-hosted).
           </DialogDescription>
         </DialogHeader>
         <form onSubmit={submit} className="space-y-4">
+          <div className="space-y-2">
+            <Label htmlFor="provider-kind">Provider</Label>
+            <Select value={provider} onValueChange={chooseProvider}>
+              <SelectTrigger id="provider-kind">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {PROVIDER_PRESETS.map((p) => (
+                  <SelectItem key={p.value} value={p.value}>
+                    {p.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
           <div className="space-y-2">
             <Label htmlFor="provider-key">API key</Label>
             <Input
@@ -245,7 +299,7 @@ function AddProviderKeyDialog({
               autoComplete="off"
               value={key}
               onChange={(e) => setKey(e.target.value)}
-              placeholder="sk-…"
+              placeholder={preset?.keyHint ?? "sk-…"}
               required
             />
           </div>
@@ -913,6 +967,7 @@ function PoolDetail() {
               <TableHeader>
                 <TableRow>
                   <TableHead>Key</TableHead>
+                  <TableHead>Provider</TableHead>
                   <TableHead>Base URL</TableHead>
                   <TableHead>Health</TableHead>
                   <TableHead>Validated</TableHead>
@@ -925,6 +980,9 @@ function PoolDetail() {
                   <TableRow key={providerKey.id}>
                     <TableCell className="font-mono text-xs">
                       {providerKey.key_prefix}
+                    </TableCell>
+                    <TableCell className="text-xs">
+                      {providerKey.provider}
                     </TableCell>
                     <TableCell className="max-w-48 truncate font-mono text-xs">
                       {providerKey.base_url}
