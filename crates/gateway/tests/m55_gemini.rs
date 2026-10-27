@@ -138,6 +138,14 @@ pub async fn spawn_gemini_compat() -> GeminiMock {
                     if !bearer_is_valid(&headers) {
                         return gemini_reject();
                     }
+                    // D37 fidelity: reject the `store` FIELD itself, any
+                    // value — mirroring Google's compat layer exactly
+                    // ("Unknown name 'store': Cannot find field"), so the
+                    // D37 tests below prove their claims against the real
+                    // upstream behavior, not a simplified stand-in.
+                    if parsed.get("store").is_some() {
+                        return gemini_store_reject();
+                    }
                     if parsed["stream"].as_bool().unwrap_or(false) {
                         gemini_sse()
                     } else {
@@ -178,6 +186,24 @@ fn gemini_reject() -> Response {
     (
         StatusCode::UNAUTHORIZED,
         Json(json!({"error": {"message": "bad bearer", "type": "invalid_request_error"}})),
+    )
+        .into_response()
+}
+
+/// D37 fidelity: the store-field 400, byte-shaped like Google's real
+/// rejection (captured live 2026-10-27) — array-wrapped INVALID_ARGUMENT
+/// naming the field. Any test that forwards `store` to this mock earns
+/// this response, exactly as production Gemini would answer.
+fn gemini_store_reject() -> Response {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(json!([{
+            "error": {
+                "code": 400,
+                "message": "Invalid JSON payload received. Unknown name \"store\": Cannot find field.",
+                "status": "INVALID_ARGUMENT",
+            }
+        }])),
     )
         .into_response()
 }
@@ -778,5 +804,203 @@ async fn j_c_d32_flag_fires_on_gemini_traffic() {
             3,
             "all three requests hit the compat endpoint"
         );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// D37 — provider-kind field drops (negation-only)
+// ---------------------------------------------------------------------------
+
+/// D37 (a), RED-FIRST: a `store:false` request through a GEMINI-labeled
+/// key must SUCCEED — the gateway drops the field before the upstream
+/// call (Google's compat layer 400s the field itself; the mock mimics
+/// that letter-for-letter, so this 200 is only reachable via the drop).
+/// Metering must be untouched by the drop: a normal usage row lands.
+#[tokio::test]
+async fn d37_store_false_dropped_for_gemini_and_metered() {
+    for test_db in test_dbs().await {
+        let mock = spawn_gemini_compat().await;
+        let app = gemini_app(test_db.pool.clone()).await;
+        let token = bootstrap_admin_and_login(&test_db.pool, &app).await;
+        let stack = provision_gemini_stack(&app, &token, &mock).await;
+
+        let body = json!({
+            "model": GEMINI_MODEL,
+            "store": false,
+            "messages": [{"role": "user", "content": "xin chào"}],
+        });
+        let (status, resp) = call(&app, chat_req(&stack.key_raw, None, &body)).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "[{}] store:false must be dropped for gemini — {resp}",
+            test_db.name
+        );
+
+        // Upstream truth: the hit landed WITHOUT the store field.
+        {
+            let hits = mock.hits.lock().unwrap();
+            assert_eq!(hits.len(), 1);
+            assert!(
+                hits[0].body.get("store").is_none(),
+                "the drop happened before forwarding: {hits:?}"
+            );
+        }
+
+        // Metering truth: a served row with real tokens (drop ≠ free ride).
+        let rows = wait_for_usage(&test_db.pool, &stack.key_id, 1).await;
+        assert_eq!(rows[0].status, "200");
+        assert_eq!(rows[0].prompt_tokens, 11);
+        assert_eq!(rows[0].completion_tokens, 7);
+    }
+}
+
+/// D37 (b): negation-only — `store:true` is NEVER dropped. The upstream
+/// 400 (the field is rejected whatever its value) propagates to the
+/// member faithfully and the failed attempt meters at zero tokens.
+#[tokio::test]
+async fn d37_store_true_propagates_its_400_for_gemini() {
+    for test_db in test_dbs().await {
+        let mock = spawn_gemini_compat().await;
+        let app = gemini_app(test_db.pool.clone()).await;
+        let token = bootstrap_admin_and_login(&test_db.pool, &app).await;
+        let stack = provision_gemini_stack(&app, &token, &mock).await;
+
+        let body = json!({
+            "model": GEMINI_MODEL,
+            "store": true,
+            "messages": [{"role": "user", "content": "xin chào"}],
+        });
+        let (status, resp) = call(&app, chat_req(&stack.key_raw, None, &body)).await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "[{}] store:true must NOT be dropped — its 400 is the honest signal: {resp}",
+            test_db.name
+        );
+
+        // Upstream truth: store:true ARRIVED (not dropped, not mutated).
+        {
+            let hits = mock.hits.lock().unwrap();
+            assert_eq!(hits.len(), 1);
+            assert_eq!(
+                hits[0].body.get("store"),
+                Some(&Value::Bool(true)),
+                "letter-for-letter forward: {hits:?}"
+            );
+        }
+
+        // Metering truth: the failed attempt is recorded at zero tokens.
+        let rows = wait_for_usage(&test_db.pool, &stack.key_id, 1).await;
+        assert_eq!(rows[0].status, "400");
+        assert_eq!(rows[0].prompt_tokens + rows[0].completion_tokens, 0);
+    }
+}
+
+/// D37 (c) PERMANENT non-interference: an OPENAI-labeled key forwards
+/// `store` letter-for-letter — the mock (which rejects the field) sees
+/// exactly `false`, and its 400 reaches the member untouched. If the
+/// drop ever leaks across provider kinds, this pin goes red. The key
+/// deliberately points at the SAME compat endpoint: the label, not the
+/// URL, drives the drop.
+#[tokio::test]
+async fn d37_openai_labeled_key_passes_store_through_untouched() {
+    for test_db in test_dbs().await {
+        let mock = spawn_gemini_compat().await;
+        let app = gemini_app(test_db.pool.clone()).await;
+        let token = bootstrap_admin_and_login(&test_db.pool, &app).await;
+
+        // Same public-API stack, but the provider key is labeled openai.
+        let (status, org) = call(
+            &app,
+            api(
+                "POST",
+                "/api/v1/orgs",
+                &token,
+                Some(&json!({"name": "OpenAI-Label Org", "slug": format!("ol-{}", db::new_id())})),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let (_, pool) = call(
+            &app,
+            api(
+                "POST",
+                "/api/v1/pools",
+                &token,
+                Some(&json!({
+                    "org_id": org["id"],
+                    "name": "openai-labeled-pool",
+                    "model_allowlist": [GEMINI_MODEL]
+                })),
+            ),
+        )
+        .await;
+        let pool_id = pool["id"].as_str().unwrap().to_string();
+        let (status, _) = call(
+            &app,
+            api(
+                "POST",
+                &format!("/api/v1/pools/{pool_id}/provider-keys"),
+                &token,
+                Some(&json!({
+                    "provider": "openai",
+                    "key": GEMINI_UPSTREAM_KEY,
+                    "base_url": mock.base_url,
+                })),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let (_, member) = call(
+            &app,
+            api(
+                "POST",
+                "/api/v1/members",
+                &token,
+                Some(&json!({
+                    "org_id": org["id"],
+                    "email": format!("ol-{}@trib.test", db::new_id()),
+                    "password": "hunter2hunter2",
+                })),
+            ),
+        )
+        .await;
+        let (status, key) = call(
+            &app,
+            api(
+                "POST",
+                &format!("/api/v1/pools/{pool_id}/keys"),
+                &token,
+                Some(&json!({"user_id": member["id"]})),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let key_raw = key["raw"].as_str().unwrap().to_string();
+
+        let body = json!({
+            "model": GEMINI_MODEL,
+            "store": false,
+            "messages": [{"role": "user", "content": "hi"}],
+        });
+        let (status, resp) = call(&app, chat_req(&key_raw, None, &body)).await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "[{}] openai-labeled keys must NOT get the drop — {resp}",
+            test_db.name
+        );
+
+        // Letter-for-letter: the mock received store == false, unmodified.
+        {
+            let hits = mock.hits.lock().unwrap();
+            assert_eq!(hits.len(), 1);
+            assert_eq!(
+                hits[0].body.get("store"),
+                Some(&Value::Bool(false)),
+                "non-interference is pinned byte-exactly: {hits:?}"
+            );
+        }
     }
 }

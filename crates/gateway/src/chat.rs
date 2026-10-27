@@ -45,6 +45,29 @@ fn model_not_allowed(model: &str) -> ApiError {
     ApiError::BadRequest(format!("Model '{model}' is not allowed for this pool."))
 }
 
+/// D37 allowlist: the fields each provider kind may have dropped before
+/// forwarding, as `(provider_kind, field)` pairs. EXPLICIT by design —
+/// no generic unknown-field stripping (that would be a converter, which
+/// the product deliberately is not). Budget: ≤ 3 pairs per kind, forever.
+const PROVIDER_FIELD_DROPS: &[(&str, &str)] = &[("gemini", "store")];
+
+/// Applies the D37 per-kind field drops IN PLACE, negation-only: a field
+/// is removed solely when its value is the literal `false`. A truthy
+/// value stays in the payload and its upstream rejection (if any)
+/// propagates as the honest signal — the gateway never guesses whether a
+/// member MEANT the field.
+fn apply_provider_field_drops(provider: &str, body: &mut Value) {
+    for (kind, field) in PROVIDER_FIELD_DROPS {
+        if provider == *kind && body.get(*field) == Some(&Value::Bool(false)) {
+            // A chat body is always a JSON object (the handler parsed it
+            // as one); as_object_mut is therefore infallible here.
+            body.as_object_mut()
+                .expect("chat body is a JSON object")
+                .remove(*field);
+        }
+    }
+}
+
 pub async fn chat_completions(
     State(state): State<AppState>,
     auth: AuthedKey,
@@ -288,6 +311,18 @@ pub async fn chat_completions(
             ApiError::ServiceUnavailable("No provider key is available for this pool.".to_string())
         })?;
     let upstream_key = routing::decrypt_provider_key(&state.config.master_key, &selected)?;
+
+    // --- D37: provider-kind field drops (negation-only). -------------------
+    // Google's OpenAI-COMPATIBLE endpoint 400s on OpenAI's `store` field
+    // ("Unknown name 'store': Cannot find field") instead of ignoring it —
+    // proven live 2026-10-27 when a member agent sent `store:false` with
+    // every request. The ruling (D37): the gateway may drop a BOUNDED,
+    // EXPLICIT per-kind set of fields, NEGATION-ONLY (a literal `false`),
+    // and never for other provider kinds — a compat affordance in the
+    // same spirit as the stream_options injection below, NOT format
+    // conversion. The budget is ≤ 3 fields per kind, forever; growing it
+    // is a doctrine smell (converter drift) and goes to the director.
+    apply_provider_field_drops(&selected.provider, &mut request_body);
 
     let is_stream = request_body
         .get("stream")

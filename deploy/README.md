@@ -356,6 +356,18 @@ endpoint reports works, `gemini-*` names included.
 > model id `________________`, verified `<date>`, endpoint
 > `generativelanguage.googleapis.com/v1beta/openai`.
 
+**Field drops (D37).** Google's compat endpoint 400s on OpenAI's `store`
+field instead of ignoring it (found live 2026-10-27: some agents send
+`store:false` with every request; it was the sole offender in a 39KB
+payload). For **gemini-labeled** provider keys the gateway therefore
+drops `store` — **negation-only**: `store:false` is removed before
+forwarding; `store:true` is NEVER dropped and its upstream 400
+propagates as the honest signal. Keys labeled anything else (openai,
+custom) forward the field letter-for-letter — pinned by a permanent CI
+non-interference test. The drop set is an explicit per-kind allowlist
+(≤ 3 fields per kind, forever); the gateway does not strip unknown
+fields generally — it is not a format converter.
+
 ## Quota behavior — how requests are counted
 
 Tributary meters per-member usage with **reserve → settle → release**
