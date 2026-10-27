@@ -315,6 +315,9 @@ check the base URL.
 | Gemini | Google AI Studio (aistudio.google.com, free) | `https://generativelanguage.googleapis.com/v1beta/openai` |
 | Custom | any OpenAI-compatible server (e.g. a local one) | its `/v1` root |
 
+Errors and content pass through verbatim — free-tier keys reach only
+free-tier models; enumerate what YOUR key serves with the models curl.
+
 Gemini rides Google's **OpenAI-compatible endpoint**, so member traffic
 is metered, quota-checked (reserve → settle → release), and
 leak-watched (IP fingerprinting, D32 sharing flags) exactly like

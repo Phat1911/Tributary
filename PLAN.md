@@ -166,7 +166,15 @@ streaming, and `max_completion_tokens` passes otherwise.** Fix is
 DSH-side field suppression (or a store-strip shim IF the director rules
 one in — it brushes the no-converter doctrine); Demo Day pairings that
 work today: official OpenAI SDK clients → pool → Gemini (J-D-proven)
-and DSH → pool → OpenAI.
+and DSH → pool → OpenAI. **DSH feedback note CLOSED (director,
+2026-10-27):** D37's negation-only `store:false` drop resolves the
+Gemini path Tributary-side — DSH → pool → Gemini now works with zero
+DSH changes. The two external feedback items handed to DSH, recorded
+for the record: (a) `store` should be client-configurable, not sent
+unconditionally (it is the sole offender against Google's compat
+endpoint — "200 OK after dropping: ['store']" in the 39KB bisect);
+(b) thought-tag rendering request (dogfood UX). Nothing further
+pending on the Tributary side.
 
 **FOUNDER NEXT ACTIONS (image chore):**
 1. `docker compose pull && docker compose up -d` on your 8111 instance
