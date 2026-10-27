@@ -345,11 +345,20 @@ function AddBudgetDialog({
     e.preventDefault();
     setBusy(true);
     try {
+      // Wire contract (M6-S1-F1, fixed v0.1.3): the window decides the
+      // FIELD. "Minute" is the request-rate window → limit_requests (the
+      // gateway counts served requests); day/month are token windows →
+      // limit_tokens. v0.1.2 sent limit_tokens for every window, which
+      // turned "5 requests/minute" into a 5-TOKEN cap that denied every
+      // request at reserve time (estimates are ≈ chars/4 + 256 ≫ 5).
+      const isRequestWindow = period === "minute";
       await api.post("/quota-rules", {
         subject_kind: kind,
         subject_id: kind === "pool" ? poolId : subjectId,
         period,
-        limit_tokens: limitTokens ? Number(limitTokens) : null,
+        limit_requests:
+          isRequestWindow && limitTokens ? Number(limitTokens) : null,
+        limit_tokens: !isRequestWindow && limitTokens ? Number(limitTokens) : null,
       });
       toast.success("Budget saved");
       setOpen(false);

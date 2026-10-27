@@ -43,10 +43,27 @@ def main() -> None:
         email = f"e2e-{secrets.token_hex(3)}@tributary.dev"
         password = "hunter2hunter2"
         mj._create_admin(email, password)
+        # Prefer the workspace-pinned @playwright/test (declared devDep of
+        # apps/dashboard — the SAME package the specs import) over npx:
+        # one source of truth for the version, no npm-cache roundtrip.
+        # npx stays as the fallback for environments that never ran
+        # `pnpm install` (bare CI runners debugging the harness itself).
+        pw_bin = os.path.join(
+            REPO, "apps", "dashboard", "node_modules", ".bin",
+            "playwright" + (".cmd" if os.name == "nt" else ""),
+        )
+        runner = (
+            [pw_bin] if os.path.isfile(pw_bin)
+            else ["npx", "-y", "playwright@1.56.1"]
+        )
         r = subprocess.run(
             [
-                "npx", "-y", "playwright@1.56.1", "test",
+                *runner, "test",
                 "--config", os.path.join("apps", "dashboard", "playwright.config.ts"),
+                # Journey specs only: post_shots.spec.ts is a separate
+                # rig with its own runner (scripts/post_shots.py) against
+                # a STAGED stack — not this throwaway one.
+                "j6-dashboard.spec.ts", "f1-budget-wire.spec.ts",
             ],
             cwd=REPO,
             env={
@@ -55,6 +72,10 @@ def main() -> None:
                 "E2E_BASE_URL": mj.GATEWAY,
                 "E2E_ADMIN_EMAIL": email,
                 "E2E_ADMIN_PASSWORD": password,
+                # The in-process mock upstream: f1-budget-wire.spec.ts
+                # points a "custom" provider key at it (base url is the
+                # BARE url — the mock serves /models without /v1).
+                "E2E_MOCK_URL": mock_url,
             },
         )
         sys.exit(r.returncode)

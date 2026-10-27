@@ -66,6 +66,31 @@ jobs:
       - name: Build dashboard
         run: pnpm -C apps/dashboard build
 
+  e2e:
+    name: Dashboard E2E (Playwright — J6 journey + F1 budget wire)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Build the static export
+        run: pnpm -C apps/dashboard build:export
+      # Browsers land where scripts/e2e_j6.py points PLAYWRIGHT_BROWSERS_PATH;
+      # the runner itself pins the CLI version (npx -y playwright@1.56.1).
+      - name: Install Chromium for Playwright
+        run: pnpm -C apps/dashboard exec playwright install --with-deps chromium
+        env:
+          PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}/target/pw-browsers
+      - name: Run the browser journeys (boots the real stack first)
+        run: python3 scripts/e2e_j6.py
+
   sdk-contract:
     name: OpenAI SDK contract (J7)
     runs-on: ubuntu-latest
