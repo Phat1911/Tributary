@@ -40,6 +40,67 @@
 
 ## Milestone log (append per completed milestone; keep the most recent 10)
 
+### 2026-10-27 — D37 + RELEASE v0.1.2 (director consolidated instructions)
+
+**Scope.** Director ruling D37 (relayed by the founder after the live
+`store` bisect): implement the negation-only field drop, release it as
+v0.1.2 (any image without D37 400s the founder's harness dogfood),
+smoke the released image incl. the drop behavior, re-pin the 8112 demo
+stack (the Nov-12 video records on it), fill the VERIFIED slot. E9 and
+the founder's REAL-CONSUMER appendix deliberately NOT chased (E9 moves
+to the on-camera staging on Nov 12; the appendix runs the moment
+v0.1.2 lands on his 8111).
+
+**Implementation (`709a340`).** `chat.rs`: `PROVIDER_FIELD_DROPS`
+explicit per-kind allowlist (`[("gemini", "store")]`, budget ≤ 3/kind
+forever) + `apply_provider_field_drops` — negation-only (literal
+`false` removed; truthy `store` NEVER dropped, its upstream 400
+propagates as the honest signal); applied after key-selection decrypt,
+before the stream_options injection. Teaching comments carry the
+doctrine: a compat affordance, not format conversion; no generic
+unknown-field stripping. Red-first dual-DB in `m55_gemini.rs`: the mock
+now mimics Google's store-field 400 byte-for-byte (array-wrapped
+INVALID_ARGUMENT, captured live); three permanent tests — (a)
+store:false → gemini pool → 200 + metering row intact, (b) store:true →
+400 propagates + metered at zero tokens, (c) PERMANENT non-interference:
+openai-labeled key (same compat URL — the LABEL drives the drop)
+forwards letter-for-letter, asserted byte-exactly from the mock's
+captured hit. Red observed on (a) pre-impl; 7/7 green after; fmt/clippy
+clean; full workspace suite green (SQLite + Postgres, panic-not-skip).
+
+**SPEC D37 entry** added in the same commit; **deploy/README** gains
+the "Field drops (D37)" paragraph (what/why, negation-only, honest-400,
+letter-for-letter for other labels) and the **VERIFIED slot**:
+`gemini-2.5-flash`, live 2026-10-27 (`be0a16d`).
+
+**Release v0.1.2 (`328dd89`, tag `v0.1.2`, run 40464087947
+success).** Bump in workspace `Cargo.toml`/`Cargo.lock` (5 crates)/
+`apps/dashboard/package.json`/README status/landing eyebrow. CI on
+main: green. Multi-arch GHCR: `0.1.2` + `latest`
+(digest `sha256:58f39f21…`, matches the smoke-tested image).
+
+**Smoke on the RELEASED image** (`/tmp/smoke/`, compose-free, 8115 +
+mock on a private network, throwaway volume): healthz 200 ·
+create-admin · login · public-API provisioning (gemini-labeled +
+openai-labeled keys against a Google-faithful store-rejecting mock) ·
+A) gemini store:false → **200**, mock saw the field ABSENT (the drop
+happened) · B) gemini store:true → **400** propagated, mock saw `true`
+· C) openai store:false → **400**, mock saw `false` letter-for-letter.
+All assertions green; stack torn down.
+
+**Demo re-pin (8112).** `tributary-demo` recreated on `0.1.2`, SAME
+volume + master key — stories intact (classifier + D32 flags), usage
+parity intact (281 / 15 days / 460,492 tokens), dual-homing restored
+(demo-net 172.28.0.3), slice-2 UI in the served bundle.
+
+**Fast jump — D37 + release touched:** `crates/gateway/src/chat.rs`
+(drop fn + allowlist const) · `crates/gateway/tests/m55_gemini.rs`
+(store-rejecting mock + 3 permanent tests) · `SPEC.md` (D37 row) ·
+`deploy/README.md` (D37 paragraph, VERIFIED slot) · version bump set ·
+commits `709a340`, `be0a16d`, `328dd89` + tag `v0.1.2` · GHCR
+`0.1.2`/`latest` · demo stack re-pinned in place.
+
+
 ### 2026-10-27 — CHORE: v0.1.1 image release + demo re-pin (M5.5, director order)
 
 **Scope.** Director image chore (blocking the ~Nov-12 video): the slice-2
