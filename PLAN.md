@@ -5,7 +5,7 @@
 ## Current state
 
 - **Date:** 2026-10-27 · **Spec:** v0.3 (decisions D1–D37)
-- **M6: IN PROGRESS — slice 1 DONE (2026-10-27, docs-only).** Pilot onboarding surface shipped against live v0.1.2: pilot-feedback issue template, deploy/README upgrade rung (pull REQUIRED, tag-pin, rollback verified 0.1.2→0.1.0→0.1.2), docs/pilot-support.md runbook, docs/onboarding-org-admin.md DRAFT v1 (empty box → first request, Playwright-verified green incl. pre-upstream quota proof). **Finding M6-S1-F1 open:** minute-budget dialog stores `limit_tokens` while labeled "(requests)" — bricks the member; documented as known defect, fix awaits a code slice. Slice 2 (guide rewrite) waits on founder pilot-1 friction log. M6 done-when unchanged: first real org daily-driving it.
+- **M6: IN PROGRESS — slice 1 DONE (2026-10-27, docs) + M6-S1-F1 FIXED & released as v0.1.3 (same day, director extension).** Pilot onboarding surface shipped against live v0.1.2: pilot-feedback issue template, deploy/README upgrade rung (pull REQUIRED, tag-pin, rollback verified 0.1.2→0.1.0→0.1.2), docs/pilot-support.md runbook, docs/onboarding-org-admin.md DRAFT v1 (empty box → first request, Playwright-verified green incl. pre-upstream quota proof). Slice-1 finding M6-S1-F1 (minute-budget dialog sent `limit_tokens` labeled "(requests)" — bricked members) fixed red-first with a CI-enforced wire-payload pin (new Playwright e2e job, first run green), released as **v0.1.3** (run 40507195511), smoke-verified on the released image, demo 8112 re-pinned; docs reworded with pre-0.1.3 symptom retained. Slice 2 (guide rewrite) waits on founder pilot-1 friction log. M6 done-when unchanged: first real org daily-driving it.
 - **M5.5: DONE (closed 2026-10-27, slice 2 = Gemini)** — slice 1 (2026-10-26): landing live at https://phat1911.github.io/Tributary/, Tailscale rung stranger-proofed (findings #1–#7), video script, journeys A/B/C PASS. Slice 2 (2026-10-27): Gemini as a first-class pool provider — proven provider-agnostic by construction (no gateway-code change; base_url + Bearer already spoke the compat endpoint). J-A/B/C public-API journeys dual-DB green (`m55_gemini.rs`); J-D official-SDK contract legs vs mock Gemini-compat upstream green (same CI script); dashboard provider select + column; README/deploy/landing honest paragraphs + model-ID verify curl + rate-limit honesty; J-E founder real-key script shipped (`docs/founder-journey-m55-slice2.md`). Demo stack RE-STAGED collision-proof (`tributary-demo` @8112, dual-homed on demo-net, stories green, shadow flag dismissed, usage parity re-seeded: 281 rows / 15 days / 460K tokens). **Residue until real: demo video records ~2026-11-12, README link lands same day — Nov-7 director checkpoint chases it.** Next: M6 (pilot onboarding; adoption focus, V1 entirely free per D35).
 - **Code:** M5 complete and director-verified (2026-10-25): full hardening block red-first (A-019/020/021/022bc/026/028), packaging + GHCR v0.1.0 live, SDK contract tests in CI, public scrub + full-history rewrite clean, founder stranger run PASSED. Close-out 53c0430. Known leftovers: stopwatch number (optional, M5.5), D32 sequential-sharing blind spot (documented), concurrency_flags_for_key cleanup decision (open, pre-M5 leftover).
 - **Post-close events (2026-10-25/26):** LinkedIn humble-launch post shipped (four ask doors per D34); launch-post assets chore done (79bbb80 — seed_post_demo.py, post_shots rig, stack staging); stranger-finding #4 fixed live: quickstart master-key step promoted to its own line (969cfdf); GDG hackathon entry recorded (D36); Product Hunt launch planned for early December post-M5.5 (feedback-not-upvotes; vault holds the doctrine).
@@ -35,11 +35,78 @@
 - Journeys/tests: `scripts/contract_openai_sdk.py` (J7) `scripts/e2e_j6.py` (J6)
 - Records: `SPEC.md` (scrub f924d05 + D34/D35/M5.5/M6 + §14 tick) `PLAN.md` `AUDIT.md` (flake #3) `.gitignore`
 | M5.5 | **DONE (closed 2026-10-27)** | Slice 1 (landing/Tailscale/video script) 2026-10-26 + slice 2 (Gemini provider, J-A…E) 2026-10-27; §14 ticked. Residue: video records ~2026-11-12 |
-| M6 | **in progress — slice 1 DONE** (2026-10-27) | Pilot onboarding surface (docs, no code): feedback template, upgrade rung, support runbook, admin guide DRAFT v1. Finding **M6-S1-F1** open (minute-budget defect). Slice 2 waits on founder pilot friction log |
+| M6 | **in progress — slice 1 + F1 fix/v0.1.3 DONE** (2026-10-27) | Pilot onboarding surface (docs) + M6-S1-F1 fixed red-first, CI-pinned, released v0.1.3, demo re-pinned. Slice 2 waits on founder pilot friction log || Pilot onboarding surface (docs, no code): feedback template, upgrade rung, support runbook, admin guide DRAFT v1. Finding **M6-S1-F1** open (minute-budget defect). Slice 2 waits on founder pilot friction log |
 | M7–M11 | pending | V2 — Root Pool |
 | M12–M14 | pending | V3 — Operator network |
 
 ## Milestone log (append per completed milestone; keep the most recent 10)
+
+### 2026-10-27 — M6-S1-F1 FIXED + RELEASE v0.1.3 (director scope extension)
+
+**Scope.** Director extension on top of slice 1: fix the minute-budget
+defect slice 1 found (dashboard sent `limit_tokens` for the minute
+"requests" window), pin the wire payload red-first, reword the two new
+docs' workaround notes, release v0.1.3, smoke the released image, re-pin
+the 8112 demo stack. Founder's 8111 left to pull at his convenience.
+
+**Fix (`af7a79b`).** `AddBudgetDialog` (`apps/dashboard/app/org/pools/page.tsx`):
+window → wire-field mapping — minute ("requests") sends `limit_requests`,
+day/month send `limit_tokens` (teaching comment carries the v0.1.2 defect
+story). The API already accepted `limit_requests`
+(`UpsertQuotaRuleRequest`) — wiring only, zero gateway change.
+
+**Red-first pin (`apps/dashboard/e2e/f1-budget-wire.spec.ts`, joined to
+the `e2e_j6` journey run + a NEW CI e2e job).** Pins BOTH mappings —
+minute → `limit_requests=N`/`limit_tokens=null` AND day → the inverse
+(the full window→field mapping; neither half can regress) — plus the
+enforcement meaning through the served dashboard: burst of 8 against a
+minute/5 rule = exactly `[200×5, 429×3]`, 429 reads `Limit reached: 5
+requests per minute`. RED observed pre-fix (wire carried
+`limit_tokens=5, limit_requests=null` — the defect verbatim), GREEN
+post-fix, J6 unaffected; minute-boundary flake guard (realign + retry)
+in the burst leg. Local runs via `TRIBUTARY_BIN` (prebuilt v0.1.2
+gateway — Rust untouched by this fix).
+
+**Toolchain honesty.** `@playwright/test` 1.56.1 declared as
+apps/dashboard devDependency (it was an UNDECLARED ad-hoc install in
+node_modules; `e2e_j6` now prefers the workspace pin over `npx` — one
+source of truth, no npx-cache dependency). New CI job `Dashboard E2E
+(Playwright — J6 + F1 budget wire)`: first run GREEN on main
+(run 40506644576) — the payload pin is CI-enforced.
+
+**Docs.** Guide §budgets + runbook defect blockquote reworded: minute is
+a true request cap since v0.1.3 (6th request in a minute 429s with
+`Limit reached: N requests per minute`); pre-0.1.3 symptom retained for
+old-image pilots (upgrade, or delete the rule + wait 5 s).
+
+**Release v0.1.3 (`eb32ba8`, tag `v0.1.3`, release run 40507195511
+success).** Bump set mirrors the v0.1.2 precedent: workspace Cargo.toml
++ Cargo.lock (5 crates) + apps/dashboard/package.json + README status +
+landing eyebrow. CI on main green (Rust/dashboard/e2e/J7/deny). Multi-
+arch GHCR: `0.1.3` + `latest`.
+
+**Smoke on the RELEASED image.** Throwaway container on 0.1.3 (8113,
+no-auth mock on a private network mirroring the m4-harness paths,
+throwaway volume): healthz 200 · create-admin · the repo F1 spec run
+against the container's served dashboard: minute →
+`limit_requests=5/limit_tokens=null` ✓, day → inverse ✓, burst
+`[200×5, 429×3]` ✓, "Limit reached: 5 requests per minute" ✓. Rig torn
+down after.
+
+**Demo re-pin (8112).** `tributary-demo` recreated on 0.1.3, SAME
+volume + master key + port + dual-homing (bridge + demo-net@172.28.0.3)
++ restart policy — stories and usage parity intact by construction;
+healthz 200, dashboard serving. Founder's 8111 untouched (`latest`,
+pulls when he likes: `docker compose pull && docker compose up -d`).
+
+**Fast jump — F1 + v0.1.3 touched:** `apps/dashboard/app/org/pools/page.tsx`
+· `apps/dashboard/e2e/f1-budget-wire.spec.ts` (new) · `scripts/e2e_j6.py`
+· `apps/dashboard/package.json` + `pnpm-lock.yaml` (@playwright/test
+declared) · `.github/workflows/ci.yml` (e2e job) ·
+`docs/onboarding-org-admin.md` + `docs/pilot-support.md` (defect notes) ·
+version bump set (Cargo.toml/Cargo.lock/package.json/README/landing) ·
+commits `b3857b4`/`af7a79b`/`eb32ba8` + tag `v0.1.3` · GHCR
+`0.1.3`/`latest` · demo stack re-pinned in place.
 
 ### 2026-10-27 — M6 SLICE 1: pilot onboarding surface (evidence-independent half)
 
