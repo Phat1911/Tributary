@@ -93,6 +93,23 @@ volume + master key — stories intact (classifier + D32 flags), usage
 parity intact (281 / 15 days / 460,492 tokens), dual-homing restored
 (demo-net 172.28.0.3), slice-2 UI in the served bundle.
 
+**PENDING DIRECTOR QUESTION (founder, 2026-10-27): LIVE demo, no video.**
+The hackathon demo will be performed LIVE on Demo Day (Nov 14), not a
+recorded video shown that day. REAL-CONSUMER appendix items 1–3 are DONE
+with evidence (usage rows, key row, chat panel); item 4 (save the
+recording) is skipped by this decision. Needs director re-scope:
+(a) **E9's new home** — was parked at "the Nov-12 video recording";
+candidates: a pre-event rehearsal, or ON-STAGE (phone on mobile data +
+ts.net + same member key = the strongest live version);
+(b) **stale commitments** — SPEC §14 M5.5 residue ("video records
+~2026-11-12, README link same day") and D36 ("demo video doubles as
+Demo Day material") assumed a recording;
+(c) **script doc role** — `docs/demo-video-script.md` becomes the LIVE
+script; a live performance needs a rehearsal slot, per-scene plan B
+(venue Wi-Fi vs tailnet; phone hotspot as fallback network AND the E9
+prop), and demo-stack resilience on the day (8112 stack already
+re-pinned to 0.1.2 and stable).
+
 **Fast jump — D37 + release touched:** `crates/gateway/src/chat.rs`
 (drop fn + allowlist const) · `crates/gateway/tests/m55_gemini.rs`
 (store-rejecting mock + 3 permanent tests) · `SPEC.md` (D37 row) ·
