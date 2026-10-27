@@ -40,6 +40,72 @@
 
 ## Milestone log (append per completed milestone; keep the most recent 10)
 
+### 2026-10-27 — CHORE: v0.1.1 image release + demo re-pin (M5.5, director order)
+
+**Scope.** Director image chore (blocking the ~Nov-12 video): the slice-2
+UI existed only in `main`, not in any released image. Bump/tag → smoke →
+re-pin the 8112 demo stack → PLAN entry; founder then re-pulls 8111.
+
+**Release.** Version bumped 0.1.0→0.1.1 in `Cargo.toml` (workspace) +
+`apps/dashboard/package.json` + README status line + landing eyebrow
+(Pages redeployed automatically, green). Director's SPEC housekeeping
+(M6 checkbox wording: adoption focus, paid tier void per D35) swept
+into the release commit `65ce698`. Tag `v0.1.1` pushed → release
+workflow run 40444812015 **success** (~46 min, multi-arch amd64+arm64 →
+GHCR tags `0.1.1` + `latest` — the semver pattern drops the `v`, M5
+convention). CI on `main` at `65ce698`: **green** (Rust dual-DB incl.
+m55_gemini, cargo-deny, dashboard, SDK contract incl. the new
+Gemini-compat legs). Landing Pages run green. Zero migration changes
+v0.1.0→v0.1.1 — volumes carry over by construction.
+
+**Smoke (8113, compose-free, throwaway volume):** healthz 200 ·
+create-admin ok · login ok · provider-select UI ("Gemini (AI Studio
+key)") present in the served static bundle. Removed after.
+
+**Demo re-pin (8112):** `tributary-demo` recreated on `0.1.1` with the
+SAME volume + SAME master key (recovered from the old container's env)
+— all staged state survived: healthz 200, avery login ok, review queue
+= the two stories (classifier + D32), usage parity intact (281 rows /
+15 days / 460,492 tokens), dual-homing restored on demo-net
+(172.28.0.3), slice-2 UI found in the bundle. `/tmp/repin_demo_v011.sh`
+(throwaway, not committed).
+
+**REAL-CONSUMER finding (founder dogfood, DSH → pool → real Gemini,
+2026-10-27 ~10:40):** DSH's first turn 400s; DB evidence shows the pool
+behaved perfectly — a burst of 7 `security.quota_denied` audits while
+the 10-token cap lived (denied BEFORE upstream, no Google cost), then
+after cap removal three requests ADMITTED, ROUTED, and METERED with
+`status=400, 0 tokens`. Diagnosis via a throwaway capture proxy
+(/tmp/dsh_capture_proxy.py → :8114): **Google's compat layer rejects
+`"store": false` — a legitimate OpenAI param — with 400 "Unknown name
+'store': Cannot find field"** instead of ignoring it ("OpenAI-compatible"
+≠ OpenAI-complete). Plain messages, a simple tool schema, and streaming
+all pass through the pool (three green bisect curls). Tributary needs
+no change (router, not converter — the posture held); the fix is
+DSH-side field suppression or upstream pairing; auto-bisect script
+(/tmp/replay_bisect.py) awaits the founder's run for the full offender
+list (second suspect: `max_completion_tokens`). Journey-report line for
+the founder; no AUDIT entry (no security issue — the product surfaced
+everything honestly).
+
+**FOUNDER NEXT ACTIONS (image chore):**
+1. `docker compose pull && docker compose up -d` on your 8111 instance
+   (volume + master key carry over; zero migrations). E1–E8 unchanged;
+   the E3 Gemini dropdown + provider column now render (verify E3's
+   label check).
+2. Run `/tmp/replay_bisect.py 'sk-pool-…'` → send the "200 OK after
+   dropping: […]" line for the record.
+3. E9 + the harness dogfood against 8111 on the NEW image (pull first);
+   record the dogfood session — Demo-Day footage.
+
+**Fast jump — chore touched:** `Cargo.toml`/`Cargo.lock` ·
+`apps/dashboard/package.json` · `README.md` (version) ·
+`landing/index.html` (eyebrow) · `SPEC.md` (director M6/D35 sweep) ·
+`PLAN.md` (this entry) · commit `65ce698` + tag `v0.1.1` · GHCR
+`ghcr.io/phat1911/tributary:0.1.1` / `:latest` · demo stack re-pinned
+in place (no repo files).
+
+
 ### 2026-10-27 — M5.5 SLICE 2 (FINAL): Gemini provider support — CLOSES M5.5
 
 **Scope.** Director kickoff (GO + 4 additions: rate-limit honesty,
