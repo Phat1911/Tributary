@@ -12,7 +12,9 @@ every click is a real flow, every flag was raised by real traffic.
 - Terminal font bumped up (16–18 pt) — it shares the screen.
 - Record one scene at a time; the final cut is just scenes in order.
   One-take-per-scene is fine — nobody expects live narration perfection.
-- The stack: the staged demo instance on **http://localhost:8111**
+- The stack: the staged demo instance on **http://localhost:8112**
+  (name `tributary-demo` — collision-proof with your own deployment,
+  which owns `tributary`/8111 on this machine)
   (see "Pre-stage" at the bottom). If it is not running, re-stage it
   first — commands included there.
 
@@ -58,7 +60,7 @@ clone/cp/echo/compose lines pasted in the terminal scrollback.
 
 ## Scene 2 — Login (browser)
 
-**ON SCREEN:** http://localhost:8111/login, empty form.
+**ON SCREEN:** http://localhost:8112/login, empty form.
 
 **DO:** type `avery@labs.example` / `AveryLaunch-Demo2026`, click
 **Sign in**. Land on the org console.
@@ -197,23 +199,27 @@ From the repo root on the recording machine:
 ```sh
 # 1. Stack up (if not already running) — see deploy/README.md quickstart,
 #    or the compose-free path:
-docker run -d --name tributary -p 8111:8080 \
+# (names/ports: demo owns 8112 + the -demo suffix; your own instance
+#  keeps tributary/8111 — one docker engine, no collisions. The master
+#  key lives in the container env: `docker inspect` recovers it if you
+#  ever must recreate the container against the SAME volume.)
+docker run -d --name tributary-demo -p 8112:8080 \
   -e TRIBUTARY_MASTER_KEY=$(openssl rand -hex 32) \
-  -v tributary-data:/data --restart unless-stopped \
+  -v tributary-demo-data:/data --restart unless-stopped \
   ghcr.io/phat1911/tributary:latest
 docker exec -e TRIBUTARY_DATABASE_URL=sqlite:///data/tributary.db \
-  tributary tributary create-admin \
+  tributary-demo tributary create-admin \
   --email host@tributary.example --password 'HostLaunch-Demo2026'
 
 # 2. The mock upstream + the D32 second network need a docker network:
 docker network create --subnet 172.28.0.0/16 demo-net
-docker network connect --ip 172.28.0.3 demo-net tributary
+docker network connect --ip 172.28.0.3 demo-net tributary-demo
 docker run -d --name demo-upstream --network demo-net \
   -v "$PWD/scripts/mock_jev.py:/mock_jev.py:ro" --restart unless-stopped \
   python:3.13-alpine python3 /mock_jev.py 8098 0.0.0.0
 
 # 3. Stage the org + stories (public API only, idempotent-fresh):
-python3 scripts/seed_post_demo.py
+python3 scripts/seed_post_demo.py --base http://localhost:8112
 ```
 
 Logins it prints: `avery@labs.example / AveryLaunch-Demo2026` (org
@@ -228,5 +234,32 @@ file after copying back — otherwise every write fails with
 file directly.
 
 **If re-staging for a second take:** the seed script is
-idempotent-fresh — easiest is a fresh volume: `docker rm -f tributary
-&& docker volume rm tributary-data`, then steps 1–3 again.
+idempotent-fresh — easiest is a fresh volume: `docker rm -f tributary-demo
+&& docker volume rm tributary-demo-data`, then steps 1–3 again
+(+ the usage-history parity backfill, sanctioned exception).
+
+---
+
+## Demo Day addendum — the Gemini scene (records ~Nov 12, founder's machine)
+
+The GDG Demo Day cut (D36) adds pooled GEMINI footage to this script's
+core. It records on the founder's own instance (NOT the staged mock
+stack — a real AI-Studio key is the honest Google-tech leg), following
+[`founder-journey-m55-slice2.md`](founder-journey-m55-slice2.md):
+
+- **Scene G1 (terminal):** the model-enumeration curl against the compat
+  endpoint (Bearer header) — "Google's endpoint, our header, no keys in
+  URLs" — ending on the flash model id.
+- **Scene G2 (browser):** Add provider key → provider **Gemini**, key
+  pasted, health flips ok; the masked prefix + `gemini` label in the
+  list (the new provider column).
+- **Scene G3 (split):** member curl through the pool → real Gemini
+  answer; the usage row lands on the pool page with the gemini model id.
+- **Scene G4 (optional, strongest):** the founder's own AI harness
+  pointed at `http://localhost:8111/v1` (your own instance — the one
+  with the real Gemini key) with a member key — real work,
+  live metering. If a free-tier 429 surfaces on camera, keep it: the
+  pool telling the truth about upstream limits IS the demo.
+
+Rate-limit reminder for narration: AI Studio free tier is
+requests-per-minute limited — demo pace is fine, agent loops may 429.

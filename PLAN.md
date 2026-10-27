@@ -4,8 +4,8 @@
 
 ## Current state
 
-- **Date:** 2026-10-26 · **Spec:** v0.3 (decisions D1–D36)
-- **Next milestone:** M5.5 — **slice 1 CLOSED 2026-10-26** (landing page live at https://phat1911.github.io/Tributary/ via Pages CI; Tailscale rung stranger-proofed by founder journey findings #1–#5, all fixed in-guide; demo-video script + founder journey shipped; founder journey A1–A12 PASS + B PASS + C done — host-admin login over https://…ts.net after the two-daemon root cause was fixed; link/anchor/og self-verified at close). Remaining: Gemini provider slice (kickoff ~2026-11-07), video recorded ~2026-11-12 (GDG deadline 2026-11-14) → M6 (pilot onboarding; adoption focus, V1 entirely free per D35)
+- **Date:** 2026-10-27 · **Spec:** v0.3 (decisions D1–D36)
+- **M5.5: DONE (closed 2026-10-27, slice 2 = Gemini)** — slice 1 (2026-10-26): landing live at https://phat1911.github.io/Tributary/, Tailscale rung stranger-proofed (findings #1–#7), video script, journeys A/B/C PASS. Slice 2 (2026-10-27): Gemini as a first-class pool provider — proven provider-agnostic by construction (no gateway-code change; base_url + Bearer already spoke the compat endpoint). J-A/B/C public-API journeys dual-DB green (`m55_gemini.rs`); J-D official-SDK contract legs vs mock Gemini-compat upstream green (same CI script); dashboard provider select + column; README/deploy/landing honest paragraphs + model-ID verify curl + rate-limit honesty; J-E founder real-key script shipped (`docs/founder-journey-m55-slice2.md`). Demo stack RE-STAGED collision-proof (`tributary-demo` @8112, dual-homed on demo-net, stories green, shadow flag dismissed, usage parity re-seeded: 281 rows / 15 days / 460K tokens). **Residue until real: demo video records ~2026-11-12, README link lands same day — Nov-7 director checkpoint chases it.** Next: M6 (pilot onboarding; adoption focus, V1 entirely free per D35).
 - **Code:** M5 complete and director-verified (2026-10-25): full hardening block red-first (A-019/020/021/022bc/026/028), packaging + GHCR v0.1.0 live, SDK contract tests in CI, public scrub + full-history rewrite clean, founder stranger run PASSED. Close-out 53c0430. Known leftovers: stopwatch number (optional, M5.5), D32 sequential-sharing blind spot (documented), concurrency_flags_for_key cleanup decision (open, pre-M5 leftover).
 - **Post-close events (2026-10-25/26):** LinkedIn humble-launch post shipped (four ask doors per D34); launch-post assets chore done (79bbb80 — seed_post_demo.py, post_shots rig, stack staging); stranger-finding #4 fixed live: quickstart master-key step promoted to its own line (969cfdf); GDG hackathon entry recorded (D36); Product Hunt launch planned for early December post-M5.5 (feedback-not-upvotes; vault holds the doctrine).
 
@@ -33,11 +33,146 @@
 - Binary additions: `/healthz` + ServeDir static serving (`crates/gateway/src/lib.rs` `config.rs` `db.rs`, `crates/common/src/db.rs` create_if_missing)
 - Journeys/tests: `scripts/contract_openai_sdk.py` (J7) `scripts/e2e_j6.py` (J6)
 - Records: `SPEC.md` (scrub f924d05 + D34/D35/M5.5/M6 + §14 tick) `PLAN.md` `AUDIT.md` (flake #3) `.gitignore`
+| M5.5 | **DONE (closed 2026-10-27)** | Slice 1 (landing/Tailscale/video script) 2026-10-26 + slice 2 (Gemini provider, J-A…E) 2026-10-27; §14 ticked. Residue: video records ~2026-11-12 |
 | M6 | pending | V1 — pilots |
 | M7–M11 | pending | V2 — Root Pool |
 | M12–M14 | pending | V3 — Operator network |
 
 ## Milestone log (append per completed milestone; keep the most recent 10)
+
+### 2026-10-27 — M5.5 SLICE 2 (FINAL): Gemini provider support — CLOSES M5.5
+
+**Scope.** Director kickoff (GO + 4 additions: rate-limit honesty,
+allowlist string-match verification, REAL-CONSUMER appendix, FOUNDER
+NEXT ACTIONS block). D36's honest Google-tech requirement: a real
+Gemini key as a first-class pool provider via the OpenAI-COMPATIBLE
+endpoint (`generativelanguage.googleapis.com/v1beta/openai/`), merged +
+verified + demoable by ~2026-11-10 (video ~Nov 12, Demo Day Nov 14).
+Journeys define done (workflow step 12): J-A provision, J-B serve, J-C
+govern, J-D contract (CI, mock upstream, no real key), J-E founder
+real-key manual script.
+
+**The headline finding (confirmed director suspicion (a)):** NO
+gateway-code change was needed. Migration 0004 already gave
+`provider_keys` a `provider` label and an API-settable `base_url`; the
+gateway already routes `{base_url}/chat/completions` with
+`Authorization: Bearer` (chat.rs:314) — exactly the compat endpoint's
+auth shape. Provider-agnosticism was PROVEN, not assumed: the J-B
+journey pins Bearer-auth + no-query-string on every upstream hit, metering
+row + IP fingerprint parity, and identical quota arithmetic (same 11/7
+token counts as the OpenAI mock). Allowlist matching verified as PLAIN
+string equality (chat.rs:76 — no gpt-* shape assumptions; addition #2
+satisfied, and the gemini allowlist test proves it end-to-end). The
+teaching pin for Bearer-vs-`?key=` lives in the test mock itself: any
+request with a query string is 401'd, so a future regression to
+query-param auth turns the whole suite red.
+
+**J-A green first (director's order), then breadth.** All four journey
+tests green dual-DB (SQLite tempfile + Postgres 16 on :5433, throwaway
+`tributary-pg-m55`): `j_a` provisioning (encrypted at rest, masked
+everywhere, provider label round-trips, compat base_url stored
+verbatim), `j_b` serving (non-stream + stream legs — injected usage
+chunk stripped downstream, both usage rows on the gemini provider key
+with model pass-through, IP fingerprint row), `j_c_quota` (day-cap 429
+BEFORE upstream + exactly one `security.quota_denied` audit row), `j_c_d32`
+(two-/24 sharing flag fires alert-only on gemini-routed traffic,
+deduped to exactly one). J-D extended `contract_openai_sdk.py`: the
+two SDK legs are parameterized by model, and two new legs run the
+official Python + JS OpenAI SDKs against a mock Gemini-compat upstream
+(in-process `GeminiCompatMock`, same Bearer/query-string pins) — 4/4
+legs green locally; CI's `sdk-contract` job runs the same script, no
+workflow change.
+
+**UI (minimal, not a redesign).** Add-provider-key dialog gains a
+provider select (OpenAI / Gemini (AI Studio key) / Custom
+(OpenAI-compatible)) that prefills the base URL and key placeholder,
+sends `provider` with the create call; the key list gains a Provider
+column. tsc + eslint + next build clean.
+
+**Docs + landing.** README: provider-keys paragraph (works with OpenAI
+and Gemini keys, any OpenAI-compatible endpoint; NOT a format
+converter; free-tier rate-limit honesty). deploy/README: full
+"Provider keys — OpenAI and Gemini" section — provider table, honest
+boundaries, the model-ID enumeration curl (Bearer, never `?key=`),
+plain-string allowlist note, a **VERIFIED-on-this-deployment slot** the
+founder fills at J-E (no blind hardcoding — director confirmation (b)).
+.env.example: TRIBUTARY_MODELS gemini example. Landing hero lede:
+"OpenAI and Gemini keys both work, along with any OpenAI-compatible
+endpoint" — posture grep clean (sole match remains the rule comment
+itself).
+
+**J-E (founder real-key script).** `docs/founder-journey-m55-slice2.md`:
+E1 model-ID enumeration curl (record the id — fills deploy/README's
+VERIFIED slot) → E2 pool with gemini allowlist → E3 add Gemini key
+through the NEW UI field → E4 member curl → E5 real answer → E6 usage
+row → E7-E9 quota 429 + D32 leg. Rate-limit honesty box up top (must
+not meet 429s first on stage Nov 14). REAL-CONSUMER appendix: repoint
+any OpenAI-compatible harness at `http://localhost:8111/v1` with a
+member key, record the session — Demo-Day footage (after the tick;
+J-E itself stays curl).
+
+**Demo stack re-stage + parity re-seed (slice-1 open item).** Fresh
+stage per the video script's pre-stage, collision-proof: `tributary-demo`
+@ **8112**, volume `tributary-demo-data`, dual-homed on recreated
+`demo-net` (172.28.0.0/16, gateway at 172.28.0.3), `demo-upstream`
+mock, `seed_post_demo.py --base http://localhost:8112` green end-to-end
+(quota 429 / D32 / classifier / rotation stories), shadow-leg
+classifier_flag dismissed via the public resolve API (queue = the two
+stories). Usage-history parity re-applied through the sanctioned
+exception — this time WITHOUT host sudo: a throwaway helper container
+(never committed, chore precedent) edited the stopped volume in place,
+backing up the db+wal+shm trio beside it and chown-ing everything back
+to 999:999 (both 2026-10-25 lessons honored). Result: 281 rows / 15
+days / 460K tokens — pool pages show lived-in numbers (verified via
+the public usage/summary API). Master key lives in the container env
+(`docker inspect tributary-demo` recovers it if the container must be
+recreated against the same volume; fresh re-stage = fresh key + fresh
+volume per the video script). Stack LEFT RUNNING (unless-stopped) for
+the ~Nov-12 record; the founder's own `tributary` @8111 untouched.
+
+**Video script updates.** Pre-stage re-pointed to the collision-proof
+names (tributary-demo @8112, seed `--base`, master-key recovery note) —
+the script still taught the pre-incident layout, which would have
+collided on this laptop. Scene 1 keeps 8111 (his own quickstart
+container IS the scene); browser scenes 2–8 now say 8112. New
+"Demo Day addendum — the Gemini scene": G1 enumeration curl → G2
+add-key UI → G3 member curl + usage row → G4 harness dogfood on his
+own instance (keep a 429 on camera if one comes — honesty is the demo).
+
+**Step-10 (deps):** none. No Cargo/pnpm/Actions changes (the contract
+job runs the same script; `cargo test --workspace` picks up the new
+test binary). `scripts/__pycache__/` added to .gitignore.
+
+**Tests/verification.** Workspace `cargo test` green dual-DB (incl.
+m55_gemini 4/4); `cargo fmt` clean; `clippy --workspace --all-targets
+-D warnings` + geoip variant clean; dashboard tsc/eslint/build clean;
+contract 4/4 legs green locally (CI re-runs); landing posture grep
+clean. No AUDIT.md entry — no new finding (no gateway-path change, no
+new deps, no secret-handling change; the `?key=` pin is a test, not a
+fix).
+
+**FOUNDER NEXT ACTIONS (chased at the Nov-7 director checkpoint):**
+1. **Obtain a Google AI Studio key** — <https://aistudio.google.com/apikey>
+   (free) — and finish the deploy-journey redo if not yet done (your
+   own instance on 8111 is the J-E target).
+2. **Run J-E** (`docs/founder-journey-m55-slice2.md`, 10–15 min) with
+   the real key; send the filled report; fill deploy/README's VERIFIED
+   slot with the E1 model id and commit it.
+3. **After the tick:** repoint your AI harness at the pool
+   (`http://localhost:8111/v1` + a member key) and **RECORD the
+   dogfood session** — that footage is a demo-video scene (Demo Day,
+   Nov 14). Then the full video records ~Nov 12 per
+   `docs/demo-video-script.md` (demo stack already live on 8112), and
+   the README link lands same day (M5.5's last residue).
+
+**Fast jump — slice 2 touched:** `crates/gateway/tests/m55_gemini.rs`
+(new) · `scripts/contract_openai_sdk.py` ·
+`apps/dashboard/app/org/pools/page.tsx` · `README.md` ·
+`deploy/README.md` · `deploy/.env.example` · `landing/index.html` ·
+`docs/founder-journey-m55-slice2.md` (new) · `docs/demo-video-script.md`
+· `SPEC.md` (§14 M5.5 tick) · `PLAN.md` (this entry) · `.gitignore` ·
+commits d258b1f / 0d0c712 / 9984f46 / 5367101 (+ this close-out)
+
 
 ### 2026-10-26 — M5.5 SLICE 1: landing page + Tailscale rung + demo-video script
 
