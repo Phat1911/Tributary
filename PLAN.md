@@ -81,12 +81,14 @@ after cap removal three requests ADMITTED, ROUTED, and METERED with
 'store': Cannot find field"** instead of ignoring it ("OpenAI-compatible"
 ≠ OpenAI-complete). Plain messages, a simple tool schema, and streaming
 all pass through the pool (three green bisect curls). Tributary needs
-no change (router, not converter — the posture held); the fix is
-DSH-side field suppression or upstream pairing; auto-bisect script
-(/tmp/replay_bisect.py) awaits the founder's run for the full offender
-list (second suspect: `max_completion_tokens`). Journey-report line for
-the founder; no AUDIT entry (no security issue — the product surfaced
-everything honestly).
+no change (router, not converter — the posture held); **auto-bisect
+verdict (founder-run, 2026-10-27): "200 OK after dropping: ['store']" —
+`store` is the ONLY offender; DSH's full agent payload incl. tools,
+streaming, and `max_completion_tokens` passes otherwise.** Fix is
+DSH-side field suppression (or a store-strip shim IF the director rules
+one in — it brushes the no-converter doctrine); Demo Day pairings that
+work today: official OpenAI SDK clients → pool → Gemini (J-D-proven)
+and DSH → pool → OpenAI.
 
 **FOUNDER NEXT ACTIONS (image chore):**
 1. `docker compose pull && docker compose up -d` on your 8111 instance
