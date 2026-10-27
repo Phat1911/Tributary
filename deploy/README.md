@@ -303,6 +303,59 @@ and add a `postgres` service to your compose file; the binary and every
 migration work identically on both (the repo's CI tests both on every
 push).
 
+## Provider keys — OpenAI and Gemini
+
+Pools hold **provider keys from any OpenAI-compatible endpoint**. In the
+dashboard's *Add provider key* dialog: pick the provider, paste the key,
+check the base URL.
+
+| Provider | Key from | Base URL |
+|---|---|---|
+| OpenAI | platform.openai.com | `https://api.openai.com/v1` |
+| Gemini | Google AI Studio (aistudio.google.com, free) | `https://generativelanguage.googleapis.com/v1beta/openai` |
+| Custom | any OpenAI-compatible server (e.g. a local one) | its `/v1` root |
+
+Gemini rides Google's **OpenAI-compatible endpoint**, so member traffic
+is metered, quota-checked (reserve → settle → release), and
+leak-watched (IP fingerprinting, D32 sharing flags) exactly like
+OpenAI-routed traffic — provider-agnostic by construction. Two honest
+boundaries:
+
+- Tributary speaks **only** the OpenAI-compatible wire format. It is
+  **not** a format converter; the native Gemini API shape is not
+  translated. Point clients at the pool, and the pool at the compat
+  endpoint.
+- **Rate-limit honesty (read before demoing):** AI Studio's free tier
+  is **rate-limited** (requests per minute and per day). Fine for demos
+  and pilots — but under load the pool will surface upstream `429`s.
+  You will not hit it with a curl demo; you may hit it pointing a whole
+  team or an agent harness at one free key. That is Google's limit, not
+  a Tributary bug.
+
+**Model IDs drift — verify, never hardcode.** The free-tier flash model
+was `2.0-flash`, then `3.8-flash`; names keep moving. Before relying on
+an ID, enumerate what YOUR endpoint currently serves (this is the same
+route the pool's key-health probe uses):
+
+```sh
+curl -s https://generativelanguage.googleapis.com/v1beta/openai/models \
+  -H "Authorization: Bearer AIza…" | head -40
+```
+
+(The key is sent as a **Bearer header, never a `?key=` query param** —
+keys in URLs leak into access logs; the pool itself only ever sends the
+header.)
+
+The model you find goes into the **pool's model allowlist** at pool
+creation (or `TRIBUTARY_MODELS` as the default for new pools — see
+`.env.example`). Matching is plain string equality: whatever the
+endpoint reports works, `gemini-*` names included.
+
+> **Verified on this deployment** (fill in when you run the J-E journey
+> in `docs/founder-journey-m55-slice2.md`):
+> model id `________________`, verified `<date>`, endpoint
+> `generativelanguage.googleapis.com/v1beta/openai`.
+
 ## Quota behavior — how requests are counted
 
 Tributary meters per-member usage with **reserve → settle → release**

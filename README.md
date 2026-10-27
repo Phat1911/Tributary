@@ -58,6 +58,17 @@ compile).
 > it, X-Forwarded-For is ignored and the socket address is used. Details:
 > [`deploy/README.md`](deploy/README.md).
 
+> **Provider keys — OpenAI and Gemini:** pools accept keys from **any
+> OpenAI-compatible endpoint**. A Google AI Studio (Gemini) key goes in
+> with provider *Gemini* and base URL
+> `https://generativelanguage.googleapis.com/v1beta/openai`; member
+> traffic is then metered, quota-checked, and leak-watched exactly like
+> OpenAI-routed traffic. Tributary speaks (and meters) the
+> OpenAI-compatible wire format on all pools — it is **not** a format
+> converter, and the native Gemini API shape is not translated. Note the
+> free tier of AI Studio is rate-limited: fine for demos and pilots, but
+> expect upstream 429s under load. Details: [`deploy/README.md`](deploy/README.md).
+
 ## What it is
 
 A tributary is a small stream that feeds a larger river — and that is
@@ -106,7 +117,8 @@ pnpm -C apps/dashboard build
 ```
 
 CI (`.github/workflows/ci.yml`) runs all of the above, `cargo-deny`,
-and the OpenAI SDK contract test.
+and the official-SDK contract tests (OpenAI and Gemini-compat upstreams,
+real OpenAI-SDK clients).
 
 ## License
 
