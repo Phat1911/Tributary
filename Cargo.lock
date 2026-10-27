@@ -2183,7 +2183,7 @@ dependencies = [
 
 [[package]]
 name = "tributary-common"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "hex",
@@ -2196,7 +2196,7 @@ dependencies = [
 
 [[package]]
 name = "tributary-control"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "argon2",
@@ -2221,7 +2221,7 @@ dependencies = [
 
 [[package]]
 name = "tributary-crypto"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -2233,7 +2233,7 @@ dependencies = [
 
 [[package]]
 name = "tributary-gateway"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "axum",
@@ -2259,7 +2259,7 @@ dependencies = [
 
 [[package]]
 name = "tributary-ledger"
-version = "0.1.1"
+version = "0.1.2"
 
 [[package]]
 name = "try-lock"

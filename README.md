@@ -5,7 +5,7 @@
 **Landing page:** <https://phat1911.github.io/Tributary/> — one screen,
 live screenshots, the two-minute quickstart.
 
-**Status: v0.1.1 — self-hostable AI token pools** (gateway, org pools,
+**Status: v0.1.2 — self-hostable AI token pools** (gateway, org pools,
 dashboard). Pre-alpha software, real release: every org gets per-user
 keys over pooled provider capacity, with quotas, audit, and leak
 signals. Roadmap lives in [`SPEC.md`](SPEC.md) §14.
