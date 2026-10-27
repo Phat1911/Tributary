@@ -61,6 +61,11 @@ once the slice is ticked and **record the screen**:
 1. In your harness's OpenAI settings, set
    `base_url = http://localhost:8111/v1` and
    `api_key = <the member sk-pool-… key>`. Model: the E1 id.
+   **The base URL is the ROOT (`…/v1`) — never the full
+   `…/v1/chat/completions` path.** Clients compose paths themselves: a
+   `404 …/v1/chat/completions/models` on model fetch means exactly this
+   mistake (founder-hit 2026-10-27). Over the tailnet from another
+   machine: `https://<machine>.<tailnet>.ts.net/v1`.
 2. Run a real session. Every call is now metered, quota-checked, and
    IP-fingerprinted by your own gateway — usage rows should appear live
    on the pool page.
