@@ -351,9 +351,9 @@ creation (or `TRIBUTARY_MODELS` as the default for new pools — see
 `.env.example`). Matching is plain string equality: whatever the
 endpoint reports works, `gemini-*` names included.
 
-> **Verified on this deployment** (fill in when you run the J-E journey
-> in `docs/founder-journey-m55-slice2.md`):
-> model id `________________`, verified `<date>`, endpoint
+> **Verified on this deployment:** model id `gemini-2.5-flash`, verified
+> live 2026-10-27 (founder J-E enumeration — the free-tier flash id the
+> endpoint reported), endpoint
 > `generativelanguage.googleapis.com/v1beta/openai`.
 
 **Field drops (D37).** Google's compat endpoint 400s on OpenAI's `store`
