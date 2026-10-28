@@ -2260,6 +2260,14 @@ dependencies = [
 [[package]]
 name = "tributary-ledger"
 version = "0.1.3"
+dependencies = [
+ "anyhow",
+ "sqlx",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tributary-common",
+]
 
 [[package]]
 name = "try-lock"

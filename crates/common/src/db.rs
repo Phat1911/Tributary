@@ -145,6 +145,99 @@ pub async fn connect_sqlite_memory() -> anyhow::Result<Db> {
 /// Run embedded migrations (idempotent — safe on every start).
 pub async fn run_migrations(db: &Db) -> anyhow::Result<()> {
     MIGRATIONS.run(db.pool()).await?;
+    run_ledger_guards(db).await?;
+    Ok(())
+}
+
+/// Engine-specific append-only guards for `ledger_entries` (rule 3, M7).
+///
+/// Why this lives here and not in a migration file: sqlx applies every
+/// migration file to BOTH engines, and the guards are inherently
+/// engine-specific — SQLite needs `RAISE(ABORT, …)` trigger syntax that
+/// Postgres cannot parse, Postgres needs role DDL that SQLite cannot parse.
+/// `Db::sql`/engine branches in `common` are the sanctioned home for such
+/// SQL (AGENTS.md), and hooking the guards into `run_migrations` means every
+/// app start and every test harness arms them with zero call-site changes.
+///
+/// Honesty about failure: SQLite trigger DDL on our own database file has no
+/// privilege failure mode — any error is fatal (real breakage). Postgres
+/// `CREATE ROLE` requires privileges a managed-database app user may not
+/// have; in that case the guard degrades to a loud warning instead of
+/// bricking an upgrading V1 deployment (zero-V1-behavior-change constraint,
+/// M7) — the role then becomes a documented deployment requirement
+/// (deploy/README, "Ledger append-only boundary").
+async fn run_ledger_guards(db: &Db) -> anyhow::Result<()> {
+    // ONE transaction for the whole set: test harnesses share databases
+    // between concurrently-booting apps, and separate autocommit statements
+    // from two boots can interleave (DROP on one connection, CREATE on
+    // another → "trigger already exists"). Inside a transaction the
+    // engine's write lock serializes whole guard applications (found live
+    // by the M4 journey suite, which boots one shared SQLite DB per test
+    // binary in parallel).
+    let mut tx = db.pool().begin().await?;
+    if db.postgres() {
+        // One statement at a time: sqlx executes exactly one statement per
+        // query call (no multi-statement batching).
+        for stmt in [
+            // NOLOGIN: the role is a privilege identity assumed via SET ROLE
+            // (or a future LOGIN grant by the operator), not a password
+            // account. Idempotent creation — CREATE ROLE has no IF NOT
+            // EXISTS in Postgres.
+            "DO $$ BEGIN \
+                 IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'tributary_app') THEN \
+                     CREATE ROLE tributary_app NOLOGIN; \
+                 END IF; \
+             END $$;",
+            // The grant matrix: append + read everywhere; the balances CACHE
+            // alone may be UPDATEd (it is a derivative, not truth). No
+            // sequences exist to grant USAGE on — ids are TEXT minted in
+            // Rust (house style), so there is nothing to grant.
+            "GRANT SELECT, INSERT ON ledger_entries TO tributary_app",
+            "GRANT SELECT, INSERT ON ledger_accounts TO tributary_app",
+            "GRANT SELECT ON chart_of_accounts TO tributary_app",
+            "GRANT SELECT, INSERT, UPDATE ON ledger_account_balances TO tributary_app",
+            // Documentation of intent, NOT the enforcement: this role never
+            // held UPDATE/DELETE (GRANT adds only what it names). Owners
+            // bypass grants entirely — the ROLE SPLIT is the enforcement.
+            // Kept so the invariant survives a future careless GRANT ALL.
+            "REVOKE UPDATE, DELETE, TRUNCATE ON ledger_entries FROM tributary_app",
+            "REVOKE UPDATE, DELETE ON ledger_accounts, ledger_account_balances FROM tributary_app",
+        ] {
+            if let Err(err) = sqlx::query(stmt).execute(&mut *tx).await {
+                // Roll back the partial guard set before continuing without
+                // it (the transaction would otherwise be aborted for the
+                // next user of this connection).
+                drop(tx);
+                // eprintln, not tracing: `common` deliberately has no
+                // tracing dependency (step-10 discipline), and this runs
+                // once at startup where container logs capture stdout/stderr.
+                eprintln!(
+                    "ledger append-only role guard NOT applied (Postgres): {err}\n  \
+                     migrations ran, but the app role split is missing — see \
+                     deploy/README 'Ledger append-only boundary'"
+                );
+                return Ok(());
+            }
+        }
+    } else {
+        // SQLite has no roles; BEFORE-row triggers are the wall. Drop-then-
+        // create (not IF NOT EXISTS) so the triggers re-arm on EVERY start —
+        // if a future migration rebuilds ledger_entries, its triggers die
+        // with the old table, and this step reinstalls them moments later.
+        for stmt in [
+            "DROP TRIGGER IF EXISTS ledger_entries_no_update",
+            "DROP TRIGGER IF EXISTS ledger_entries_no_delete",
+            "CREATE TRIGGER ledger_entries_no_update BEFORE UPDATE ON ledger_entries \
+             BEGIN SELECT RAISE(ABORT, 'ledger_entries is append-only'); END",
+            "CREATE TRIGGER ledger_entries_no_delete BEFORE DELETE ON ledger_entries \
+             BEGIN SELECT RAISE(ABORT, 'ledger_entries is append-only'); END",
+        ] {
+            // No privilege mode can make trigger DDL on our own file
+            // "optional" — a failure here is real breakage: fail the start.
+            sqlx::query(stmt).execute(&mut *tx).await?;
+        }
+    }
+    tx.commit().await?;
     Ok(())
 }
 

@@ -7,3 +7,16 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+# serde is NOT a dependency of the ledger on purpose: the ledger has no JSON
+# surface — money and accounts are typed end to end (chart counterpart arrays
+# are parsed with a tiny strict parser, no serde_json drift).
+sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "any", "sqlite", "postgres", "migrate", "macros"] }
+thiserror = "2"
+# `common` owns the portable DB adapter (Db, migrations, guard application)
+# and the id/time helpers — the ledger never opens pools itself.
+tributary-common = { path = "../common" }
+
+[dev-dependencies]
+anyhow = "1"
+tempfile = "3"
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
