@@ -387,6 +387,40 @@ and add a `postgres` service to your compose file; the binary and every
 migration work identically on both (the repo's CI tests both on every
 push).
 
+## Ledger append-only boundary (V2 truth spine, ships dark)
+
+From v0.2.x the database carries a double-entry ledger
+(`chart_of_accounts`, `ledger_accounts`, `ledger_entries`,
+`ledger_account_balances`). Nothing in V1 reads or writes it — it is the
+accounting layer V2's root pool settles on, installed ahead of the
+features that use it. Its history is append-only **at the database
+level**, and the migration step arms the guard on every start:
+
+- **SQLite** (the default): `BEFORE UPDATE` / `BEFORE DELETE` triggers on
+  `ledger_entries` abort with `ledger_entries is append-only`. Any
+  connection to the file gets this — the only way past it is dropping the
+  triggers as the file owner.
+- **Postgres**: migrations run as the table owner and create a
+  **non-owner role `tributary_app`** holding exactly `SELECT` + `INSERT`
+  on `ledger_entries` (plus what the balances cache needs). An app
+  connected *as that role* cannot UPDATE or DELETE history even if it
+  tries — owners bypass grants, so the role split, not the REVOKE lines,
+  is the enforcement. Today the binary still connects as the owner; the
+  role exists, is CI-tested against, and flips on when the ledger opens
+  for business (M10).
+
+**The honest boundary:** these guards bind the *application's connection*,
+not the person who owns the file or the database. A file owner can drop
+the triggers; a DBA can `SET ROLE` past the split; a compromised app can
+still INSERT lying entries (INSERT is a legal operation — the database
+cannot tell a lie from a transaction). The outer walls are file
+permissions, operational access control, and the ledger's own alarms:
+every transaction balances, balances reconcile against entries, and the
+rule-7 solvency check (`cash:escrow ≥ Σ payable + Σ prepaid`) fails loud
+on any violation. If your Postgres user cannot `CREATE ROLE` (some
+managed databases), the startup log prints a warning and the role split
+is simply absent — create `tributary_app` by hand as the DBA to arm it.
+
 ## Provider keys — OpenAI and Gemini
 
 Pools hold **provider keys from any OpenAI-compatible endpoint**. In the
