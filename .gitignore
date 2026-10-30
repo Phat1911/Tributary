@@ -15,6 +15,15 @@ out/
 # Rust build artifacts
 /target
 
+# Anchor/Solana build artifacts (M8) — anchor runs inside programs/pool
+programs/pool/target/
+programs/pool/.anchor/
+# Standalone soak client's build dir (its Cargo.lock IS committed — pin it)
+scripts/devnet-soak/target/
+# Devnet operational keypairs — pubkeys live in deploy/devnet-m8.json;
+# the keypairs themselves are NEVER committed (AGENTS secrets rule).
+target/m8-keys/
+
 # Internal notes — intentionally untracked; NEVER `git add -f`
 STRATEGY.md
 M3-FINAL-REPORT.md

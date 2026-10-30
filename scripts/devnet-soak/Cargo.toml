@@ -1,0 +1,25 @@
+[package]
+name = "devnet-soak"
+description = "M8 devnet soak client (standalone): multisig authority proofs + custody round-trip (docs/devnet-soak-m8.md)."
+version = "0.1.3"
+edition = "2021"
+license = "FSL-1.1-ALv2"
+publish = false
+
+# Standalone on purpose: the Squads SDK rides the Solana 1.x cohort, which
+# cannot be resolved inside the main workspace's unified graph (zeroize/
+# curve25519-dalek pin conflict, found 2026-10-30). This empty [workspace]
+# table keeps cargo from adopting the repo root workspace — this crate has
+# its own Cargo.lock and is built only by scripts/devnet_soak_m8.sh.
+[workspace]
+
+[dependencies]
+squads-multisig = "=2.1.0"
+solana-client = "=1.18.26"
+solana-sdk = "=1.18.26"
+serde_json = "1"
+sha2 = "0.10"
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+
+[lints.rust]
+unsafe_code = "forbid"

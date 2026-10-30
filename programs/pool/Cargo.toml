@@ -1,0 +1,98 @@
+[package]
+name = "pool"
+description = "Tributary root-pool custody program (devnet): USDC escrow vault + non-transferable claim registry (SPEC §12, M8)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# A Solana program is a cdylib (the on-chain .so) but also a normal lib so
+# the host-side test suites (`tests/`) and `cargo check/clippy` compile it
+# natively — that is what keeps CI hermetic: no SBF toolchain needed to run
+# the full instruction test suite via solana-program-test.
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[features]
+default = []
+# Anchor's generated entrypoint is cfg'd on this feature; declaring it keeps
+# `unexpected_cfgs` clean under `-D warnings` (and lets a host build skip
+# the C-ABI entry if ever needed).
+no-entrypoint = []
+
+[lints.rust]
+# Anchor's #[program] macro emits cfgs for build-time knobs (cpi mode,
+# custom heap/panic on SBF target, debug logging) that this crate never
+# enables — registering them here keeps `-D warnings` clean without
+# silencing genuinely unexpected cfgs.
+unexpected_cfgs = { level = "deny", check-cfg = [
+  'cfg(target_os, values("solana"))',
+  'cfg(feature, values("cpi", "custom-heap", "custom-panic", "no-log-ix-name", "anchor-debug"))',
+] }
+
+[dependencies]
+# anchor-lang: the Anchor framework core (#[program], #[derive(Accounts)],
+# CPI helpers). Pinned exact per workflow step 10 — supply-chain discipline;
+# upgrades are a deliberate PLAN entry, never a lockfile drift.
+#
+# COHORT NOTE (found the hard way, 2026-10-30): anchor 1.2's DEFAULT v3
+# cohort keeps anchor's own Solana types (pubkey 3.x) fully INSIDE the
+# program; the test harness rides the agave-4.1.2 lattice (pubkey 4.2.0).
+# The two never exchange types — only bytes (program id, seeds, error
+# codes) cross that line by design, which is also exactly how an external
+# integrator talks to the program.
+# `init-if-needed` is for the lazily-created claim token accounts: safe
+# here because every reuse re-verifies seeds, mint AND owner-authority
+# constraints (the classic re-init swap attack has no degrees of freedom).
+anchor-lang = { version = "=1.2.2", features = ["init-if-needed"] }
+# anchor-spl: typed SPL token wrappers — `token` (v3, for USDC) and
+# `token_2022`/`token_interface` (claim registry + NonTransferable).
+# Feature list is deliberately minimal (no memo/metadata/governance/
+# extensions wrappers we never invoke). (`token_interface` is a MODULE,
+# not a feature — it compiles in with `token`'s spl-token-interface dep.)
+anchor-spl = { version = "=1.2.2", default-features = false, features = [
+  "solana-v3",
+  "token",
+  "token_2022",
+] }
+
+[dev-dependencies]
+# Test stack = the GRANULAR Solana crates of the agave v4.1.2 cohort — the
+# exact lattice the runtime's own Cargo.lock ships (wincode 0.5 era). The
+# old `solana-sdk` umbrella is deliberately absent (it drags a second,
+# conflicting patch line); several NEWER minor releases of transitive
+# crates (hash 4.7, address 2.9, transaction 4.3, reward-info 6.3, …)
+# moved to wincode 0.6 and CANNOT be mixed in — `cargo update` must never
+# run blind here; CI builds --locked.
+solana-program-test = { version = "=4.1.2", features = ["agave-unstable-api"] }
+solana-keypair = "=3.1.2"
+solana-signer = "=3.0.0"
+solana-pubkey = "=4.2.0"
+solana-instruction = "=3.4.0"
+solana-instruction-error = "=2.5.0"
+solana-message = "=4.1.1"
+solana-transaction = "=4.1.1"
+solana-transaction-error = "=3.4.0"
+solana-commitment-config = "=3.1.1"
+solana-rent = "=4.2.0"
+solana-system-interface = "=3.2.0"
+# Token-2022 state PARSING only (extension-aware unpack; pure &[u8] in,
+# scalars out — its internal pubkey type never crosses our boundary).
+spl-token-2022-interface = "=3.1.2"
+# Argument serialization for hand-built instructions (what an external
+# integrator's client does).
+borsh = "=1.8.1"
+# sighash: anchor-lang 1.2 no longer re-exports it publicly, so the harness
+# reimplements the (documented, 3-line) discriminator computation — the
+# same approach as the standalone soak client.
+sha2 = "0.10"
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+
+# anchor 1.2 resolves its "workspace root" from Anchor.toml's directory
+# (this crate), and refuses to build without an overflow-checks=true
+# release profile. Cargo itself IGNORES profiles on non-root members with
+# a warning — the effective profile for SBF builds is the one in the
+# REPO-ROOT Cargo.toml (identical settings). This block exists to satisfy
+# anchor's check; keep both in sync.
+[profile.release]
+overflow-checks = true

@@ -6,6 +6,10 @@ members = [
     "crates/crypto",
     "crates/gateway",
     "crates/ledger",
+    # M8: the Solana custody program — a workspace member so fmt/clippy/
+    # cargo-deny/test run over it like every other crate, but it touches
+    # none of the host crates (zero V1 behavior change by construction).
+    "programs/pool",
 ]
 
 [workspace.package]
@@ -13,3 +17,12 @@ version = "0.1.3"
 edition = "2024"
 license = "FSL-1.1-ALv2"
 repository = "https://github.com/Phat1911/Tributary"
+
+# SBF release profile requirements (anchor build enforces both — money
+# paths must panic on overflow, never wrap):
+# - overflow-checks: deposit/withdraw arithmetic is u64 micro-units; a
+#   silent wrap would be a solvency bug, so wrap = runtime abort.
+# - The lto/codegen settings below are anchor's defaults for on-chain
+#   artifacts and only affect the `pool` program's SBF build.
+[profile.release]
+overflow-checks = true

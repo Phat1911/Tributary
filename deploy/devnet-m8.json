@@ -1,0 +1,30 @@
+{
+  "_comment": "M8 devnet deployment facts (PUBKEYS ONLY — keypairs live in gitignored target/m8-keys and are never committed). Ruling at GO 2026-10-30: devnet multisig is 2-of-2 founder+teammate; SPEC §12's 2-of-3 remains the production posture.",
+  "cluster": {
+    "name": "devnet",
+    "rpc_url": "https://api.devnet.solana.com"
+  },
+  "program": {
+    "name": "pool",
+    "address": "9pEmyxftdRUZV2iw6ZzCNgZz9QygG53i7APNaWcEHvjX",
+    "upgrade_authority": "SQUADS_MULTISIG_VAULT_0 (filled at soak — see docs/devnet-soak-m8.md)"
+  },
+  "multisig": {
+    "kind": "squads-v4",
+    "members": [
+      { "role": "founder", "pubkey": "HGHF2iuEphK4zFuqFAC5dXDfk4US6AAvMVqWwfwB7gzz" },
+      { "role": "teammate", "pubkey": "7sdvrCiwMCWcMzdqWhWQ7e6YLcggAQBmVxeX4KgXPMhB" }
+    ],
+    "threshold": 2,
+    "configuration": "FILLED AT SOAK (multisig create key + MS index + vault PDA recorded in docs/devnet-soak-m8.md)"
+  },
+  "authorities": {
+    "deploy_payer": "4N2nTJ8WWwDKVoULt9bymaB6XsrB7HP973y8Ebw6tQhV",
+    "backend_operator_hot_key": "AJmEJPsCBT7VpZ3CkxDWpcoeuBdqp3JzrcPr43ZntJpb",
+    "depositor_custodial_test_identity": "Ah3TyjuC3agXQcsYty1VpNBWLRg4DkFWkhugsyoGLUuJ"
+  },
+  "assets": {
+    "escrow_mint": "Circle devnet USDC 4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU (token v3, 6 decimals)",
+    "claim_mint_pda": "derived: PDA([b\"pool\", b\"claim_mint\"], program)"
+  }
+}

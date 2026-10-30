@@ -1,0 +1,34 @@
+# Anchor workspace for the Tributary root-pool custody program (M8).
+# Run anchor from THIS directory (`cd programs/pool && anchor build`).
+
+[toolchain]
+# Pin the anchor + solana versions this program was built and soaked with
+# (PLAN.md records the justification; upgrades are deliberate, never drift).
+anchor_version = "1.2.2"
+solana_version = "4.1.2"
+
+[features]
+# No resolution needed on-chain (seeds are fixed constants), but keep the
+# workspace self-describing for tooling.
+seeds = false
+skip-lint = false
+
+[programs.devnet]
+pool = "9pEmyxftdRUZV2iw6ZzCNgZz9QygG53i7APNaWcEHvjX"
+
+[programs.localnet]
+pool = "9pEmyxftdRUZV2iw6ZzCNgZz9QygG53i7APNaWcEHvjX"
+
+[provider]
+cluster = "https://api.devnet.solana.com"
+# Deploy/ops keypair — NEVER committed (gitignored target/m8-keys).
+wallet = "../../target/m8-keys/deploy.json"
+
+[test]
+# The Rust program-test suites live in tests/ and run via plain cargo
+# (`cargo test -p pool`) inside the repo CI — anchor's own test runner is
+# not used, so no startup script is needed here.
+startup_wait = 5000
+
+[scripts]
+test = ""

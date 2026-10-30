@@ -2,6 +2,30 @@
 # Docs: https://embarkstudios.github.io/cargo-deny/
 # Any allow-list change must be justified in the PLAN.md milestone entry.
 
+[advisories]
+version = 2
+# M8 (2026-10-30): every id below enters the graph ONLY through the
+# dev-dependency chain of the pool program's test harness —
+# solana-program-test 4.1.2 → solana-runtime → agave-precompiles etc.
+# (i.e. the Anza/agave toolchain's OWN pinned tree; the same versions sit
+# in agave v4.1.2's own Cargo.lock). None of these crates compile into a
+# release binary: the services never see them, and the on-chain program's
+# SBF build resolves independently. Upgrading past them means leaving the
+# agave-4.1.2 lattice (A-033), which is a deliberate future decision.
+ignore = [
+  "RUSTSEC-2022-0093", # bincode 1.x unmaintained — agave tree, dev-only here
+  "RUSTSEC-2024-0344", # curve25519-dalek 3.2 timing — ed25519-dalek 1.0.1 (agave-precompiles), dev-only
+  "RUSTSEC-2024-0388", # derivative unmaintained — agave tree, dev-only
+  "RUSTSEC-2024-0436", # proc-macro-error2 lineage — anchor 1.2 codegen, dev/build-only
+  "RUSTSEC-2025-0141", # traitobject — legacy solana tree, dev-only
+  "RUSTSEC-2025-0161", # agave-family advisory — dev-only
+  "RUSTSEC-2026-0173", # agave-family advisory — dev-only
+  "RUSTSEC-2026-0387", # agave-family advisory — dev-only
+  "RUSTSEC-2026-0391", # agave-family advisory — dev-only
+  "RUSTSEC-2026-0398", # agave-family advisory — dev-only
+  "RUSTSEC-2026-0403", # agave-family advisory — dev-only
+]
+
 [licenses]
 version = 2
 # Permissive licenses only. FSL-1.1-ALv2 is this repository's own license.
