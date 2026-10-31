@@ -38,11 +38,28 @@
 | M5.5 | **DONE (closed 2026-10-27)** | Slice 1 (landing/Tailscale/video script) 2026-10-26 + slice 2 (Gemini provider, J-A…E) 2026-10-27; §14 ticked. Residue: video records ~2026-11-12 |
 | M6 | **in progress — slice 1 + F1 fix/v0.1.3 DONE** (2026-10-27) | Pilot onboarding surface (docs: feedback template, upgrade rung, support runbook, admin guide DRAFT v1) + M6-S1-F1 fixed red-first, CI-pinned, released v0.1.3, demo re-pinned. Slice 2 waits on founder pilot friction log |
 | M7 | **done** (2026-10-28) | LedgerTrait + double-entry ledger, ships dark; f0c25ca→8bbee09; 172/172 dual-DB (16 new tests); D38 recorded; §14 ticked |
-| M8 | **code complete + tested locally; devnet soak PENDING (founder funding)** | Program + suites + soak client all green (16/16 program tests, workspace 189 green, clippy clean); devnet deploy/soak blocked on faucet SOL (rate-limited) — founder funds later, then ONE command: `bash scripts/devnet_soak_m8.sh` |
+| M8 | **code complete + D40/D41/D42 doctrine fix applied; devnet soak PENDING (founder funding)** | Director doctrine audit 2026-10-31 found 2 high drifts (USDC-in-deposit; missing exit hatch) — both fixed per D40/D41 + scope-A renter rails; program tests 28/28, workspace re-run, soak client renter-shaped; devnet leg still blocked on faucet SOL — then ONE command: `bash scripts/devnet_soak_m8.sh` |
 | M9–M11 | pending | V2 — Root Pool |
 | M12–M14 | pending | V3 — Operator network |
 
 ## Milestone log (append per completed milestone; keep the most recent 10)
+
+### 2026-10-31 — M8 doctrine fix (director audit): D40/D41/D42 executed; program reshaped, suites rewritten
+
+**Trigger.** Director doctrine audit (10 items + self-report) on suspicion of V2 drift. Verdicts: item 1 DRIFT (exit-without-cooperation missing — withdraw was backend-only), item 2 DRIFT (deposit moved USDC; pre-ruled D40), item 6 PARTIAL (renter-refund separability), all others ALIGNED. Self-report named both drifts before the fixes were ruled. Pre-filed rulings D40/D41 + new D42 recorded in SPEC §Appendix A same-commit as required.
+
+**Executed fixes.**
+- **D40:** `deposit` → `record_contribution` (mint-only; claims = micro-USD valuation of Path-B credits from the books; NO token transfer), `withdraw` → `burn_claims` (burn-only; no USDC out). Module docs rewritten around "why the vault never holds depositor principal."
+- **Scope A (ruled):** minimal `prepay_renter`/`refund_renter` pair — the ONLY USDC path. Per-renter prepaid records as PDAs `[prepaid, renter]` (money-custody class, `RenterPrepaid { amount, bump }`); prepay increments vault + record; refund decrements both and is bounded by the renter's OWN on-chain record (`amount ≤ prepaid.amount`), never an operator attestation. This resolved audit item 6: separability is now on-chain fact.
+- **D41 rider (two doors):** every exit (`burn_claims`, `refund_renter`) accepts backend (assisted, rule 10) OR the named identity's own key (direct, exit-without-cooperation), one shared `require_exit_authority`, identical ceilings on both doors. `record_contribution` stays backend-only deliberately: minting is an operator ATTESTATION from the books — a self-service mint would let anyone claim arbitrary contributions (A-039 documents the accepted caveat + containment).
+- **D42:** no-cross-pool test added (`forged_claim_mint_from_foreign_deployment_refused` — two forgery shapes, both refused, real rows untouched).
+- **Rule-8 guardrail (approved):** if the fee band ever goes on-chain it lands in `reserved` behind multisig AND still requires explicit user approval + D-log — a vote alone never changes the band (documented in state.rs + lib.rs).
+
+**Test results.** Program: **28/28** (4 unit incl. new prepaid-layout tests, 20 adversarial — the director-ruled door triad first, refund-ceiling separability, both forgery shapes — and 4 journey: initialize-locked, contributions-are-records-not-money (vault stays 0 while claims grow — the D40 proof), renter round-trip through both refund doors, admin lifecycle pausing every movement class + backend rotation). fmt + clippy `-D warnings` clean (program + soak crate). Soak steps 5/6 rewritten renter-shaped (record + DIRECT-door burn; prepay → assisted + direct refunds) with a hard D40 violation check; orchestrator Circle-faucet section now targets the custodial user key as the renter wallet (≥10 USDC; depositor identity needs no USDC). Devnet soak still awaits founder faucet funding — unchanged blocker.
+
+**Deps:** none added, none removed. **Zero V1 change:** `crates/` and `apps/` untouched.
+
+**Fast jump — doctrine fix touched:** `programs/pool/src/{lib,state,errors}.rs` · `programs/pool/tests/{common/mod,journey,adversarial}.rs` · `scripts/devnet-soak/src/main.rs` · `scripts/devnet_soak_m8.sh` · `docs/devnet-soak-m8.md` · `deploy/devnet-m8.json` · `SPEC.md` (D40/D41/D42 + §14 annotation) · `AUDIT.md` (A-037…A-039) · `PLAN.md` (this entry).
 
 ### 2026-10-30 — M8 (local half): Solana escrow vault + claim registry — program, suites, soak client; devnet soak pending
 

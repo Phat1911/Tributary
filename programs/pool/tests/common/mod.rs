@@ -107,6 +107,11 @@ pub mod addrs {
     pub fn claim(depositor: &Pubkey) -> Pubkey {
         Pubkey::find_program_address(&[pool::SEED_CLAIM, depositor.as_ref()], &program_id()).0
     }
+
+    /// A renter's prepaid record PDA (the `prepaid.renter` mirror).
+    pub fn prepaid(renter: &Pubkey) -> Pubkey {
+        Pubkey::find_program_address(&[pool::SEED_PREPAID, renter.as_ref()], &program_id()).0
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -431,6 +436,20 @@ pub async fn token_2022_balance(banks: &BanksClient, acct: &Pubkey) -> u64 {
     claim_amount(&ai.data)
 }
 
+/// Reads a renter's on-chain prepaid record (the refund ceiling — an
+/// on-chain FACT, never an operator attestation).
+pub async fn prepaid_amount(banks: &BanksClient, renter: &Pubkey) -> u64 {
+    let ai = banks
+        .get_account(addrs::prepaid(renter))
+        .await
+        .unwrap()
+        .expect("prepaid record exists (prepay first)");
+    let rec: pool::RenterPrepaid =
+        anchor_lang::AccountDeserialize::try_deserialize(&mut &ai.data[..])
+            .expect("prepaid record deserializes");
+    rec.amount
+}
+
 // ---------------------------------------------------------------------------
 // Instruction builders — account lists mirror the Accounts structs in
 // lib.rs field-for-field (order matters on the wire).
@@ -463,60 +482,107 @@ pub mod ixs {
         )
     }
 
-    /// `deposit(amount)` — signers: backend + depositor (custodial pair).
-    #[allow(clippy::too_many_arguments)]
-    pub fn deposit(
+    /// `record_contribution(depositor, amount)` — sole signer: backend.
+    /// Mints claims; touches NO token account of the depositor (D40).
+    pub fn record_contribution(
         pool: &Pubkey,
         backend: &Pubkey,
         depositor: &Pubkey,
-        source: &Pubkey,
-        vault: &Pubkey,
         claim_mint: &Pubkey,
         claim: &Pubkey,
         amount: u64,
     ) -> Instruction {
         ix(
-            "deposit",
-            (amount,),
+            "record_contribution",
+            (depositor, amount),
             vec![
                 AccountMeta::new(*pool, false),
                 AccountMeta::new(*backend, true), // backend_authority (mut, signer)
-                AccountMeta::new_readonly(*depositor, true),
-                AccountMeta::new(*source, false),
-                AccountMeta::new(*vault, false),
                 AccountMeta::new(*claim_mint, false),
                 AccountMeta::new(*claim, false),
-                AccountMeta::new_readonly(TOKEN_V3, false),
                 AccountMeta::new_readonly(TOKEN_2022, false),
                 AccountMeta::new_readonly(solana_system_interface::program::ID, false),
             ],
         )
     }
 
-    /// `withdraw(depositor, amount)` — sole signer: the backend.
-    #[allow(clippy::too_many_arguments)]
-    pub fn withdraw(
+    /// `burn_claims(depositor, amount)` — two doors: `authority` is the
+    /// backend (assisted) or the depositor themselves (direct). Burns
+    /// claims; moves NO USDC (D40).
+    pub fn burn_claims(
         pool: &Pubkey,
-        backend: &Pubkey,
-        destination: &Pubkey,
+        authority: &Pubkey,
         depositor: &Pubkey,
-        vault: &Pubkey,
         claim_mint: &Pubkey,
         claim: &Pubkey,
         amount: u64,
     ) -> Instruction {
         ix(
-            "withdraw",
+            "burn_claims",
             (depositor, amount),
             vec![
-                AccountMeta::new(*pool, false),
-                AccountMeta::new(*backend, true),
-                AccountMeta::new(*destination, false),
-                AccountMeta::new(*vault, false),
+                AccountMeta::new_readonly(*pool, false),
+                AccountMeta::new_readonly(*authority, true), // the one signer (either door)
                 AccountMeta::new(*claim_mint, false),
                 AccountMeta::new(*claim, false),
-                AccountMeta::new_readonly(TOKEN_V3, false),
                 AccountMeta::new_readonly(TOKEN_2022, false),
+            ],
+        )
+    }
+
+    /// `prepay_renter(renter, amount)` — signers: backend (gate) +
+    /// renter_key (source owner; custodial on devnet). The ONLY USDC
+    /// inflow (D40).
+    #[allow(clippy::too_many_arguments)]
+    pub fn prepay_renter(
+        pool: &Pubkey,
+        backend: &Pubkey,
+        renter_key: &Pubkey,
+        source: &Pubkey,
+        vault: &Pubkey,
+        prepaid: &Pubkey,
+        renter: &Pubkey,
+        amount: u64,
+    ) -> Instruction {
+        ix(
+            "prepay_renter",
+            (renter, amount),
+            vec![
+                AccountMeta::new_readonly(*pool, false),
+                AccountMeta::new(*backend, true), // backend_authority (mut, signer, rent payer)
+                AccountMeta::new_readonly(*renter_key, true), // source owner
+                AccountMeta::new(*source, false),
+                AccountMeta::new(*vault, false),
+                AccountMeta::new(*prepaid, false),
+                AccountMeta::new_readonly(TOKEN_V3, false),
+                AccountMeta::new_readonly(solana_system_interface::program::ID, false),
+            ],
+        )
+    }
+
+    /// `refund_renter(renter, amount)` — two doors: `authority` is the
+    /// backend (assisted) or the renter themselves (direct). USDC out of
+    /// the vault, bounded by the renter's OWN on-chain prepaid record.
+    #[allow(clippy::too_many_arguments)]
+    pub fn refund_renter(
+        pool: &Pubkey,
+        authority: &Pubkey,
+        destination: &Pubkey,
+        vault: &Pubkey,
+        prepaid: &Pubkey,
+        renter: &Pubkey,
+        amount: u64,
+    ) -> Instruction {
+        ix(
+            "refund_renter",
+            (renter, amount),
+            vec![
+                AccountMeta::new_readonly(*pool, false),
+                AccountMeta::new_readonly(*authority, true), // the one signer (either door)
+                AccountMeta::new(*destination, false),
+                AccountMeta::new(*vault, false),
+                AccountMeta::new(*prepaid, false),
+                AccountMeta::new_readonly(TOKEN_V3, false),
             ],
         )
     }

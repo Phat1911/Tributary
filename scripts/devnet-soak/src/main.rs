@@ -26,7 +26,6 @@ use sha2::{Digest, Sha256};
 use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_sdk::bpf_loader_upgradeable;
 // squads SDK: try_compile lives on an extension trait, not the type itself.
-use squads_multisig::vault_transaction::VaultTransactionMessageExt;
 use solana_sdk::instruction::{AccountMeta, Instruction};
 use solana_sdk::message::Message;
 use solana_sdk::pubkey::Pubkey;
@@ -36,39 +35,34 @@ use squads_multisig::anchor_lang::AnchorSerialize;
 use squads_multisig::client as squads;
 use squads_multisig::pda;
 use squads_multisig::state as squads_state;
+use squads_multisig::vault_transaction::VaultTransactionMessageExt;
 use squads_multisig::{solana_program, squads_multisig_program};
 // --- program ids, as verified byte arrays (decoded from base58 offline;
 // --- self-checked against the strings at startup) ------------------------
 
 const POOL_PROGRAM_BYTES: [u8; 32] = [
-    0x82, 0xf7, 0x5e, 0x97, 0xda, 0xf1, 0xcf, 0x09, 0x46, 0x97, 0xa2, 0x1c, 0xe7, 0xcc, 0xaf,
-    0x5a, 0xe7, 0xcc, 0xdc, 0xb5, 0xcc, 0x49, 0xe2, 0xd8, 0x68, 0xc9, 0x70, 0x24, 0x74, 0x43,
-    0x88, 0x06,
+    0x82, 0xf7, 0x5e, 0x97, 0xda, 0xf1, 0xcf, 0x09, 0x46, 0x97, 0xa2, 0x1c, 0xe7, 0xcc, 0xaf, 0x5a,
+    0xe7, 0xcc, 0xdc, 0xb5, 0xcc, 0x49, 0xe2, 0xd8, 0x68, 0xc9, 0x70, 0x24, 0x74, 0x43, 0x88, 0x06,
 ];
 const USDC_DEVNET_BYTES: [u8; 32] = [
-    0x3b, 0x44, 0x2c, 0xb3, 0x91, 0x21, 0x57, 0xf1, 0x3a, 0x93, 0x3d, 0x01, 0x34, 0x28, 0x2d,
-    0x03, 0x2b, 0x5f, 0xfe, 0xcd, 0x01, 0xa2, 0xdb, 0xf1, 0xb7, 0x79, 0x06, 0x08, 0xdf, 0x00,
-    0x2e, 0xa7,
+    0x3b, 0x44, 0x2c, 0xb3, 0x91, 0x21, 0x57, 0xf1, 0x3a, 0x93, 0x3d, 0x01, 0x34, 0x28, 0x2d, 0x03,
+    0x2b, 0x5f, 0xfe, 0xcd, 0x01, 0xa2, 0xdb, 0xf1, 0xb7, 0x79, 0x06, 0x08, 0xdf, 0x00, 0x2e, 0xa7,
 ];
 const TOKEN_V3_BYTES: [u8; 32] = [
-    0x06, 0xdd, 0xf6, 0xe1, 0xd7, 0x65, 0xa1, 0x93, 0xd9, 0xcb, 0xe1, 0x46, 0xce, 0xeb, 0x79,
-    0xac, 0x1c, 0xb4, 0x85, 0xed, 0x5f, 0x5b, 0x37, 0x91, 0x3a, 0x8c, 0xf5, 0x85, 0x7e, 0xff,
-    0x00, 0xa9,
+    0x06, 0xdd, 0xf6, 0xe1, 0xd7, 0x65, 0xa1, 0x93, 0xd9, 0xcb, 0xe1, 0x46, 0xce, 0xeb, 0x79, 0xac,
+    0x1c, 0xb4, 0x85, 0xed, 0x5f, 0x5b, 0x37, 0x91, 0x3a, 0x8c, 0xf5, 0x85, 0x7e, 0xff, 0x00, 0xa9,
 ];
 const TOKEN_2022_BYTES: [u8; 32] = [
-    0x06, 0xdd, 0xf6, 0xe1, 0xee, 0x75, 0x8f, 0xde, 0x18, 0x42, 0x5d, 0xbc, 0xe4, 0x6c, 0xcd,
-    0xda, 0xb6, 0x1a, 0xfc, 0x4d, 0x83, 0xb9, 0x0d, 0x27, 0xfe, 0xbd, 0xf9, 0x28, 0xd8, 0xa1,
-    0x8b, 0xfc,
+    0x06, 0xdd, 0xf6, 0xe1, 0xee, 0x75, 0x8f, 0xde, 0x18, 0x42, 0x5d, 0xbc, 0xe4, 0x6c, 0xcd, 0xda,
+    0xb6, 0x1a, 0xfc, 0x4d, 0x83, 0xb9, 0x0d, 0x27, 0xfe, 0xbd, 0xf9, 0x28, 0xd8, 0xa1, 0x8b, 0xfc,
 ];
 const ATA_PROGRAM_BYTES: [u8; 32] = [
-    0x8c, 0x97, 0x25, 0x8f, 0x4e, 0x24, 0x89, 0xf1, 0xbb, 0x3d, 0x10, 0x29, 0x14, 0x8e, 0x0d,
-    0x83, 0x0b, 0x5a, 0x13, 0x99, 0xda, 0xff, 0x10, 0x84, 0x04, 0x8e, 0x7b, 0xd8, 0xdb, 0xe9,
-    0xf8, 0x5b,
+    0x8c, 0x97, 0x25, 0x8f, 0x4e, 0x24, 0x89, 0xf1, 0xbb, 0x3d, 0x10, 0x29, 0x14, 0x8e, 0x0d, 0x83,
+    0x0b, 0x5a, 0x13, 0x99, 0xda, 0xff, 0x10, 0x84, 0x04, 0x8e, 0x7b, 0xd8, 0xdb, 0xe9, 0xf8, 0x5b,
 ];
 const RENT_SYSVAR_BYTES: [u8; 32] = [
-    0x06, 0xa7, 0xd5, 0x17, 0x19, 0x2c, 0x5c, 0x51, 0x21, 0x8c, 0xc9, 0x4c, 0x3d, 0x4a, 0xf1,
-    0x7f, 0x58, 0xda, 0xee, 0x08, 0x9b, 0xa1, 0xfd, 0x44, 0xe3, 0xdb, 0xd9, 0x8a, 0x00, 0x00,
-    0x00, 0x00,
+    0x06, 0xa7, 0xd5, 0x17, 0x19, 0x2c, 0x5c, 0x51, 0x21, 0x8c, 0xc9, 0x4c, 0x3d, 0x4a, 0xf1, 0x7f,
+    0x58, 0xda, 0xee, 0x08, 0x9b, 0xa1, 0xfd, 0x44, 0xe3, 0xdb, 0xd9, 0x8a, 0x00, 0x00, 0x00, 0x00,
 ];
 
 const POOL_PROGRAM_STR: &str = "9pEmyxftdRUZV2iw6ZzCNgZz9QygG53i7APNaWcEHvjX";
@@ -84,8 +78,11 @@ const SEED_POOL: &[u8] = b"pool";
 const SEED_VAULT: &[u8] = b"vault";
 const SEED_CLAIM_MINT: &[u8] = b"claim_mint";
 const SEED_CLAIM: &[u8] = b"claim";
+const SEED_PREPAID: &[u8] = b"prepaid";
 
 const DEPOSIT_AMOUNT: u64 = 25_000_000; // 25 USDC in micro-units
+/// Renter prepay leg (10 USDC) — the only USDC inflow (D40).
+const PREPAY_AMOUNT: u64 = 10_000_000;
 
 macro_rules! evidence {
     ($step:expr, $($arg:tt)*) => {{
@@ -132,11 +129,25 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(pool.to_string(), POOL_PROGRAM_STR, "POOL bytes drifted");
     assert_eq!(usdc.to_string(), USDC_DEVNET_STR, "USDC bytes drifted");
     assert_eq!(token_v3.to_string(), TOKEN_V3_STR, "token v3 bytes drifted");
-    assert_eq!(token_2022.to_string(), TOKEN_2022_STR, "token 2022 bytes drifted");
-    assert_eq!(ata_program.to_string(), ATA_PROGRAM_STR, "ATA bytes drifted");
-    assert_eq!(rent_sysvar.to_string(), RENT_SYSVAR_STR, "rent sysvar bytes drifted");
+    assert_eq!(
+        token_2022.to_string(),
+        TOKEN_2022_STR,
+        "token 2022 bytes drifted"
+    );
+    assert_eq!(
+        ata_program.to_string(),
+        ATA_PROGRAM_STR,
+        "ATA bytes drifted"
+    );
+    assert_eq!(
+        rent_sysvar.to_string(),
+        RENT_SYSVAR_STR,
+        "rent sysvar bytes drifted"
+    );
 
-    let rpc = RpcClient::new(std::env::var("SOAK_RPC").unwrap_or_else(|_| "https://api.devnet.solana.com".into()));
+    let rpc = RpcClient::new(
+        std::env::var("SOAK_RPC").unwrap_or_else(|_| "https://api.devnet.solana.com".into()),
+    );
     let ctx = Ctx {
         rpc,
         pool,
@@ -168,7 +179,10 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     if usdc_acct.owner != ctx.token_v3 || usdc_acct.data[44] != 6 {
         return Err("devnet USDC mint shape wrong (want Token v3, 6 decimals)".into());
     }
-    evidence!(0, "USDC devnet mint verified: Token v3 owner, 6 decimals (micro-USD seam)");
+    evidence!(
+        0,
+        "USDC devnet mint verified: Token v3 owner, 6 decimals (micro-USD seam)"
+    );
 
     // ---- 1. multisig 2-of-2 ---------------------------------------------------
     let create_key = load_key("ms-create-key")?;
@@ -193,8 +207,14 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             },
             squads::MultisigCreateArgsV2 {
                 members: vec![
-                    squads_state::Member { key: ctx.founder.pubkey(), permissions: all },
-                    squads_state::Member { key: ctx.teammate.pubkey(), permissions: all },
+                    squads_state::Member {
+                        key: ctx.founder.pubkey(),
+                        permissions: all,
+                    },
+                    squads_state::Member {
+                        key: ctx.teammate.pubkey(),
+                        permissions: all,
+                    },
                 ],
                 threshold: 2,
                 time_lock: 0,
@@ -204,7 +224,13 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             },
             None,
         );
-        let sig = send(&ctx, &[ix], &ctx.deploy.pubkey(), &[&ctx.deploy, &create_key]).await?;
+        let sig = send(
+            &ctx,
+            &[ix],
+            &ctx.deploy.pubkey(),
+            &[&ctx.deploy, &create_key],
+        )
+        .await?;
         evidence!(1, "multisig created {} (vault {}) sig={}", ms, vault, sig);
     }
 
@@ -220,7 +246,12 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 Some(&vault),
             );
             let sig = send(&ctx, &[ix], &ctx.deploy.pubkey(), &[&ctx.deploy]).await?;
-            evidence!(2, "upgrade authority: deploy -> vault {} sig={} (last unilateral action)", vault, sig);
+            evidence!(
+                2,
+                "upgrade authority: deploy -> vault {} sig={} (last unilateral action)",
+                vault,
+                sig
+            );
         }
         Some(current) if current == vault => {
             evidence!(2, "upgrade authority already vault {}", vault);
@@ -238,7 +269,9 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         &ctx.deploy.pubkey(),
     );
     match send(&ctx, &[ix], &ctx.deploy.pubkey(), &[&rogue, &ctx.deploy]).await {
-        Ok(sig) => return Err(format!("SECURITY: non-authority upgrade ACCEPTED sig={sig}").into()),
+        Ok(sig) => {
+            return Err(format!("SECURITY: non-authority upgrade ACCEPTED sig={sig}").into())
+        }
         Err(e) => evidence!(3, "single-key upgrade REFUSED: {}", short_err(e.as_ref())),
     }
 
@@ -268,98 +301,210 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             ],
         );
         let sig = send(&ctx, &[ix], &ctx.deploy.pubkey(), &[&ctx.deploy]).await?;
-        evidence!(4, "pool initialized admin=vault({}) backend={} sig={}", vault, ctx.backend.pubkey(), sig);
+        evidence!(
+            4,
+            "pool initialized admin=vault({}) backend={} sig={}",
+            vault,
+            ctx.backend.pubkey(),
+            sig
+        );
     }
 
-    // ---- 5. deposit / withdraw round-trip --------------------------------------
-    let claim_ta = Pubkey::find_program_address(&[SEED_CLAIM, ctx.depositor.pubkey().as_ref()], &ctx.pool).0;
-    let source = depositor_ata(&ctx);
-    let before = token_amount(&ctx, &source).await?;
-    if before < DEPOSIT_AMOUNT {
-        return Err(format!(
-            "depositor ATA {source} holds {before} micro-USDC — run the Circle faucet step in the runbook"
-        ).into());
-    }
-    let dep = pool_ix("deposit", (DEPOSIT_AMOUNT,),
+    // ---- 5. record a contribution + exit through BOTH doors (D40) ------
+    // The custodial user key plays both roles on devnet: the depositor
+    // identity for record_contribution (no USDC involved — contributions
+    // are records) and the renter wallet for step 6's prepay.
+    let claim_ta =
+        Pubkey::find_program_address(&[SEED_CLAIM, ctx.depositor.pubkey().as_ref()], &ctx.pool).0;
+    let rec = pool_ix(
+        "record_contribution",
+        (&ctx.depositor.pubkey(), &DEPOSIT_AMOUNT),
         vec![
             AccountMeta::new(pool_pda, false),
             AccountMeta::new(ctx.backend.pubkey(), true),
-            AccountMeta::new_readonly(ctx.depositor.pubkey(), true),
-            AccountMeta::new(source, false),
-            AccountMeta::new(vault_ta, false),
             AccountMeta::new(claim_mint, false),
             AccountMeta::new(claim_ta, false),
-            AccountMeta::new_readonly(ctx.token_v3, false),
             AccountMeta::new_readonly(ctx.token_2022, false),
             AccountMeta::new_readonly(solana_program::system_program::ID, false),
-        ]);
-    let sig = send(&ctx, &[dep], &ctx.backend.pubkey(), &[&ctx.backend, &ctx.depositor]).await?;
-    let vault_bal = token_amount(&ctx, &vault_ta).await?;
+        ],
+    );
+    let sig = send(&ctx, &[rec], &ctx.backend.pubkey(), &[&ctx.backend]).await?;
     let claims = token_amount(&ctx, &claim_ta).await?;
-    evidence!(5, "deposit {} USDC sig={} vault={} claims={} (M7 mirror holds: vault == Σ claims)",
-        DEPOSIT_AMOUNT / 1_000_000, sig, vault_bal, claims);
+    let vault_bal = token_amount(&ctx, &vault_ta).await?;
+    if vault_bal != 0 {
+        return Err(format!("D40 VIOLATION: vault holds {vault_bal} micro-USDC after a recorded contribution — the vault must hold renter prepaid only").into());
+    }
+    evidence!(5, "record_contribution {} USDC-worth sig={} claims={} vault={} (D40: records only — vault untouched)",
+        DEPOSIT_AMOUNT / 1_000_000, sig, claims, vault_bal);
 
-    let wd = pool_ix("withdraw", (&ctx.depositor.pubkey(), &DEPOSIT_AMOUNT),
+    // Exit through the DIRECT door: only the depositor's key signs — the
+    // backend is ABSENT. The escape hatch, proven live on devnet.
+    let burn_direct = pool_ix(
+        "burn_claims",
+        (&ctx.depositor.pubkey(), &5_000_000u64),
         vec![
-            AccountMeta::new(pool_pda, false),
-            AccountMeta::new(ctx.backend.pubkey(), true),
-            AccountMeta::new(source, false),
-            AccountMeta::new(vault_ta, false),
+            AccountMeta::new_readonly(pool_pda, false),
+            AccountMeta::new_readonly(ctx.depositor.pubkey(), true),
             AccountMeta::new(claim_mint, false),
             AccountMeta::new(claim_ta, false),
-            AccountMeta::new_readonly(ctx.token_v3, false),
             AccountMeta::new_readonly(ctx.token_2022, false),
-        ]);
-    let sig = send(&ctx, &[wd], &ctx.backend.pubkey(), &[&ctx.backend]).await?;
-    let after = token_amount(&ctx, &source).await?;
-    let vault_zero = token_amount(&ctx, &vault_ta).await?;
-    let claims_zero = token_amount(&ctx, &claim_ta).await?;
-    evidence!(6, "withdraw sig={} vault={} claims={} depositor {} -> {} (round-trip proven)",
-        sig, vault_zero, claims_zero, before, after);
-    if after != before {
-        return Err("round-trip did not return principal".into());
-    }
+        ],
+    );
+    let sig = send(
+        &ctx,
+        &[burn_direct],
+        &ctx.backend.pubkey(),
+        &[&ctx.depositor],
+    )
+    .await?;
+    let claims_after = token_amount(&ctx, &claim_ta).await?;
+    evidence!(5, "burn_claims 5 USDC-worth via the DIRECT door (depositor key only, backend absent) sig={} claims={}",
+        sig, claims_after);
 
-    // ---- 6. pause through the 2-of-2 --------------------------------------------
+    // ---- 6. renter prepay -> refund round-trip (the ONLY USDC path) ----
+    let user_ata = depositor_ata(&ctx);
+    let prepaid_pda =
+        Pubkey::find_program_address(&[SEED_PREPAID, ctx.depositor.pubkey().as_ref()], &ctx.pool).0;
+    let before = token_amount(&ctx, &user_ata).await?;
+    if before < PREPAY_AMOUNT {
+        return Err(format!(
+            "renter wallet {user_ata} holds {before} micro-USDC — run the Circle faucet step in the runbook"
+        ).into());
+    }
+    // Prepay (assisted shape: backend gate + the renter's custodial key).
+    let pre = pool_ix(
+        "prepay_renter",
+        (&ctx.depositor.pubkey(), &PREPAY_AMOUNT),
+        vec![
+            AccountMeta::new_readonly(pool_pda, false),
+            AccountMeta::new(ctx.backend.pubkey(), true),
+            AccountMeta::new_readonly(ctx.depositor.pubkey(), true),
+            AccountMeta::new(user_ata, false),
+            AccountMeta::new(vault_ta, false),
+            AccountMeta::new(prepaid_pda, false),
+            AccountMeta::new_readonly(ctx.token_v3, false),
+            AccountMeta::new_readonly(solana_program::system_program::ID, false),
+        ],
+    );
+    let sig = send(
+        &ctx,
+        &[pre],
+        &ctx.backend.pubkey(),
+        &[&ctx.backend, &ctx.depositor],
+    )
+    .await?;
+    let vault_bal = token_amount(&ctx, &vault_ta).await?;
+    let record = prepaid_amount(&ctx, &prepaid_pda).await?;
+    if vault_bal != PREPAY_AMOUNT || record != PREPAY_AMOUNT {
+        return Err(format!("prepay mirror broken: vault={vault_bal} record={record}").into());
+    }
+    evidence!(
+        6,
+        "prepay {} USDC sig={} vault={} record={} (vault == Σ prepaid)",
+        PREPAY_AMOUNT / 1_000_000,
+        sig,
+        vault_bal,
+        record
+    );
+
+    // Partial refund through the ASSISTED door (backend signs)…
+    let ref1 = pool_ix(
+        "refund_renter",
+        (&ctx.depositor.pubkey(), &4_000_000u64),
+        vec![
+            AccountMeta::new_readonly(pool_pda, false),
+            AccountMeta::new_readonly(ctx.backend.pubkey(), true),
+            AccountMeta::new(user_ata, false),
+            AccountMeta::new(vault_ta, false),
+            AccountMeta::new(prepaid_pda, false),
+            AccountMeta::new_readonly(ctx.token_v3, false),
+        ],
+    );
+    let sig = send(&ctx, &[ref1], &ctx.backend.pubkey(), &[&ctx.backend]).await?;
+
+    // …full remainder through the DIRECT door: only the renter's key signs.
+    let ref2 = pool_ix(
+        "refund_renter",
+        (&ctx.depositor.pubkey(), &(PREPAY_AMOUNT - 4_000_000)),
+        vec![
+            AccountMeta::new_readonly(pool_pda, false),
+            AccountMeta::new_readonly(ctx.depositor.pubkey(), true),
+            AccountMeta::new(user_ata, false),
+            AccountMeta::new(vault_ta, false),
+            AccountMeta::new(prepaid_pda, false),
+            AccountMeta::new_readonly(ctx.token_v3, false),
+        ],
+    );
+    let sig2 = send(&ctx, &[ref2], &ctx.backend.pubkey(), &[&ctx.depositor]).await?;
+    let after = token_amount(&ctx, &user_ata).await?;
+    let vault_zero = token_amount(&ctx, &vault_ta).await?;
+    let record_zero = prepaid_amount(&ctx, &prepaid_pda).await?;
+    if after != before || vault_zero != 0 || record_zero != 0 {
+        return Err(format!(
+            "round-trip failed: user {} -> {} vault={} record={}",
+            before, after, vault_zero, record_zero
+        )
+        .into());
+    }
+    evidence!(6, "refund sig={} (assisted) + sig={} (direct door, backend absent): vault=0 record=0 user back at {} (round-trip proven, both doors live)",
+        sig, sig2, after);
+
+    // ---- 6b. pause through the 2-of-2 ----------------------------------------
     let ms_state = squads::get_multisig(&ctx.rpc, &ms).await?;
-    let pause = pool_ix("pause", (),
+    let pause = pool_ix(
+        "pause",
+        (),
         vec![
             AccountMeta::new(pool_pda, false),
             AccountMeta::new_readonly(vault, true),
-        ]);
+        ],
+    );
     let idx = propose_approve_execute(&ctx, &ms, &ms_state, pause, "pause via 2-of-2").await?;
-    evidence!(7, "pause executed through multisig (tx index {}) — admin gate is the vault PDA", idx);
+    evidence!(
+        7,
+        "pause executed through multisig (tx index {}) — admin gate is the vault PDA",
+        idx
+    );
 
-    let dep2 = pool_ix("deposit", (DEPOSIT_AMOUNT,),
+    // A paused pool refuses EVERY movement class — record_contribution here
+    // (the prepay/refund refusals are pinned in the adversarial suite).
+    let rec2 = pool_ix(
+        "record_contribution",
+        (&ctx.depositor.pubkey(), &DEPOSIT_AMOUNT),
         vec![
             AccountMeta::new(pool_pda, false),
             AccountMeta::new(ctx.backend.pubkey(), true),
-            AccountMeta::new_readonly(ctx.depositor.pubkey(), true),
-            AccountMeta::new(source, false),
-            AccountMeta::new(vault_ta, false),
             AccountMeta::new(claim_mint, false),
             AccountMeta::new(claim_ta, false),
-            AccountMeta::new_readonly(ctx.token_v3, false),
             AccountMeta::new_readonly(ctx.token_2022, false),
             AccountMeta::new_readonly(solana_program::system_program::ID, false),
-        ]);
-    match send(&ctx, &[dep2], &ctx.backend.pubkey(), &[&ctx.backend, &ctx.depositor]).await {
-        Ok(sig) => return Err(format!("SECURITY: paused pool accepted deposit sig={sig}").into()),
-        Err(e) => evidence!(8, "paused pool refused deposit: {}", short_err(e.as_ref())),
+        ],
+    );
+    match send(&ctx, &[rec2], &ctx.backend.pubkey(), &[&ctx.backend]).await {
+        Ok(sig) => {
+            return Err(format!("SECURITY: paused pool accepted a contribution sig={sig}").into())
+        }
+        Err(e) => evidence!(
+            8,
+            "paused pool refused record_contribution: {}",
+            short_err(e.as_ref())
+        ),
     }
 
     // ---- 7. program upgrade through the 2-of-2 ----------------------------------
     if let Ok(buffer) = std::env::var("SOAK_BUFFER") {
         let buffer: Pubkey = buffer.parse().expect("SOAK_BUFFER pubkey");
-        let upgrade = bpf_loader_upgradeable::upgrade(
-            &ctx.pool,
-            &buffer,
-            &vault,
-            &ctx.deploy.pubkey(),
-        );
+        let upgrade =
+            bpf_loader_upgradeable::upgrade(&ctx.pool, &buffer, &vault, &ctx.deploy.pubkey());
         let ms_state = squads::get_multisig(&ctx.rpc, &ms).await?;
-        let idx = propose_approve_execute(&ctx, &ms, &ms_state, upgrade, "program upgrade via 2-of-2").await?;
-        evidence!(9, "program UPGRADED through multisig (tx index {}) — vault-signed upgrade proven", idx);
+        let idx =
+            propose_approve_execute(&ctx, &ms, &ms_state, upgrade, "program upgrade via 2-of-2")
+                .await?;
+        evidence!(
+            9,
+            "program UPGRADED through multisig (tx index {}) — vault-signed upgrade proven",
+            idx
+        );
     } else {
         println!("[soak] STEP 09 :: SKIPPED (SOAK_BUFFER unset — set it after the runbook's write-buffer step)");
     }
@@ -380,7 +525,9 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         },
         squads::ConfigTransactionCreateArgs {
             actions: vec![
-                squads_state::ConfigAction::RemoveMember { old_member: ctx.teammate.pubkey() },
+                squads_state::ConfigAction::RemoveMember {
+                    old_member: ctx.teammate.pubkey(),
+                },
                 squads_state::ConfigAction::AddMember {
                     new_member: squads_state::Member {
                         key: fresh_teammate.pubkey(),
@@ -404,13 +551,20 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             rent_payer: ctx.deploy.pubkey(),
             system_program: solana_program::system_program::ID,
         },
-        squads::ProposalCreateArgs { transaction_index: tx_index, draft: false },
+        squads::ProposalCreateArgs {
+            transaction_index: tx_index,
+            draft: false,
+        },
         None,
     );
     send(&ctx, &[create, prop], &ctx.deploy.pubkey(), &[&ctx.founder]).await?;
     for member in [&ctx.founder, &ctx.teammate] {
         let approve = squads::proposal_approve(
-            squads::ProposalVoteAccounts { multisig: ms, proposal, member: member.pubkey() },
+            squads::ProposalVoteAccounts {
+                multisig: ms,
+                proposal,
+                member: member.pubkey(),
+            },
             squads::ProposalVoteArgs { memo: None },
             None,
         );
@@ -430,8 +584,14 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     );
     let sig = send(&ctx, &[exec], &ctx.deploy.pubkey(), &[&ctx.founder]).await?;
     let ms_end = squads::get_multisig(&ctx.rpc, &ms).await?;
-    evidence!(10, "member rotated (teammate -> {}) via 2-of-2 sig={} members={} threshold={}",
-        fresh_teammate.pubkey(), sig, ms_end.members.len(), ms_end.threshold);
+    evidence!(
+        10,
+        "member rotated (teammate -> {}) via 2-of-2 sig={} members={} threshold={}",
+        fresh_teammate.pubkey(),
+        sig,
+        ms_end.members.len(),
+        ms_end.threshold
+    );
 
     println!("[soak] ALL STEPS COMPLETE — archive this output as the soak evidence.");
     Ok(())
@@ -474,7 +634,11 @@ fn sighash(namespace: &str, name: &str) -> [u8; 8] {
 fn pool_ix<A: AnchorSerialize>(name: &str, args: A, accounts: Vec<AccountMeta>) -> Instruction {
     let mut data = sighash("global", name).to_vec();
     data.extend(args.try_to_vec().expect("borsh args"));
-    Instruction { program_id: Pubkey::new_from_array(POOL_PROGRAM_BYTES), accounts, data }
+    Instruction {
+        program_id: Pubkey::new_from_array(POOL_PROGRAM_BYTES),
+        accounts,
+        data,
+    }
 }
 
 /// Sends a tx: `payer` pays fees, `signers` sign (payer included when it
@@ -507,7 +671,13 @@ async fn fund_members(ctx: &Ctx) -> Result<(), Box<dyn std::error::Error>> {
                 &k.pubkey(),
                 100_000_000 - bal.min(100_000_000),
             );
-            send(ctx, std::slice::from_ref(&ix), &ctx.deploy.pubkey(), &[&ctx.deploy]).await?;
+            send(
+                ctx,
+                std::slice::from_ref(&ix),
+                &ctx.deploy.pubkey(),
+                &[&ctx.deploy],
+            )
+            .await?;
         }
     }
     Ok(())
@@ -515,9 +685,22 @@ async fn fund_members(ctx: &Ctx) -> Result<(), Box<dyn std::error::Error>> {
 
 /// Depositor's associated USDC token account (ATA derivation: owner,
 /// token program, mint).
+/// Reads a renter prepaid record's `amount` (anchor layout: 8-byte
+/// discriminator, then u64 LE).
+async fn prepaid_amount(ctx: &Ctx, pda: &Pubkey) -> Result<u64, Box<dyn std::error::Error>> {
+    let acct = ctx.rpc.get_account(pda).await?;
+    let mut b = [0u8; 8];
+    b.copy_from_slice(&acct.data[8..16]);
+    Ok(u64::from_le_bytes(b))
+}
+
 fn depositor_ata(ctx: &Ctx) -> Pubkey {
     Pubkey::find_program_address(
-        &[ctx.depositor.pubkey().as_ref(), ctx.token_v3.as_ref(), ctx.usdc.as_ref()],
+        &[
+            ctx.depositor.pubkey().as_ref(),
+            ctx.token_v3.as_ref(),
+            ctx.usdc.as_ref(),
+        ],
         &Pubkey::new_from_array(ATA_PROGRAM_BYTES),
     )
     .0
@@ -559,8 +742,11 @@ async fn propose_approve_execute(
     let tx_index = ms_state.transaction_index + 1;
     let (tx_pda, _) = pda::get_transaction_pda(ms, tx_index, None);
     let (proposal, _) = pda::get_proposal_pda(ms, tx_index, None);
-    let message =
-        squads_multisig_program::TransactionMessage::try_compile(&vault, std::slice::from_ref(&inner), &[])?;
+    let message = squads_multisig_program::TransactionMessage::try_compile(
+        &vault,
+        std::slice::from_ref(&inner),
+        &[],
+    )?;
 
     let create = squads::vault_transaction_create(
         squads::VaultTransactionCreateAccounts {
@@ -584,13 +770,20 @@ async fn propose_approve_execute(
             rent_payer: ctx.deploy.pubkey(),
             system_program: solana_program::system_program::ID,
         },
-        squads::ProposalCreateArgs { transaction_index: tx_index, draft: false },
+        squads::ProposalCreateArgs {
+            transaction_index: tx_index,
+            draft: false,
+        },
         None,
     );
     send(ctx, &[create, prop], &ctx.deploy.pubkey(), &[&ctx.founder]).await?;
     for member in [&ctx.founder, &ctx.teammate] {
         let approve = squads::proposal_approve(
-            squads::ProposalVoteAccounts { multisig: *ms, proposal, member: member.pubkey() },
+            squads::ProposalVoteAccounts {
+                multisig: *ms,
+                proposal,
+                member: member.pubkey(),
+            },
             squads::ProposalVoteArgs { memo: None },
             None,
         );

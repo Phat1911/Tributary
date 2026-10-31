@@ -1,11 +1,13 @@
 //! On-chain state for the root-pool custody program.
 //!
 //! The layout is deliberately minimal: ONE singleton config PDA, ONE USDC
-//! vault token account, ONE claim mint, and ONE claim token account per
-//! depositor identity. Every record here mirrors a row the internal ledger
-//! already keeps (see `lib.rs` module docs for the exact correspondence) —
-//! reconciliation cheapness is a layout property, so nothing on-chain carries
-//! a shape the books cannot answer with a single query.
+//! vault token account (renter prepaid only — never depositor principal,
+//! D40), ONE claim mint, ONE claim token account per depositor identity,
+//! and ONE prepaid record per renter identity. Every record here mirrors a
+//! row the internal ledger already keeps (see `lib.rs` module docs for the
+//! exact correspondence) — reconciliation cheapness is a layout property,
+//! so nothing on-chain carries a shape the books cannot answer with a
+//! single query.
 
 use anchor_lang::prelude::*;
 
@@ -25,6 +27,13 @@ pub const SEED_CLAIM_MINT: &[u8] = b"claim_mint";
 /// `[SEED_CLAIM, depositor_pubkey]` — one stable account per depositor
 /// identity, which is exactly the key M11's Merkle leaves will use.
 pub const SEED_CLAIM: &[u8] = b"claim";
+
+/// Seed prefix for per-renter prepaid records:
+/// `[SEED_PREPAID, renter_pubkey]` — the on-chain twin of the renter's
+/// `prepaid.renter` ledger row. Money-custody class: a bare u64 kept so a
+/// refund can be bounded by the renter's OWN on-chain record (never an
+/// operator-attested amount) — the M10 refund rail (D40 ruling, 2026-10-31).
+pub const SEED_PREPAID: &[u8] = b"prepaid";
 
 /// Both mints use 6 decimals: USDC natively, the claim mint by our choice.
 /// 1 claim unit therefore equals exactly 1 micro-USD of contributed
@@ -65,8 +74,30 @@ pub struct Pool {
     /// window length, operator bond size, active Merkle root) land in this
     /// space WITHOUT resizing the account — account layout is the part M11
     /// must not redesign.
+    ///
+    /// Rule-8 guardrail (director-approved 2026-10-31): if the operator fee
+    /// band ever goes on-chain, it lands HERE behind a multisig vote — and
+    /// a vote alone still never satisfies rule 8: an on-chain band change
+    /// additionally requires explicit user approval + a D-log entry.
     #[max_len(64)]
     pub reserved: [u8; 64],
+}
+
+/// Per-renter prepaid record — the on-chain twin of `prepaid.renter`.
+///
+/// This is the ONLY USDC-denominated record besides the vault itself, and
+/// the two must always reconcile: `vault.amount == Σ prepaid.amount`
+/// (the journey suite asserts it after every renter movement). Renter
+/// money is a LIABILITY (rule 7), so its record is what bounds refunds:
+/// `refund_renter` requires `amount ≤ this.amount` — an on-chain fact,
+/// not an operator attestation.
+#[account]
+#[derive(InitSpace)]
+pub struct RenterPrepaid {
+    /// Micro-USDC prepaid and not yet refunded for this renter.
+    pub amount: u64,
+    /// Bump of this PDA (stored so refunds never re-derive it).
+    pub bump: u8,
 }
 
 #[cfg(test)]
@@ -93,7 +124,13 @@ mod tests {
     #[test]
     fn seeds_are_distinct() {
         // Colliding seeds would alias PDAs; pin pairwise distinctness.
-        let seeds = [SEED_POOL, SEED_VAULT, SEED_CLAIM_MINT, SEED_CLAIM];
+        let seeds = [
+            SEED_POOL,
+            SEED_VAULT,
+            SEED_CLAIM_MINT,
+            SEED_CLAIM,
+            SEED_PREPAID,
+        ];
         for (i, a) in seeds.iter().enumerate() {
             for (j, b) in seeds.iter().enumerate() {
                 if i != j {
@@ -101,5 +138,12 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn renter_prepaid_space_is_tight() {
+        // 8 = Anchor discriminator + amount + bump. A tight layout keeps
+        // rent cheap and makes accidental field additions visible here.
+        assert_eq!(8 + RenterPrepaid::INIT_SPACE, 8 + 8 + 1);
     }
 }

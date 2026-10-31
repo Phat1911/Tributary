@@ -21,10 +21,12 @@
   "authorities": {
     "deploy_payer": "4N2nTJ8WWwDKVoULt9bymaB6XsrB7HP973y8Ebw6tQhV",
     "backend_operator_hot_key": "AJmEJPsCBT7VpZ3CkxDWpcoeuBdqp3JzrcPr43ZntJpb",
-    "depositor_custodial_test_identity": "Ah3TyjuC3agXQcsYty1VpNBWLRg4DkFWkhugsyoGLUuJ"
+    "custodial_user_key": "Ah3TyjuC3agXQcsYty1VpNBWLRg4DkFWkhugsyoGLUuJ",
+    "_custodial_user_key_note": "post-D40 (2026-10-31): one key, both soak roles — depositor identity for record_contribution (needs NO USDC; contributions are records) and renter wallet for the prepay/refund round-trip (the only USDC the soak moves)"
   },
   "assets": {
-    "escrow_mint": "Circle devnet USDC 4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU (token v3, 6 decimals)",
-    "claim_mint_pda": "derived: PDA([b\"pool\", b\"claim_mint\"], program)"
+    "escrow_mint": "Circle devnet USDC 4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU (token v3, 6 decimals — RENTER PREPAID ONLY, never depositor principal per D40)",
+    "claim_mint_pda": "derived: PDA([b\"pool\", b\"claim_mint\"], program)",
+    "renter_prepaid_record_pda": "derived: PDA([b\"prepaid\", renter_pubkey], program)"
   }
 }

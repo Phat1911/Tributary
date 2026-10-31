@@ -48,6 +48,10 @@ Keypairs (gitignored `target/m8-keys/`, pubkeys in `deploy/devnet-m8.json`):
 bash scripts/devnet_soak_m8.sh 2>&1 | tee target/soak-logs/soak-<ts>.log
 ```
 
+Post-D40 doctrine (2026-10-31): the vault never holds depositor
+principal — contributions are claim RECORDS; USDC enters only as renter
+prepay. The soak proves exactly that shape, live.
+
 The script: builds the .so (SBF v3, skips if present) → funds the deploy
 key (airdrop loop; if rate-limited it says exactly which pubkey to faucet
 at faucet.solana.com and exits) → `solana program deploy` → Circle
@@ -67,10 +71,10 @@ script is safely re-runnable after any interruption.
 | 2 | Upgrade authority → multisig vault PDA | no single-key upgrade authority |
 | 3 | Single-key upgrade attempt | REFUSED (this failing is the proof) |
 | 4 | `initialize` with admin = vault PDA | admin-gated from the first block |
-| 5 | Deposit (25 USDC) | escrow + claims move 1:1 (M7 mirror holds) |
-| 6 | Withdraw | principal out, registry burned, round-trip exact |
+| 5 | `record_contribution` (25 USDC-worth) + `burn_claims` via the DIRECT door (depositor key only, backend absent) | D40 live: claims are records, vault stays at zero — and the escape hatch works with the operator absent |
+| 6 | Renter prepay (10 USDC) → partial refund (assisted door) → full refund (DIRECT door) | the ONLY USDC path: vault == Σ renter prepaid, round-trip exact, both doors live |
 | 7 | `pause` via 2-of-2 vote | admin gate is genuinely the multisig |
-| 8 | Deposit while paused | REFUSED with `PoolError::Paused` |
+| 8 | `record_contribution` while paused | REFUSED with `PoolError::Paused` (all movement classes refuse; prepay/refund refusals pinned in the adversarial suite) |
 | 9 | Program UPGRADE via 2-of-2 vote | vault-signed upgrade works |
 | 10 | Teammate key rotation via 2-of-2 | multisig governance is operational |
 

@@ -67,14 +67,17 @@ fi
 echo "== [deploy] authority BEFORE soak (expect deploy key here; the soak moves it):"
 solana program show "$PROGRAM_PUBKEY" | sed -n 's/^.*Authority: /  authority: /p'
 
-# --- 4. USDC for the depositor (Circle faucet) ---------------------------------
-DEPOSITOR_PUBKEY="$(solana-keygen pubkey target/m8-keys/depositor.json)"
+# --- 4. USDC for the custodial user key (Circle faucet) -----------------------
+# (D40 renter-shaped soak: this ONE wallet plays the renter role — it is
+# the only USDC the soak moves. The depositor identity needs NO USDC:
+# contributions are records now.)
+USER_PUBKEY="$(solana-keygen pubkey target/m8-keys/depositor.json)"  # custodial user key (renter wallet)
 USDC_MINT="4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU"
 usdc_balance() {
-  spl-token balance --address "$(spl-token address --token "$USDC_MINT" --owner "$DEPOSITOR_PUBKEY" 2>/dev/null | tail -1)" \
+  spl-token balance --address "$(spl-token address --token "$USDC_MINT" --owner "$USER_PUBKEY" 2>/dev/null | tail -1)" \
     --url https://api.devnet.solana.com 2>/dev/null | awk '{print $1}'
 }
-echo "== [usdc] depositor wallet: $DEPOSITOR_PUBKEY"
+echo "== [usdc] renter wallet (custodial user key): $USER_PUBKEY"
 echo "== [usdc] try Circle's devnet faucet API (best effort)…"
 curl -sS -X POST https://faucet.circle.com/api/devnet-uxdc/faucet \
   -H 'Content-Type: application/json' \
@@ -85,13 +88,13 @@ echo
 for i in 1 2 3 4 5 6; do
   sleep 15
   UBAL="$(usdc_balance)"
-  echo "== [usdc] depositor USDC balance: ${UBAL:-0}"
+  echo "== [usdc] renter USDC balance: ${UBAL:-0}"
   if [ -n "${UBAL:-}" ] && python3 -c "import sys; sys.exit(0 if float('$UBAL') >= 25.0 else 1)"; then
     echo "== [usdc] faucet landed (${UBAL} USDC)"; break
   fi
   if [ "$i" = "6" ]; then
     echo "== [usdc] faucet never landed. Open https://faucet.circle.com in a browser,"
-    echo "== [usdc] pick USDC on Solana Devnet, send 50 USDC to $DEPOSITOR_PUBKEY,"
+    echo "== [usdc] pick USDC on Solana Devnet, send at least 10 USDC to $USER_PUBKEY,"
     echo "== [usdc] then re-run this script (it is re-runnable; earlier steps skip)."
     exit 1
   fi
