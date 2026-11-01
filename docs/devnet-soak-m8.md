@@ -1,18 +1,11 @@
 # M8 devnet soak — runbook + evidence (Solana program: escrow vault + claim registry)
 
-Status: **RUN PENDING — one blocker: deploy key needs ≥4 SOL.** Devnet
-airdrop is rate-limited and all public RPC faucets refuse `requestAirdrop`
-(2026-10-30); the founder took the browser step ("i'll do it later"). Once
-`4N2nTJ8WWwDKVoULt9bymaB6XsrB7HP973y8Ebw6tQhV` (deploy key) holds ≥4 SOL,
-the whole soak is ONE command (below). Everything else is done and
-verified: SBF ELF built (`target/deploy/pool.so`, program id
-`9pEmyxftdRUZV2iw6ZzCNgZz9QygG53i7APNaWcEHvjX`), program-test suites
-16/16 green against that exact ELF, soak client compiled clean, orchestrator
-script updated to the real artifact paths and non-interactive faucet
-polling (kickoff ruling at GO 2026-10-30: manual runbook + script;
-scheduled CI deferred).
-
-## What this proves (SPEC §14 V2 M8 row, done-when)
+Status: **RUN COMPLETE (2026-11-01).** All 10 steps green on devnet;
+evidence below. Program `9pEmyx…` deployed, upgrade authority = Squads
+vault `BhLQqw…` (2-of-2 founder+teammate), renter round-trip proven
+through BOTH doors, the D40 invariant (vault untouched by contributions)
+verified live, and the multisig proved it can pause, resume, upgrade the
+program, and rotate a member — each via a 2-of-2 vote.
 
 1. **Program deployed to devnet under multisig** — Squads V4 2-of-2
    (founder + teammate; GO ruling; SPEC §12's 2-of-3 stays the production
@@ -78,15 +71,34 @@ script is safely re-runnable after any interruption.
 | 9 | Program UPGRADE via 2-of-2 vote | vault-signed upgrade works |
 | 10 | Teammate key rotation via 2-of-2 | multisig governance is operational |
 
-## Executed run — evidence
+## Executed run — evidence (final run 2026-11-01, ~11:55 ICT)
 
-*(filled after the run; sigs + pubkeys below)*
-
-- Program id:
-- Multisig / vault:
-- Deploy sig:
-- Round-trip sigs:
-- Upgrade sigs:
-- Rotation sig:
-- Program authority after soak:
-- Log archive:
+- Program id: `9pEmyxftdRUZV2iw6ZzCNgZz9QygG53i7APNaWcEHvjX`
+  (deploy sig `4YEMbVJPzwdaPDzmv1tkYHvUcQXw5sQg2J2uYyQ8BZK84xciSwjRfPVBto7EZgt5Zc7ruiZSjTqSfm64PSFLuzfU`)
+- Multisig / vault: `GuSeFfFkdKtjkubeLUEeBHW5pfHSJctGnz8AFk7xrCk5` /
+  vault `BhLQqw5rkr3otQoXvJSRjiaNHTgdcgXVkqXv8mwEhhJq` (create sig
+  `2Y3SYgMzCcmoG4uEY9ZpRpKPQzx1nqstRx1padu7Kbu658eH6JzR2Ra7efRaWRNQ3Ue2wYHaYWqKq5SokgVQxWPj`)
+- Upgrade authority → vault sig: `5QtwnHeEVt41kYh71wE6qi5YkT9kCXnz1DZBJiHtEzd2ikLS2XqwHjzniqHtWhW6zb9nTjUsd8n238iMDQDPUi7N`
+- Single-key upgrade attempt: REFUSED (the refusal is the proof)
+- initialize (admin = vault): sig `3xwvPyRMkNRubFV6RJwb1LCFeQzoDZEcujfPnbSkx6PH2BivZ3tg7RnoU3iaYgqHQcNzY3tzVMmUhPjLK5puxWMs`
+- D40 proof (records, not money): record_contribution 25 USDC-worth →
+  claims minted, **vault = 0** — sig (final run)
+  `24EFHhDdkMci3C1gbyEVrvaj5qzSA8cmaZtrfMBePWcpomwSgWqAVGFELzeyVgdUqSeunWqQMpHqun58HSN5bh2w`
+- Escape hatch (DIRECT door, backend absent): burn_claims 5 USDC-worth sig
+  `2jpogJN2z4YJtX87dugFJu1LKybKH1wBt8oMsxLSbL3weoWdnJabcX6THcLYb7L91WKcXVV3kpUXbn1yr2ACzpeK`
+- Renter round-trip: prepay 10 USDC (vault == record == 10,000,000) sig
+  `2DKut6qqqCaZSJkCK6KRJxHete449THZhV3yWFJuw3nPzHzpKMzbHvPHYq12DioZwv3LnFqoSn9MCyfY51xL3gHD`;
+  refund ASSISTED sig `nzQkmTGGb8d5p5iLfNWyC6be3nNkSf6XSPeMX4nyVYecPcqQZyrzkUT6qh6GfUYw1DfFvjmZNDG9AqAC9dsUS68`
+  + refund DIRECT sig `A6akR6xmV9srkT6j5m6tBrk6bLGKUaKD7QYGGVKugHBoXhF3gLPt5mL8tQ4KnTXPtZ2VV6JERPLGxuAA8nh7ok1`
+  → vault = 0, record = 0, wallet back at 20 USDC
+- pause via 2-of-2 (tx index 4): sig `5MwfY4KLYraqdzYo8se5F5KZMmBYyd3ppt5iTB4U1bvrQ7VQaxZYVZGxk9y6GaDcpmsHWcoyNUS8dLhbF2jgmHm2`
+- paused refusal: `record_contribution` → custom error 0x1770 = `PoolError::Paused` (6000)
+- Program UPGRADE via 2-of-2 (tx index 5; buffer
+  `J18XUcLaSSLb93aMN1o4PtQTxTH6M4GaFVoC7jzEBjhs`, buffer authority handed
+  to the vault first, sig
+  `2XdawasEEqpkm9wYQu2KAuH5vuTHyHPWt2YNEetWzGEExJdDPJBREDXNBMgMFpD9pHQ8vUAo1PJnVXojQqGjW8v8`):
+  execute sig `46fSAVhMo4D5qcfECfX9VNN27SxPf5YMG3iZpbCvbrWde2bMTDVtvuVsVNtwVz5tcyfvu7UdnmtKFhiU1FHMRBAS`
+- Member rotation (teammate → `2ys6xNTANVqoNar7RQHyQvtdDhCwYbsE3XEP4LAjpzbq`) via 2-of-2:
+  sig `2LqGT5hJXR2V3Q5w5qCqtkB9aHmsdHvrFR4Sw97Vidc5ZeuxNJ7JUTSQ1qwSVrd8DXDJvq4VmsJa3KfRKXz2KeX5`
+- Program authority after soak: `BhLQqw5rkr3otQoXvJSRjiaNHTgdcgXVkqXv8mwEhhJq` (the Squads vault)
+- Log archive: `target/soak-logs/soak-20261101-*.log` (gitignored by design; the sigs above are the durable record)

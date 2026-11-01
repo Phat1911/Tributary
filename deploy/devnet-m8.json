@@ -7,16 +7,22 @@
   "program": {
     "name": "pool",
     "address": "9pEmyxftdRUZV2iw6ZzCNgZz9QygG53i7APNaWcEHvjX",
-    "upgrade_authority": "SQUADS_MULTISIG_VAULT_0 (filled at soak — see docs/devnet-soak-m8.md)"
+    "upgrade_authority": "BhLQqw5rkr3otQoXvJSRjiaNHTgdcgXVkqXv8mwEhhJq (Squads vault PDA — set 2026-11-01)"
   },
   "multisig": {
     "kind": "squads-v4",
     "members": [
-      { "role": "founder", "pubkey": "HGHF2iuEphK4zFuqFAC5dXDfk4US6AAvMVqWwfwB7gzz" },
-      { "role": "teammate", "pubkey": "7sdvrCiwMCWcMzdqWhWQ7e6YLcggAQBmVxeX4KgXPMhB" }
+      {
+        "role": "founder",
+        "pubkey": "HGHF2iuEphK4zFuqFAC5dXDfk4US6AAvMVqWwfwB7gzz"
+      },
+      {
+        "role": "teammate",
+        "pubkey": "7sdvrCiwMCWcMzdqWhWQ7e6YLcggAQBmVxeX4KgXPMhB"
+      }
     ],
     "threshold": 2,
-    "configuration": "FILLED AT SOAK (multisig create key + MS index + vault PDA recorded in docs/devnet-soak-m8.md)"
+    "configuration": "multisig GuSeFfFkdKtjkubeLUEeBHW5pfHSJctGnz8AFk7xrCk5, vault index 0 = BhLQqw5rkr3otQoXvJSRjiaNHTgdcgXVkqXv8mwEhhJq, time_lock 0; create sig 2Y3SYgMzCcmoG4uEY9ZpRpKPQzx1nqstRx1padu7Kbu658eH6JzR2Ra7efRaWRNQ3Ue2wYHaYWqKq5SokgVQxWPj (2026-11-01; teammate rotated at soak step 10 to 2ys6xNTANVqoNar7RQHyQvtdDhCwYbsE3XEP4LAjpzbq)"
   },
   "authorities": {
     "deploy_payer": "4N2nTJ8WWwDKVoULt9bymaB6XsrB7HP973y8Ebw6tQhV",
@@ -28,5 +34,11 @@
     "escrow_mint": "Circle devnet USDC 4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU (token v3, 6 decimals — RENTER PREPAID ONLY, never depositor principal per D40)",
     "claim_mint_pda": "derived: PDA([b\"pool\", b\"claim_mint\"], program)",
     "renter_prepaid_record_pda": "derived: PDA([b\"prepaid\", renter_pubkey], program)"
+  },
+  "soak": {
+    "status": "COMPLETE 2026-11-01",
+    "steps": "0-10 green; evidence sigs in docs/devnet-soak-m8.md",
+    "upgrade_buffer": "J18XUcLaSSLb93aMN1o4PtQTxTH6M4GaFVoC7jzEBjhs (authority handed to the vault, then consumed by the 2-of-2 upgrade)",
+    "renter_wallet": "3GuSWoYUdyu3PHHs7M7FijfUGih4ySo2w76puJW9Y2xs (provisioned, not derived; verified on-chain owner/mint/program)"
   }
 }

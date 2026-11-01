@@ -38,11 +38,21 @@
 | M5.5 | **DONE (closed 2026-10-27)** | Slice 1 (landing/Tailscale/video script) 2026-10-26 + slice 2 (Gemini provider, J-A…E) 2026-10-27; §14 ticked. Residue: video records ~2026-11-12 |
 | M6 | **in progress — slice 1 + F1 fix/v0.1.3 DONE** (2026-10-27) | Pilot onboarding surface (docs: feedback template, upgrade rung, support runbook, admin guide DRAFT v1) + M6-S1-F1 fixed red-first, CI-pinned, released v0.1.3, demo re-pinned. Slice 2 waits on founder pilot friction log |
 | M7 | **done** (2026-10-28) | LedgerTrait + double-entry ledger, ships dark; f0c25ca→8bbee09; 172/172 dual-DB (16 new tests); D38 recorded; §14 ticked |
-| M8 | **code complete + doctrine fix + CI-green (SBF prerequisite added 2026-11-01); devnet soak PENDING (founder funding)** | Director doctrine audit 2026-10-31 found 2 high drifts (USDC-in-deposit; missing exit hatch) — both fixed per D40/D41 + scope-A renter rails; program tests 28/28, workspace re-run, soak client renter-shaped; devnet leg still blocked on faucet SOL — then ONE command: `bash scripts/devnet_soak_m8.sh` |
+| M8 | **done (2026-11-01)** | Devnet soak COMPLETE: all 10 steps green (evidence in docs/devnet-soak-m8.md + deploy/devnet-m8.json); §14 ticked |
 | M9–M11 | pending | V2 — Root Pool |
 | M12–M14 | pending | V3 — Operator network |
 
 ## Milestone log (append per completed milestone; keep the most recent 10)
+
+### 2026-11-01 — M8 devnet soak EXECUTED: all 10 steps green; done-when satisfied
+
+**Unblocked by the founder** (faucet SOL for the deploy key; Circle browser faucet for the renter wallet — the API is retired, 404+reCAPTCHA). Final run evidence lives in `docs/devnet-soak-m8.md` (every sig) and `deploy/devnet-m8.json` (deployment facts). Highlights: program `9pEmyx…` deployed, upgrade authority = Squads vault `BhLQqw…`; **D40 proven live** (record_contribution minted claims with vault=0); **escape hatch proven live** (burn_claims with ONLY the depositor key in the transaction); renter prepay→refund round-trip exact through BOTH doors (vault==record==10 USDC → 0/0, wallet whole); single-key upgrade REFUSED; pause (error 6000) + resume + program upgrade + teammate rotation all executed as 2-of-2 vault transactions.
+
+**The soak's real lesson — resilience engineering.** Eleven live bugs found and fixed DURING the run (all in tooling, none in the program — the on-chain code passed every step on first touch): unbound variable + dead Circle API in the orchestrator; a CLI-form the balance poll used that always read empty; `set -e` killing the script silently on one dropped RPC request; `write-buffer --buffer-authority` needing the KEYPAIR file not the pubkey; the Squads ProgramConfig treasury requirement (`require_keys_eq!` — treasury must be THEIRS, creation fee read from config); the ProgramData authority parser reading from-memory offsets and producing garbage (fixed by dumping the live bytes — never parse from memory); backend hot key having zero lamports on devnet; fee-payer/signer mismatches on direct-door and multisig legs; the buffer authority needing handover to the vault before a vault-signed upgrade; and the pool arriving PAUSED on restart (now resume-aware, which re-proves the resume lever). Each fix is commented at its site with the date.
+
+**Bookkeeping:** SPEC §14 M8 ticked with the implementation pointer; docs evidence + deploy/devnet-m8.json filled; AUDIT A-040 records the parser-from-memory lesson (evidence integrity class). Zero V1 change; no new dependencies.
+
+**Fast jump:** `docs/devnet-soak-m8.md` · `deploy/devnet-m8.json` · `scripts/devnet-soak/src/main.rs` (resilience fixes) · `scripts/devnet_soak_m8.sh` (orchestrator fixes) · `SPEC.md` (§14 tick) · `AUDIT.md` (A-040) · `PLAN.md` (this entry).
 
 ### 2026-11-01 — CI red on both M8 pushes: root cause fixed (SBF prerequisite), E2E flake hardened, D39 backfilled
 

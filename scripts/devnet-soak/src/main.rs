@@ -196,10 +196,25 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             squads_state::Permission::Vote,
             squads_state::Permission::Execute,
         ]);
+        // Squads v2/v3 devnet: the canonical ProgramConfig carries a
+        // creation fee and ITS OWN treasury, and multisig_create_v2
+        // REQUIRES treasury == program_config.treasury (require_keys_eq!)
+        // — we cannot point it at our vault. Read the config from chain
+        // and pass exactly what it says; pay the fee if one is set.
+        // Layout: [8B anchor disc][authority 32][creation_fee u64 LE][treasury 32].
+        let config_pda = pda::get_program_config_pda(None).0;
+        let cfg = ctx.rpc.get_account(&config_pda).await?;
+        let creation_fee = u64::from_le_bytes(cfg.data[40..48].try_into().expect("fee slice"));
+        let squads_treasury = Pubkey::try_from(&cfg.data[48..80]).expect("treasury slice");
+        if creation_fee > 0 {
+            println!(
+                "[soak] squads creation fee = {creation_fee} lamports (paid by the deploy key)"
+            );
+        }
         let ix = squads::multisig_create_v2(
             squads::MultisigCreateAccountsV2 {
-                program_config: pda::get_program_config_pda(None).0,
-                treasury: vault,
+                program_config: config_pda,
+                treasury: squads_treasury,
                 multisig: ms,
                 create_key: create_key.pubkey(),
                 creator: ctx.deploy.pubkey(),
@@ -310,6 +325,33 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
+    // RESUME-AWARE RESTART: a previous soak run may have ended with the
+    // pool PAUSED (step 7's proof). If so, resume through the 2-of-2
+    // BEFORE any money movement — which also re-proves the resume lever
+    // live. Pool layout: [8 disc][admin 32][backend 32][usdc 32][claim
+    // mint 32][vault 32][paused 1 byte] — paused at offset 168.
+    {
+        let pool_acct = ctx.rpc.get_account(&pool_pda).await?;
+        if pool_acct.data.get(168) == Some(&1) {
+            let resume = pool_ix(
+                "resume",
+                (),
+                vec![
+                    AccountMeta::new(pool_pda, false),
+                    AccountMeta::new_readonly(vault, true),
+                ],
+            );
+            let ms_state = squads::get_multisig(&ctx.rpc, &ms).await?;
+            let idx =
+                propose_approve_execute(&ctx, &ms, &ms_state, resume, "resume via 2-of-2").await?;
+            evidence!(
+                4,
+                "pool RESUMED through multisig (tx index {}) — restart-safe",
+                idx
+            );
+        }
+    }
+
     // ---- 5. record a contribution + exit through BOTH doors (D40) ------
     // The custodial user key plays both roles on devnet: the depositor
     // identity for record_contribution (no USDC involved — contributions
@@ -353,7 +395,9 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let sig = send(
         &ctx,
         &[burn_direct],
-        &ctx.backend.pubkey(),
+        // fee payer = the signing identity itself (the DIRECT door: the
+        // backend key is not in this transaction at all)
+        &ctx.depositor.pubkey(),
         &[&ctx.depositor],
     )
     .await?;
@@ -362,7 +406,19 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         sig, claims_after);
 
     // ---- 6. renter prepay -> refund round-trip (the ONLY USDC path) ----
-    let user_ata = depositor_ata(&ctx);
+    let user_ata = renter_wallet(&ctx)?;
+    {
+        // On-chain verification of the custodial wallet (v3 TokenAccount:
+        // [mint 32][owner 32][amount 8]…): routing money through an
+        // account we have not verified would be negligence.
+        let acct = ctx.rpc.get_account(&user_ata).await?;
+        let shape_ok = acct.owner == ctx.token_v3
+            && &acct.data[0..32] == ctx.usdc.as_ref()
+            && &acct.data[32..64] == ctx.depositor.pubkey().as_ref();
+        if !shape_ok {
+            return Err("renter wallet shape wrong (program/mint/owner mismatch)".into());
+        }
+    }
     let prepaid_pda =
         Pubkey::find_program_address(&[SEED_PREPAID, ctx.depositor.pubkey().as_ref()], &ctx.pool).0;
     let before = token_amount(&ctx, &user_ata).await?;
@@ -435,7 +491,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             AccountMeta::new_readonly(ctx.token_v3, false),
         ],
     );
-    let sig2 = send(&ctx, &[ref2], &ctx.backend.pubkey(), &[&ctx.depositor]).await?;
+    let sig2 = send(&ctx, &[ref2], &ctx.depositor.pubkey(), &[&ctx.depositor]).await?;
     let after = token_amount(&ctx, &user_ata).await?;
     let vault_zero = token_amount(&ctx, &vault_ta).await?;
     let record_zero = prepaid_amount(&ctx, &prepaid_pda).await?;
@@ -494,6 +550,20 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     // ---- 7. program upgrade through the 2-of-2 ----------------------------------
     if let Ok(buffer) = std::env::var("SOAK_BUFFER") {
         let buffer: Pubkey = buffer.parse().expect("SOAK_BUFFER pubkey");
+        // The loader requires buffer authority == upgrade authority (the
+        // VAULT). The orchestrator's write-buffer set the authority to the
+        // deploy key; hand it over first (found live 2026-11-01: "Buffer
+        // and upgrade authority don't match"). Buffer layout:
+        // [u32 LE tag=1][32-byte authority] — authority at bytes 4..36.
+        let buf_acct = ctx.rpc.get_account(&buffer).await?;
+        let mut ab = [0u8; 32];
+        ab.copy_from_slice(&buf_acct.data[4..36]);
+        if ab != vault.to_bytes() {
+            let set_auth =
+                bpf_loader_upgradeable::set_buffer_authority(&buffer, &ctx.deploy.pubkey(), &vault);
+            let sig = send(&ctx, &[set_auth], &ctx.deploy.pubkey(), &[&ctx.deploy]).await?;
+            println!("[soak] buffer authority -> vault {} sig={}", vault, sig);
+        }
         let upgrade =
             bpf_loader_upgradeable::upgrade(&ctx.pool, &buffer, &vault, &ctx.deploy.pubkey());
         let ms_state = squads::get_multisig(&ctx.rpc, &ms).await?;
@@ -557,7 +627,13 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         },
         None,
     );
-    send(&ctx, &[create, prop], &ctx.deploy.pubkey(), &[&ctx.founder]).await?;
+    send(
+        &ctx,
+        &[create, prop],
+        &ctx.deploy.pubkey(),
+        &[&ctx.deploy, &ctx.founder],
+    )
+    .await?;
     for member in [&ctx.founder, &ctx.teammate] {
         let approve = squads::proposal_approve(
             squads::ProposalVoteAccounts {
@@ -568,7 +644,13 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             squads::ProposalVoteArgs { memo: None },
             None,
         );
-        send(&ctx, &[approve], &ctx.deploy.pubkey(), &[member]).await?;
+        send(
+            &ctx,
+            &[approve],
+            &ctx.deploy.pubkey(),
+            &[&ctx.deploy, member],
+        )
+        .await?;
     }
     let exec = squads::config_transaction_execute(
         squads::ConfigTransactionExecuteAccounts {
@@ -582,7 +664,13 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         vec![],
         None,
     );
-    let sig = send(&ctx, &[exec], &ctx.deploy.pubkey(), &[&ctx.founder]).await?;
+    let sig = send(
+        &ctx,
+        &[exec],
+        &ctx.deploy.pubkey(),
+        &[&ctx.deploy, &ctx.founder],
+    )
+    .await?;
     let ms_end = squads::get_multisig(&ctx.rpc, &ms).await?;
     evidence!(
         10,
@@ -659,11 +747,12 @@ async fn send(
         .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)
 }
 
-/// Fee lamports for the member keys (they sign; deploy pays rent/fees —
-/// but vote instructions include member as SIGNER only, no lamports
-/// needed... funding keeps ANY failure mode from being a balance surprise).
+/// Fee lamports for the member keys AND the backend hot key. The backend
+/// PAYS RENT for claim rows and prepaid records on devnet (found live
+/// 2026-11-01: step 5 died "no record of a prior credit" — the backend had
+/// zero lamports). The renter wallet is funded by the orchestrator script.
 async fn fund_members(ctx: &Ctx) -> Result<(), Box<dyn std::error::Error>> {
-    for k in [&ctx.founder, &ctx.teammate] {
+    for k in [&ctx.founder, &ctx.teammate, &ctx.backend] {
         let bal = ctx.rpc.get_balance(&k.pubkey()).await?;
         if bal < 100_000 {
             let ix = solana_sdk::system_instruction::transfer(
@@ -694,16 +783,19 @@ async fn prepaid_amount(ctx: &Ctx, pda: &Pubkey) -> Result<u64, Box<dyn std::err
     Ok(u64::from_le_bytes(b))
 }
 
-fn depositor_ata(ctx: &Ctx) -> Pubkey {
-    Pubkey::find_program_address(
-        &[
-            ctx.depositor.pubkey().as_ref(),
-            ctx.token_v3.as_ref(),
-            ctx.usdc.as_ref(),
-        ],
-        &Pubkey::new_from_array(ATA_PROGRAM_BYTES),
-    )
-    .0
+/// The custodial renter wallet's USDC account — a PROVISIONED account,
+/// not a PDA (found live 2026-11-01: the spl CLI created it with a
+/// generated keypair, and no seed derivation reproduces it; custodial
+/// wallets in production are provisioned accounts too). Verified
+/// ON-CHAIN at use: owner, mint, and token program must all match — a
+/// stronger guarantee than any address derivation.
+const RENTER_USDC_ATA_STR: &str = "3GuSWoYUdyu3PHHs7M7FijfUGih4ySo2w76puJW9Y2xs";
+
+fn renter_wallet(ctx: &Ctx) -> Result<Pubkey, Box<dyn std::error::Error>> {
+    use std::str::FromStr;
+    let addr = Pubkey::from_str(RENTER_USDC_ATA_STR).expect("renter wallet pubkey parses");
+    let _ = ctx; // (rpc check happens at the call site, which has the ctx)
+    Ok(addr)
 }
 
 /// Raw u64 amount of a Token v3 account (layout: mint 32 + owner 32 +
@@ -715,18 +807,23 @@ async fn token_amount(ctx: &Ctx, acct: &Pubkey) -> Result<u64, Box<dyn std::erro
     Ok(u64::from_le_bytes(b))
 }
 
-/// Current upgrade authority from a program-data account
-/// (BPFUpgradeableLoader layout: 4-byte tag + u64 slot + pubkey-or-none).
+/// Current upgrade authority from a program-data account.
+///
+/// BPFUpgradeableLoader ProgramData layout — verified against the LIVE
+/// devnet bytes 2026-11-01 (two earlier parse attempts produced garbage
+/// pubkeys; never parse from memory, dump and read):
+/// `[u32 LE tag=3][u64 LE deployed slot][1-byte option: 0=None else
+/// Some][32-byte authority pubkey]` — option at byte 12, authority 13..45.
 async fn read_upgrade_authority(
     ctx: &Ctx,
     program_data: &Pubkey,
 ) -> Result<Option<Pubkey>, Box<dyn std::error::Error>> {
     let ai = ctx.rpc.get_account(program_data).await?;
-    if ai.data[44] == 0 {
+    if ai.data[12] == 0 {
         return Ok(None);
     }
     let mut b = [0u8; 32];
-    b.copy_from_slice(&ai.data[45..77]);
+    b.copy_from_slice(&ai.data[13..45]);
     Ok(Some(Pubkey::new_from_array(b)))
 }
 
@@ -776,7 +873,13 @@ async fn propose_approve_execute(
         },
         None,
     );
-    send(ctx, &[create, prop], &ctx.deploy.pubkey(), &[&ctx.founder]).await?;
+    send(
+        ctx,
+        &[create, prop],
+        &ctx.deploy.pubkey(),
+        &[&ctx.deploy, &ctx.founder],
+    )
+    .await?;
     for member in [&ctx.founder, &ctx.teammate] {
         let approve = squads::proposal_approve(
             squads::ProposalVoteAccounts {
@@ -787,7 +890,13 @@ async fn propose_approve_execute(
             squads::ProposalVoteArgs { memo: None },
             None,
         );
-        send(ctx, &[approve], &ctx.deploy.pubkey(), &[member]).await?;
+        send(
+            ctx,
+            &[approve],
+            &ctx.deploy.pubkey(),
+            &[&ctx.deploy, member],
+        )
+        .await?;
     }
     let exec = squads::vault_transaction_execute(
         squads::VaultTransactionExecuteAccounts {
@@ -802,7 +911,13 @@ async fn propose_approve_execute(
         &[],
         None,
     )?;
-    let sig = send(ctx, &[exec], &ctx.deploy.pubkey(), &[&ctx.founder]).await?;
+    let sig = send(
+        ctx,
+        &[exec],
+        &ctx.deploy.pubkey(),
+        &[&ctx.deploy, &ctx.founder],
+    )
+    .await?;
     println!("[soak]    2-of-2 executed '{label}' sig={sig}");
     // squads tx_index is u64 in the client; the instruction takes u32.
     Ok(u32::try_from(tx_index).expect("tx index fits u32"))
