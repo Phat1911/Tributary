@@ -38,11 +38,25 @@
 | M5.5 | **DONE (closed 2026-10-27)** | Slice 1 (landing/Tailscale/video script) 2026-10-26 + slice 2 (Gemini provider, J-A…E) 2026-10-27; §14 ticked. Residue: video records ~2026-11-12 |
 | M6 | **in progress — slice 1 + F1 fix/v0.1.3 DONE** (2026-10-27) | Pilot onboarding surface (docs: feedback template, upgrade rung, support runbook, admin guide DRAFT v1) + M6-S1-F1 fixed red-first, CI-pinned, released v0.1.3, demo re-pinned. Slice 2 waits on founder pilot friction log |
 | M7 | **done** (2026-10-28) | LedgerTrait + double-entry ledger, ships dark; f0c25ca→8bbee09; 172/172 dual-DB (16 new tests); D38 recorded; §14 ticked |
-| M8 | **code complete + D40/D41/D42 doctrine fix applied; devnet soak PENDING (founder funding)** | Director doctrine audit 2026-10-31 found 2 high drifts (USDC-in-deposit; missing exit hatch) — both fixed per D40/D41 + scope-A renter rails; program tests 28/28, workspace re-run, soak client renter-shaped; devnet leg still blocked on faucet SOL — then ONE command: `bash scripts/devnet_soak_m8.sh` |
+| M8 | **code complete + doctrine fix + CI-green (SBF prerequisite added 2026-11-01); devnet soak PENDING (founder funding)** | Director doctrine audit 2026-10-31 found 2 high drifts (USDC-in-deposit; missing exit hatch) — both fixed per D40/D41 + scope-A renter rails; program tests 28/28, workspace re-run, soak client renter-shaped; devnet leg still blocked on faucet SOL — then ONE command: `bash scripts/devnet_soak_m8.sh` |
 | M9–M11 | pending | V2 — Root Pool |
 | M12–M14 | pending | V3 — Operator network |
 
 ## Milestone log (append per completed milestone; keep the most recent 10)
+
+### 2026-11-01 — CI red on both M8 pushes: root cause fixed (SBF prerequisite), E2E flake hardened, D39 backfilled
+
+**Root cause (director-diagnosed, confirmed in the Actions logs):** the Rust job's `cargo test --workspace` includes `programs/pool`, whose suites load the REAL SBF artifact (A-034 rig) — CI never built it, so all 20 program tests panicked on the missing-ELF assert. Local 200/200 was real; GitHub never built the test subject. Second issue: the first run's Dashboard E2E failure was a stack-boot flake (passed on rerun).
+
+**Fixes.**
+- **CI + SBF prerequisite — option (a), the rust job owns it.** Chosen over a separate "Program (SBF)" job because (workflow step 10 justification): it keeps ONE test verdict for the whole workspace — exactly the local semantics (`cargo-build-sbf --arch v3` from `programs/pool`, then `cargo test --workspace`), no job-split where the workspace run excludes pool and the program suite becomes a second-class citizen, and no duplicate workspace compile (the separate job would rebuild everything pool's dev-deps touch). No new cargo dependencies — the added "dependency" is the pinned anza release channel **v4.1.2** (the exact toolchain the A-033 lock lattice was built for; a newer CLI is not validated), cached under `~/.local/share/solana` + `~/.cache/solana` + `programs/pool/target`, keyed on `Cargo.lock`. CI's ELF uses an ephemeral program keypair (none is committed): the embedded address never enters execution — tests register the program at `declare_id!` and derive every PDA from it. Rule 6 honored: no skip-if-missing anywhere; the harness's hard ELF assert is what CI now satisfies, not bypasses.
+- **E2E flake hardened** (`scripts/manual_journey_m4.py` + `scripts/e2e_j6.py`): the boot wait now requires TWO consecutive HTTP answers (a single answer can race still-initializing request state — the observed flake family), 60s→90s ceiling, and on boot-timeout the server log tail is dumped into the failure message. The E2E runner now ALWAYS keeps the throwaway server's log (`target/e2e-server.log`, gitignored) and prints its last 60 lines when Playwright fails — the next flake names itself.
+- **D39 backfilled** in the SPEC D-log (gapless numbering restored; history kept honest — the ruling was folded into D38's rider at M7 GO; own anchor now, sweep ≤ accrued `equity.operator` recorded).
+- AGENTS.md step-8 CI-verdict clause (director amendment, on disk) committed in the same commit.
+
+**Verification:** local `cargo-build-sbf --arch v3` + `cargo test --workspace --locked` green (the exact CI sequence); `bash -n`/py_compile on the touched scripts; workflow YAML linted by push (Actions). CI verdict of the pushed head is in the session's DONE report per amended step 8.
+
+**Fast jump — chores touched:** `.github/workflows/ci.yml` · `scripts/manual_journey_m4.py` · `scripts/e2e_j6.py` · `SPEC.md` (D39) · `PLAN.md` (this entry) · `AGENTS.md` (director's amendment).
 
 ### 2026-10-31 — M8 doctrine fix (director audit): D40/D41/D42 executed; program reshaped, suites rewritten
 

@@ -36,6 +36,42 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+      # ---- Pool program (SBF) prerequisite --------------------------------
+      # The pool test suites load the REAL compiled artifact into the SBPF
+      # VM (AUDIT A-034: host-builtins are untestable under program-test
+      # 4.1.2 — the ELF is the test subject). CI must therefore build the
+      # same `target/deploy/pool.so` the dev box builds, BEFORE `cargo
+      # test`. A missing ELF is a hard harness assert (rule 6: never
+      # skip-if-artifact-missing — the tests must run and pass every push).
+      - name: Cache the Solana SBF toolchain
+        uses: actions/cache@v4
+        with:
+          # install dir = the pinned anza release; ~/.cache/solana =
+          # platform-tools; programs/pool/target = the SBF build tree
+          # (NOT covered by rust-cache, which only sees the workspace
+          # target/). Keyed on the lockfile so dep changes rebuild.
+          path: |
+            ~/.local/share/solana
+            ~/.cache/solana
+            programs/pool/target
+          key: solana-sbf-v4.1.2-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: solana-sbf-v4.1.2-${{ runner.os }}-
+      - name: Install the Solana toolchain (pinned v4.1.2 — the A-033 lattice's own)
+        # Pinned to the exact channel the Cargo.lock lattice was built for
+        # (agave v4.1.2; a newer CLI's cargo-build-sbf may pull a newer
+        # platform-tools/SDK and is NOT validated by this repo).
+        run: |
+          if [ ! -x "$HOME/.local/share/solana/install/active_release/bin/cargo-build-sbf" ]; then
+            curl -sSfL https://release.anza.xyz/v4.1.2/install | sh -s -- --no-modify-path
+          fi
+          echo "$HOME/.local/share/solana/install/active_release/bin" >> "$GITHUB_PATH"
+      - name: Build the pool program (SBF v3)
+        # No program keypair exists in CI; cargo-build-sbf generates an
+        # ephemeral one. The embedded address never enters execution —
+        # tests register the program at declare_id! and derive every PDA
+        # from it, so CI's ELF is functionally identical to the devnet one.
+        run: cargo-build-sbf --arch v3
+        working-directory: programs/pool
       - name: Format
         run: cargo fmt --all -- --check
       - name: Clippy

@@ -261,15 +261,34 @@ def start_server(mock_url: str) -> subprocess.Popen:
         stdout=log_sink,
         stderr=subprocess.STDOUT,
     )
-    for _ in range(300):
+    # Boot wait: require TWO consecutive HTTP answers 0.2s apart. A single
+    # answer can race a listener that is still initializing per-request
+    # state (the first E2E flake family, 2026-11-01); the second probe
+    # proves the server answers REPEATEDLY, not just once.
+    consecutive = 0
+    for _ in range(450):  # 90s hard ceiling (was 60s)
         # No public /health route; ANY HTTP answer (even a 4xx from the
         # login route with an empty body) proves the listener is up.
         status, _ = req("POST", "http://127.0.0.1:8099/api/v1/auth/login", {})
         if status is not None:
-            return proc
+            consecutive += 1
+            if consecutive >= 2:
+                return proc
+        else:
+            consecutive = 0
         time.sleep(0.2)
     proc.kill()
-    raise SystemExit("FAIL: server did not come up on 127.0.0.1:8099")
+    # The next flake names itself: dump the server's own log tail when the
+    # operator kept one (TRIBUTARY_JOURNEY_LOG — e2e_j6.py always sets it).
+    tail = ""
+    log_path = os.environ.get("TRIBUTARY_JOURNEY_LOG")
+    if log_path and os.path.isfile(log_path):
+        with open(log_path, "r", errors="replace") as f:
+            tail = "".join(f.readlines()[-60:])
+    raise SystemExit(
+        "FAIL: server did not come up on 127.0.0.1:8099 "
+        f"(2-consecutive-probe wait, 90s) — server log tail:\n{tail}"
+    )
 
 
 # --------------------------------------------------------------- journeys ---

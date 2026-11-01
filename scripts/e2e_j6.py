@@ -38,6 +38,11 @@ def main() -> None:
     # start_server spawns `serve` from os.environ; add the static layer
     # the same way the container's entrypoint does.
     os.environ["TRIBUTARY_STATIC_DIR"] = export
+    # ALWAYS keep the throwaway server's log (discarded unless a journey
+    # fails — then the tail is printed below so the next flake names
+    # itself instead of dying as "stack-boot race, reason unknown").
+    server_log = os.path.join(REPO, "target", "e2e-server.log")
+    os.environ["TRIBUTARY_JOURNEY_LOG"] = server_log
     proc = mj.start_server(mock_url)
     try:
         email = f"e2e-{secrets.token_hex(3)}@tributary.dev"
@@ -78,6 +83,17 @@ def main() -> None:
                 "E2E_MOCK_URL": mock_url,
             },
         )
+        if r.returncode != 0:
+            # The next flake names itself: print the server's log tail so
+            # the failure mode is visible in the Actions log, not just
+            # "the E2E job went red".
+            print("\n=== E2E failed — throwaway server log (last 60 lines) ===")
+            try:
+                with open(server_log, "r", errors="replace") as f:
+                    print("".join(f.readlines()[-60:]), end="")
+            except OSError as e:
+                print(f"(no server log to dump: {e})")
+            print("=== end server log ===")
         sys.exit(r.returncode)
     finally:
         proc.terminate()
