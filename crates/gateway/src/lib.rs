@@ -15,6 +15,7 @@ pub mod chat;
 pub mod classifier;
 pub mod config;
 pub mod db;
+pub mod depositor_mode;
 pub mod error;
 pub mod geo;
 pub mod keys;

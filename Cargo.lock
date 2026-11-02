@@ -9354,6 +9354,7 @@ dependencies = [
  "tributary-common",
  "tributary-control",
  "tributary-crypto",
+ "tributary-ledger",
  "zeroize",
 ]
 

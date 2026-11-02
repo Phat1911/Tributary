@@ -25,6 +25,7 @@ pub mod error;
 pub mod ledger;
 pub mod money;
 pub mod posting;
+pub mod settle;
 
 pub use chart::{AccountCode, AccountType, Direction, OwnerKind};
 pub use error::LedgerError;

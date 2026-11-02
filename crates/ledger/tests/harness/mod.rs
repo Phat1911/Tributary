@@ -12,6 +12,10 @@
 // the helpers — silence the per-binary "never used" noise.
 #![allow(dead_code)]
 
+// Only the non-Windows sqlite_db below reaches ConnectOptions'
+// to_url_lossy(); the import would be unused (a -D warnings error) under
+// the Windows-cargo interop builds.
+#[cfg(not(windows))]
 use sqlx::ConnectOptions;
 use sqlx::any::install_default_drivers;
 use sqlx::postgres::PgConnectOptions;

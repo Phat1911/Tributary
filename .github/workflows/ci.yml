@@ -2,7 +2,11 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    # m9/doctrine-suite rides the push trigger deliberately (doctrine-suite
+    # mode, AGENTS.md step 14): Session A's suite is EXPECTED-RED on this
+    # branch, and the red run IS the GO-gate artifact. Drop the branch from
+    # this list when M9 closes on main.
+    branches: [main, m9/doctrine-suite]
   pull_request:
 
 env:
