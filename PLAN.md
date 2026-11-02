@@ -44,6 +44,40 @@
 
 ## Milestone log (append per completed milestone; keep the most recent 10)
 
+### 2026-11-02 — M8 CHORE: devnet program synced to HEAD 460fd00 (Session C fix live on-chain)
+
+**Ops, not code — nothing merged from this chore** (the docs commit below is
+the only repo change). Preflight → buffer → **extend_program +65,536 B** →
+**2-of-2 upgrade** (founder + teammate-rotated, vault-signed, [Solscan](https://solscan.io/tx/576QrbHPxvDB3P63nHedFA5hDqVBXJchzkauEvrpAJzHUyyDCnfd6KhXaRw2gePS7RF2NQh2eM5qsgj6wwCdeaP5?cluster=devnet))
+→ resume via 2-of-2 → live verification, all evidence in
+`docs/devnet-soak-m8.md` (sync section). Headlines: pool state INTACT
+(upgrade-safe diff: state.rs zero-diff, errors append-only); **A-042 proven
+live** (emitted `supply_after`/`vault_balance_after` == on-chain truth on
+`record_contribution`/`prepay_renter` — the old code emitted pre-instruction
+values); burn + prepay/refund round-trip exact through both doors; pool ends
+ACTIVE; authority stays the Squads vault throughout.
+
+**New ops knowledge (dated):** (1) first-ever GROWN ELF on this deployment —
+the loader's ProgramData needed `extend_program` BEFORE the upgrade, and the
+runtime allowlists loader instructions from CPI to Upgrade/SetAuthority/Close
+ONLY, so extend is a top-level payer tx (no authority account at all);
+allocation now 348,781 B (M11 headroom). (2) Buffer authority parses at bytes
+5..37 (option tag at 4) — the soak client's 4..36 is off by one (A-040
+class; noted in the runbook, client untouched per "nothing merges"). (3) Two
+stale approved-but-unexecuted ms proposals (indexes 7, 8) from refused
+executes are harmless on-chain residue; clearable by a
+`transaction_accounts_close` vote. (4) `initialize` on the born singleton
+refuses for ANY signer at anchor's init constraint — the A-041 gate guards
+unborn pools (rig-pinned `c1`) and every future deployment.
+
+**Verification:** upgrade tx slot 517758888 → 517759050 (authority vault);
+pool admin/backend/layout byte-identical; event-mirror == chain truth on both
+probed instructions; vault/record back to 0 after the round-trip; deploy key
+recovered the buffer rent via the upgrade spill (7.82 SOL). Local tree
+clean; the throwaway ops driver was deleted (never committed).
+
+**Fast jump:** `docs/devnet-soak-m8.md` (sync section) · `PLAN.md` (this entry).
+
 ### 2026-11-02 — M8 SESSION C FIX: A-041 + A-042 fixed (GO-gated), A-043 accepted-until-M10
 
 **Persona & gates.** Fix session per kickoff (senior-Solana-engineer persona; each Session-C PoC treated as a spec). GO proposal accepted at the gate for: A-041 direction **(a)** — implemented as the *deployment authority = the program's upgrade authority* (the naive "admin-arg-signs" variant was ruled out with evidence: an attacker self-appoints); and A-042 fixing the fourth same-class emitter (`ClaimsBurned.supply_after`) in the same pass. Rule 6 honored: c1/c2a-c2c flipped from finding PoCs to regression pins exactly per the handoff contract (same attacker chair, assertions on the healed behavior — each flipped assert is STRONGER than the one it replaced); c3-c7 are byte-identical to Session C's authorship.

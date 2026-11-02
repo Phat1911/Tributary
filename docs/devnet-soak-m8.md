@@ -71,6 +71,51 @@ script is safely re-runnable after any interruption.
 | 9 | Program UPGRADE via 2-of-2 vote | vault-signed upgrade works |
 | 10 | Teammate key rotation via 2-of-2 | multisig governance is operational |
 
+## Sync upgrade — 2026-11-02: devnet program → HEAD 460fd00 (A-041/A-042 fixes live)
+
+Executed as an ops chore (2-of-2, existing Squads; nothing merged). Facts and
+signatures (log archive: `target/soak-logs/sync-*.log`):
+
+- **Preflight** (read-only): members = founder + `teammate-rotated` (the
+  original teammate was rotated out on 2026-11-01 — approvals MUST come from
+  the members that exist NOW), threshold 2; program authority = vault
+  `BhLQqw…`; pool admin = vault, backend unchanged, arrived PAUSED
+  (resume-aware, as documented); vault 0 USDC, renter wallet 20 USDC.
+- **Buffer** `2ASdmWydX1p4iy1We2feHi8MRdgeLJorx5D4MNfigEJR` (HEAD ELF,
+  288,397 B), authority handed to the vault.
+- **ProgramData EXTEND +65,536 B first** (top-level, payer = deploy key,
+  sig in log): the fix GREW the ELF (283,245 B allocated < 288,405 needed —
+  every prior upgrade was same-size, so this was the first grow). The
+  runtime REJECTS `ExtendProgram` from inner instructions (CPI allowlist is
+  Upgrade/SetAuthority/Close only — "Program … not supported by inner
+  instructions"), and it takes NO authority account, so the extend ran as a
+  plain top-level tx with the vault authority untouched. Allocation now
+  348,781 B — headroom for M11.
+- **UPGRADE via 2-of-2** (vault-signed, tx index 9):
+  [sig `576QrbHP…`](https://solscan.io/tx/576QrbHPxvDB3P63nHedFA5hDqVBXJchzkauEvrpAJzHUyyDCnfd6KhXaRw2gePS7RF2NQh2eM5qsgj6wwCdeaP5?cluster=devnet)
+  — deployed slot 517758888 → 517759050; authority STAYS the vault.
+- **Resume via 2-of-2**: sig `5NPX56zR…` (pool arrived paused; now ACTIVE).
+- **State intact**: pool admin/backend/layout byte-identical across the
+  upgrade (upgrade-safe diff confirmed: `state.rs` unchanged, error enum
+  append-only, `initialize` interface change is dead code on a born pool).
+- **Live verification on the NEW code**: `record_contribution` — emitted
+  `supply_after` == 151,000,000 == on-chain supply; `prepay_renter` —
+  emitted `vault_balance_after` == 1,000,000 == on-chain vault (**A-042
+  live: the old code emitted the pre-instruction values**); direct-door
+  `burn_claims` and the full prepay→refund round-trip exact (vault 0,
+  record 0, wallet back at 20 USDC). `initialize` remains un-callable for
+  ANY signer on this born singleton (occupied-PDA refusal); the A-041 gate
+  protects every FUTURE deployment and is regression-pinned by the audit
+  suite's `c1`.
+- **Ops lessons (dated, for the next sync)**: (1) a GROWN ELF needs
+  `extend_program` BEFORE the ms upgrade — top-level only; (2) the buffer
+  authority layout is `[u32 tag=1][u8 option][32 B key]` — key at 5..37
+  (the soak client's 4..36 parse is off by one; A-040 class); (3) stale
+  approved-but-unexecuted Squads proposals (indexes 7, 8) remain on the
+  multisig from the two refused execute attempts — unexecutable by
+  construction, clearable with a `transaction_accounts_close` vote if the
+  founder wants them gone.
+
 ## Executed run — evidence (final run 2026-11-01, ~11:55 ICT)
 
 > **Post-run change (2026-11-02, A-041 fix):** this run executed against the
