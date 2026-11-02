@@ -21,6 +21,7 @@
 
 use borsh::BorshSerialize;
 use sha2::{Digest, Sha256};
+use solana_account::Account;
 use solana_commitment_config::CommitmentLevel;
 use solana_instruction::{AccountMeta, Instruction};
 use solana_instruction_error::InstructionError;
@@ -28,6 +29,7 @@ use solana_keypair::Keypair;
 use solana_message::Message;
 use solana_program_test::{BanksClient, BanksClientError, ProgramTest};
 use solana_pubkey::Pubkey;
+use solana_rent::Rent;
 use solana_signer::Signer;
 use solana_system_interface::instruction::create_account as system_create_account;
 use solana_transaction::Transaction;
@@ -55,6 +57,34 @@ pub const TOKEN_2022: Pubkey = Pubkey::new_from_array([
     0x06, 0xdd, 0xf6, 0xe1, 0xee, 0x75, 0x8f, 0xde, 0x18, 0x42, 0x5d, 0xbc, 0xe4, 0x6c, 0xcd, 0xda,
     0xb6, 0x1a, 0xfc, 0x4d, 0x83, 0xb9, 0x0d, 0x27, 0xfe, 0xbd, 0xf9, 0x28, 0xd8, 0xa1, 0x8b, 0xfc,
 ]);
+
+/// BPF Upgradeable Loader program id — owner of the ProgramData account
+/// `initialize`'s A-041 gate reads (the deployment authority lives there).
+/// Same convention as the token ids above: bytes decoded offline,
+/// self-checked against the canonical string in `start()`.
+pub const BPF_LOADER_UPGRADEABLE: Pubkey = Pubkey::new_from_array([
+    0x02, 0xa8, 0xf6, 0x91, 0x4e, 0x88, 0xa1, 0xb0, 0xe2, 0x10, 0x15, 0x3e, 0xf7, 0x63, 0xae, 0x2b,
+    0x00, 0xc2, 0xb9, 0x3d, 0x16, 0xc1, 0x24, 0xd2, 0xc0, 0x53, 0x7a, 0x10, 0x04, 0x80, 0x00, 0x00,
+]);
+
+/// ProgramData header size (the loader's own constant, hand-mirrored):
+/// u32 variant tag + u64 slot + u8 option tag + Pubkey authority = 45.
+pub const PROGRAMDATA_HEADER: usize = 45;
+
+/// The rig's deployment authority (A-041): the upgrade authority the
+/// genesis ProgramData override names. Random per PROCESS (never
+/// committed, never logged) — every suite signs initialize with it via
+/// [`deploy_authority`]. On devnet the same slot is the Squads multisig
+/// vault PDA; here a plain keypair stands in, exactly like the fixture
+/// admin stands in for the multisig on admin instructions.
+static DEPLOY_AUTHORITY: std::sync::OnceLock<Keypair> = std::sync::OnceLock::new();
+
+/// The deployment authority keypair (same instance for every `start()` in
+/// this process). Callers pass `&[common::deploy_authority()]` as extra
+/// signers on `initialize` transactions.
+pub fn deploy_authority() -> &'static Keypair {
+    DEPLOY_AUTHORITY.get_or_init(Keypair::new)
+}
 
 /// Rent sysvar address (Initialize declares it — see the account docs in
 /// lib.rs; host-test execution has no syscalls).
@@ -111,6 +141,14 @@ pub mod addrs {
     /// A renter's prepaid record PDA (the `prepaid.renter` mirror).
     pub fn prepaid(renter: &Pubkey) -> Pubkey {
         Pubkey::find_program_address(&[pool::SEED_PREPAID, renter.as_ref()], &program_id()).0
+    }
+
+    /// The BPF-loader ProgramData PDA of the pool program — where the
+    /// deployment (upgrade) authority lives on chain. Same derivation the
+    /// program's A-041 gate performs: `find_program_address(&[program],
+    /// &bpf_loader_upgradeable)`.
+    pub fn program_data() -> Pubkey {
+        Pubkey::find_program_address(&[program_id().as_ref()], &BPF_LOADER_UPGRADEABLE).0
     }
 }
 
@@ -252,6 +290,10 @@ pub async fn start() -> (BanksClient, Keypair) {
         TOKEN_2022.to_string(),
         "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"
     );
+    assert_eq!(
+        BPF_LOADER_UPGRADEABLE.to_string(),
+        "BPFLoaderUpgradeab1e11111111111111111111111"
+    );
 
     // Locate the compiled program: explicit env override first, then the
     // anchor/`cargo build-sbf` output directory at the workspace root.
@@ -282,6 +324,44 @@ pub async fn start() -> (BanksClient, Keypair) {
 
     let mut pt = ProgramTest::default();
     pt.add_upgradeable_program_to_genesis("pool", &program_id());
+
+    // ---- A-041 rig: give the genesis ProgramData a SIGNABLE upgrade
+    // authority -----------------------------------------------------------
+    // `add_upgradeable_program_to_genesis` (solana-program-binaries
+    // 4.1.2) pins the authority to `Some(Pubkey::default())` — the system
+    // program id, which nobody can sign as, so `initialize`'s
+    // deployment-authority gate would be untestable. ProgramTest's
+    // post-genesis `add_account` path is the sanctioned override ("Over-
+    // riding account at …", program-test lib.rs): we replace the
+    // ProgramData bytes with an identically-shaped account whose declared
+    // authority is this process's random [`deploy_authority`] keypair.
+    //
+    // Layout hand-mirrored from solana-loader-v3-interface 6.1.1
+    // (`UpgradeableLoaderState::ProgramData`, bincode): u32 variant tag
+    // 3, u64 slot, u8 option tag (1 = Some), 32-byte authority, then the
+    // ELF. The same offsets were re-derived from LIVE devnet bytes during
+    // the soak (AUDIT A-040) — never parse from memory.
+    let elf_bytes = std::fs::read(&elf)
+        .unwrap_or_else(|e| panic!("failed reading compiled program at {}: {e}", elf.display()));
+    let authority = deploy_authority();
+    let mut pd_data = Vec::with_capacity(PROGRAMDATA_HEADER + elf_bytes.len());
+    pd_data.extend_from_slice(&3u32.to_le_bytes()); // ProgramData variant
+    pd_data.extend_from_slice(&0u64.to_le_bytes()); // slot 0
+    pd_data.push(1u8); // COption::Some — a signable authority exists
+    pd_data.extend_from_slice(authority.pubkey().as_ref());
+    pd_data.extend_from_slice(&elf_bytes);
+    let pd_space = pd_data.len();
+    pt.add_account(
+        addrs::program_data(),
+        Account {
+            lamports: Rent::default().minimum_balance(pd_space),
+            data: pd_data,
+            owner: BPF_LOADER_UPGRADEABLE,
+            executable: false,
+            rent_epoch: u64::MAX,
+        },
+    );
+
     let (banks, payer, _last_blockhash) = pt.start().await;
     (banks, payer)
 }
@@ -458,7 +538,12 @@ pub async fn prepaid_amount(banks: &BanksClient, renter: &Pubkey) -> u64 {
 pub mod ixs {
     use super::*;
 
-    /// `initialize(admin_authority, backend_authority)`
+    /// `initialize(admin_authority, backend_authority)` — signer story
+    /// since A-041: `payer` (first arg) pays rent, and the DEPLOYMENT
+    /// authority ([`deploy_authority`], standing in for the Squads
+    /// multisig vault that holds the real upgrade authority on devnet)
+    /// must co-sign or the instruction refuses. The two extra metas are
+    /// injected here so every call site reads as the wire truth.
     pub fn initialize(
         payer: &Keypair,
         usdc_mint: &Pubkey,
@@ -474,6 +559,11 @@ pub mod ixs {
                 AccountMeta::new_readonly(*usdc_mint, false),
                 AccountMeta::new(addrs::vault(), false),
                 AccountMeta::new(payer.pubkey(), true),
+                // A-041 gate accounts (order mirrors the Initialize
+                // struct): the loader's ProgramData (source of the
+                // deployment authority) and its required signer.
+                AccountMeta::new_readonly(addrs::program_data(), false),
+                AccountMeta::new_readonly(deploy_authority().pubkey(), true),
                 AccountMeta::new_readonly(RENT_SYSVAR, false),
                 AccountMeta::new_readonly(TOKEN_V3, false),
                 AccountMeta::new_readonly(TOKEN_2022, false),

@@ -92,6 +92,8 @@ async fn fixture() -> Fixture {
     // use (the program keeps depositors and renters fee-free), so it needs
     // lamports — on devnet the operator funds it the same way.
     common::fund(&banks, &payer, &backend.pubkey(), 5_000_000_000).await;
+    // A-041: initialize co-signed by the rig's deployment authority (the
+    // devnet flow routes this signature through the Squads vault).
     common::send(
         &banks,
         &payer,
@@ -101,7 +103,7 @@ async fn fixture() -> Fixture {
             &admin.pubkey(),
             &backend.pubkey(),
         )],
-        &[],
+        &[common::deploy_authority()],
     )
     .await
     .unwrap();
@@ -835,7 +837,9 @@ async fn non_admin_cannot_pause_or_rotate() {
 async fn initialize_is_once_only() {
     let f = fixture().await;
     // A second initialize on the already-born config PDA: anchor's init
-    // gate refuses (the account exists).
+    // gate refuses (the account exists). The deployment authority
+    // co-signs CORRECTLY here so the refusal isolates the singleton
+    // gate — the authority gate is pinned by the audit suite's c1.
     let err = common::send(
         &f.banks,
         &f.payer,
@@ -845,7 +849,7 @@ async fn initialize_is_once_only() {
             &f.rogue.pubkey(), // would-be usurper admin
             &f.rogue.pubkey(),
         )],
-        &[],
+        &[common::deploy_authority()],
     )
     .await
     .unwrap_err();

@@ -58,6 +58,8 @@ async fn fixture() -> Fixture {
     // use — depositors and renters stay fee-free by design, so the operator
     // key is funded (the soak client does the same on devnet).
     common::fund(&banks, &payer, &backend.pubkey(), 5_000_000_000).await;
+    // A-041: initialize is co-signed by the rig's deployment authority
+    // (on devnet this signature comes from the Squads multisig vault).
     common::send(
         &banks,
         &payer,
@@ -67,7 +69,7 @@ async fn fixture() -> Fixture {
             &admin.pubkey(),
             &backend.pubkey(),
         )],
-        &[],
+        &[common::deploy_authority()],
     )
     .await
     .unwrap();

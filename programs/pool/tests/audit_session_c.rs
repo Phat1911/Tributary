@@ -1,22 +1,27 @@
 //! M8 SESSION C — adversarial audit PoCs (fresh-context audit, 2026-11-01;
-//! workflow step 14). Attack rig for BOTH the implementation and the suite:
-//! every test here is either a **finding PoC** (it asserts that a weakness
-//! EXISTS — it goes red when the weakness is fixed, which is the handoff
-//! contract for the fix session) or **attempted-clean evidence** (a guard
-//! the doctrine suite never pinned, attacked through the public surface and
-//! proving the code holds).
+//! workflow step 14), now the PERMANENT regression suite after the fix
+//! session (2026-11-02). Attack rig for BOTH the implementation and the
+//! suite: every test here is either a **regression pin** (it pins the
+//! FIXED doctrine — c1, c2a-c2c were flipped from finding PoCs per the
+//! handoff contract: same attacker chair, assertions on the healed
+//! behavior) or **attempted-clean evidence** (a guard the doctrine suite
+//! never pinned, attacked through the public surface and proving the
+//! code holds). c3 is the standing pin of A-043's ACCEPTED-until-M10
+//! behavior (director ruling): the mislabeled-prepay shape is documented
+//! in code, not fixed.
 //!
-//! Reading order (finding ids refer to AUDIT.md rows):
-//! - `c1_*` — A-041: `initialize` is permissionless; the FIRST caller
-//!   captures the singleton (front-run window between deploy and the
-//!   operator's initialize; lib.rs claims "no window where a single dev
-//!   key administers the pool").
-//! - `c2_*` — A-042: emitted mirror events report PRE-CPI values (Anchor
-//!   deserializes accounts once at entry and never reloads after the CPI):
-//!   `vault_balance_after` / `supply_after` are stale by one instruction.
-//! - `c3_*` — A-043: `prepay_renter`'s `renter` ARG is not bound to the
-//!   paying `renter_key` — money can be prepaid INTO a third identity's
-//!   record (misattribution; conservation holds, so low severity).
+//! Reading order (ids refer to AUDIT.md rows):
+//! - `c1_*` — A-041 FIXED: `initialize` requires the deployment
+//!   authority's signature (the program's upgrade authority, read from
+//!   the loader's ProgramData) — front-run attempts refuse on the exact
+//!   error, atomically, and the operator's initialize succeeds.
+//! - `c2_*` — A-042 FIXED: mirror events report POST-instruction truth
+//!   (emitters reload the CPI-mutated accounts before `emit!`) — the
+//!   emitted mirror equals the executed chain state on every leg.
+//! - `c3_*` — A-043 accepted-until-M10: `prepay_renter`'s `renter` ARG is
+//!   not bound to the paying `renter_key` — money can be prepaid INTO a
+//!   third identity's record (misattribution; conservation holds, low
+//!   severity; M10 checkout must decide payer-identity binding).
 //! - `c4_*` — attempted-clean: rule 9 at the token layer (a real transfer
 //!   attempt, which the doctrine suite never makes — it only checks the
 //!   extension flag).
@@ -31,8 +36,11 @@
 //!   transaction, custody conservation (`vault == Σ prepaid`) and registry
 //!   conservation (`supply == Σ claims`) must hold exactly.
 //!
-//! Devnet is untouched (local rig only). This file never edits product
-//! code or the doctrine suites; findings route back through the user.
+//! Devnet is untouched (local rig only). The fix session flipped exactly
+//! the finding PoCs the handoff contract named (c1, c2a-c2c) to the fixed
+//! doctrine and weakened nothing: c3-c7 are byte-identical to Session C's
+//! authorship, and every flipped assertion is STRONGER than the one it
+//! replaced (the mirror must now equal truth, not merely diverge from it).
 
 mod common;
 
@@ -404,7 +412,7 @@ async fn fixture() -> Fixture {
             &admin.pubkey(),
             &backend.pubkey(),
         )],
-        &[],
+        &[common::deploy_authority()],
     )
     .await
     .unwrap();
@@ -422,76 +430,122 @@ async fn fixture() -> Fixture {
 }
 
 // ---------------------------------------------------------------------------
-// A-041 — permissionless initialize (deployment front-run)
+// A-041 — initialize front-run (FIXED 2026-11-02: deployment-authority gate)
 // ---------------------------------------------------------------------------
 
-/// FINDING PoC (A-041, medium): ANY funded key can call `initialize`
-/// before the operator does — the first caller chooses admin AND backend,
-/// so a single attacker key captures the singleton for this deployment.
-/// The operator's own initialize is then refused forever (the pool PDA is
-/// occupied), and the captured backend can attest claims for arbitrary
-/// depositor identities. Every step is individually legal; the governance
-/// invariant ("admin-governed by 2-of-2 from its first block — there is
-/// no window") breaks at the end of the chain.
+/// REGRESSION PIN (A-041, medium — fixed): `initialize` requires the
+/// signature of THIS DEPLOYMENT'S upgrade authority (the BPF loader's
+/// ProgramData names it; on devnet that is the Squads multisig vault).
+/// This is the flipped Session-C PoC — before the fix it asserted the
+/// front-run capture SUCCEEDED; now it pins the fixed doctrine from the
+/// same attacker's chair: (1) a funded attacker self-appointing
+/// admin+backend and signing as "upgrade authority" FAILS on the exact
+/// program error; (2) substituting a different ProgramData account FAILS
+/// the same way; (3) both refusals are atomic — the singleton stays
+/// unborn, so the operator is not raced out of its own deployment
+/// (no DoS, no capture); (4) the operator's initialize, co-signed by
+/// the deployment authority, succeeds; (5) the A-039 blast radius
+/// (captured backend attesting unbacked claims) stays closed.
 #[tokio::test]
-async fn c1_initialize_front_run_captures_the_singleton() {
+async fn c1_initialize_front_run_is_refused_without_deployment_authority() {
     let (banks, payer) = start().await;
     let usdc_mint = common::create_usdc_mint(&banks, &payer).await;
 
-    // The attacker: any key with rent money. They initialize FIRST —
-    // nothing gates who may call initialize (the payer receives no
-    // authority, which is exactly what makes the first caller free).
+    // The attacker: any funded key. They build a WELL-FORMED initialize
+    // (all accounts real, payer funded) naming themselves admin+backend
+    // and signing the upgrade-authority slot with their own key — the
+    // gate must refuse because the loader's ProgramData names a
+    // DIFFERENT authority (the rig's random keypair; devnet: the
+    // multisig vault PDA).
     let attacker = Keypair::new();
     common::fund(&banks, &payer, &attacker.pubkey(), 5_000_000_000).await;
-    common::send(
+    let attacker_initialize = |program_data: Pubkey| -> solana_instruction::Instruction {
+        common::ix(
+            "initialize",
+            (&attacker.pubkey(), &attacker.pubkey()),
+            vec![
+                AccountMeta::new(addrs::pool(), false),
+                AccountMeta::new(addrs::claim_mint(), false),
+                AccountMeta::new_readonly(usdc_mint, false),
+                AccountMeta::new(addrs::vault(), false),
+                AccountMeta::new(attacker.pubkey(), true), // payer
+                AccountMeta::new_readonly(program_data, false),
+                AccountMeta::new_readonly(attacker.pubkey(), true), // fake authority
+                AccountMeta::new_readonly(common::RENT_SYSVAR, false),
+                AccountMeta::new_readonly(common::TOKEN_V3, false),
+                AccountMeta::new_readonly(common::TOKEN_2022, false),
+                AccountMeta::new_readonly(solana_system_interface::program::ID, false),
+            ],
+        )
+    };
+
+    // (1) correct ProgramData address, wrong signature behind it.
+    let err = common::send(
         &banks,
         &attacker,
-        vec![ixs::initialize(
-            &attacker,
-            &usdc_mint,
-            &attacker.pubkey(), // attacker admin (a single key!)
-            &attacker.pubkey(), // attacker backend (the attester)
-        )],
-        &[],
+        vec![attacker_initialize(addrs::program_data())],
+        &[&attacker],
     )
     .await
-    .expect("attacker initialize must land — nothing gates the caller");
-
-    // The singleton is captured: admin AND backend are the attacker's key.
-    let pool_ai = banks.get_account(addrs::pool()).await.unwrap().unwrap();
-    let st: pool::Pool =
-        anchor_lang::AccountDeserialize::try_deserialize(&mut &pool_ai.data[..]).unwrap();
-    assert_eq!(st.admin_authority, attacker.pubkey(), "attacker is admin");
+    .unwrap_err();
     assert_eq!(
-        st.backend_authority,
-        attacker.pubkey(),
-        "attacker is the attester"
+        common::custom_code(&err),
+        Some(6011),
+        "A-041 fixed: self-appointing initialize refuses with DeploymentAuthority"
     );
 
-    // The operator's initialize is now permanently refused.
+    // (2) substituted ProgramData account (an existing account the
+    // attacker does NOT control being parked in the slot — the
+    // loader-derived address check must catch any non-PDA stand-in).
     let err = common::send(
+        &banks,
+        &attacker,
+        vec![attacker_initialize(usdc_mint)],
+        &[&attacker],
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(
+        common::custom_code(&err),
+        Some(6011),
+        "A-041 fixed: substituted program_data refuses with DeploymentAuthority"
+    );
+
+    // (3) atomicity: both refusals left NOTHING behind — the singleton
+    // is unborn and the operator's identical call can still land.
+    assert!(
+        banks.get_account(addrs::pool()).await.unwrap().is_none(),
+        "failed front-runs create no partial state — no capture, no DoS"
+    );
+
+    // (4) the operator's initialize, co-signed by the deployment
+    // authority, succeeds — payer and authority are deliberately
+    // DIFFERENT keys (rent-payer vs governor, the devnet deploy shape).
+    let admin = Keypair::new();
+    let backend = Keypair::new();
+    common::send(
         &banks,
         &payer,
         vec![ixs::initialize(
             &payer,
             &usdc_mint,
-            &payer.pubkey(),
-            &payer.pubkey(),
+            &admin.pubkey(),
+            &backend.pubkey(),
         )],
-        &[],
+        &[common::deploy_authority()],
     )
     .await
-    .unwrap_err();
-    assert!(
-        common::custom_code(&err).is_none_or(|c| c != 6000),
-        "operator initialize must be refused (singleton occupied)"
-    );
+    .expect("deployment-authority-signed initialize lands");
+    let pool_ai = banks.get_account(addrs::pool()).await.unwrap().unwrap();
+    let st: pool::Pool =
+        anchor_lang::AccountDeserialize::try_deserialize(&mut &pool_ai.data[..]).unwrap();
+    assert_eq!(st.admin_authority, admin.pubkey(), "operator admin");
+    assert_eq!(st.backend_authority, backend.pubkey(), "operator backend");
 
-    // Blast radius demo: the captured backend attests unbacked claims for
-    // a depositor identity that never paid anything (A-039's rogue-backend
-    // shape — but reached without ANY operator key compromise).
+    // (5) A-039 blast radius stays closed: the attacker's key is not the
+    // backend, so no unbacked claims can be attested for a victim.
     let victim = Keypair::new();
-    common::send(
+    let err = common::send(
         &banks,
         &attacker,
         vec![ixs::record_contribution(
@@ -505,24 +559,36 @@ async fn c1_initialize_front_run_captures_the_singleton() {
         &[&attacker],
     )
     .await
-    .expect("captured backend attests");
-    assert_eq!(
-        common::token_2022_balance(&banks, &addrs::claim(&victim.pubkey())).await,
-        1_000_000,
-        "unbacked claims minted under attacker governance"
+    .unwrap_err();
+    assert!(
+        // Anchor's has_one gate ALSO surfaces as a custom error code —
+        // the suites' house pattern for framework refusals is therefore
+        // "any code but ours" (the state proof below is the real pin).
+        common::custom_code(&err).is_none_or(|c| c != 6000),
+        "attacker-as-backend record is refused (pool has_one gate)"
+    );
+    assert!(
+        banks
+            .get_account(addrs::claim(&victim.pubkey()))
+            .await
+            .unwrap()
+            .is_none(),
+        "no unbacked claims minted under operator governance"
     );
 }
 
 // ---------------------------------------------------------------------------
-// A-042 — emitted mirror events report PRE-CPI (stale) values
+// A-042 — mirror events (FIXED 2026-11-02: emitters reload after CPI)
 // ---------------------------------------------------------------------------
 
-/// FINDING PoC (A-042, part 1 of 3): `PrepayRecorded.vault_balance_after`
-/// is read from Anchor's deserialized-at-entry copy of the vault account —
-/// the CPI transfer mutates on-chain state but the in-memory copy is
-/// never reloaded, so the event emits the PRE-transfer balance while the
-/// chain state moves. This test asserts the BUG: emitted == 0 (stale)
-/// while the executed truth is 5_000_000. Fix session: flip to 5_000_000.
+/// REGRESSION PIN (A-042 part 1 of 3 — fixed 2026-11-02): the emitter
+/// now RELOADS the vault after the transfer CPI, so
+/// `PrepayRecorded.vault_balance_after` must equal the POST-instruction
+/// chain truth — here 5_000_000, the balance the executed leg leaves.
+/// Before the fix this asserted the stale PRE-CPI value (0); the flip is
+/// the handoff contract's "fresh values" — the event mirror and the
+/// chain must agree bit-for-bit, because M11's reconciler rebuilds
+/// `cash.escrow` from these events alone.
 #[tokio::test]
 async fn c2a_prepay_event_emits_stale_vault_balance() {
     let f = fixture().await;
@@ -549,28 +615,30 @@ async fn c2a_prepay_event_emits_stale_vault_balance() {
     let ev = find_event(&logs, &f.renter.pubkey()).expect("PrepayRecorded event emitted");
     assert_eq!(
         le_u64(&ev, 48),
-        0,
-        "A-042: emitted vault_balance_after is the PRE-CPI balance (stale)"
+        5_000_000,
+        "A-042 fixed: emitted vault_balance_after is the POST-CPI balance"
     );
     assert_eq!(
         le_u64(&ev, 56),
         5_000_000,
-        "program-owned state (prepaid) is fresh — only CPI-written state is stale"
+        "program-owned state (prepaid) stays fresh — now BOTH sides mirror"
     );
 
-    // Execute the same instruction for real: the chain truth the event
-    // claimed to mirror is 5_000_000 — the emitted mirror is wrong.
+    // Execute the same instruction for real: the chain truth must equal
+    // what the event already claimed — mirror == truth, both ways.
     f.prepay(5_000_000).await;
     assert_eq!(
         common::token_balance(&f.banks, &addrs::vault()).await,
         5_000_000,
-        "on-chain truth diverges from the emitted mirror"
+        "on-chain truth equals the emitted mirror"
     );
 }
 
-/// FINDING PoC (A-042, part 2 of 3): `PrepayRefunded.vault_balance_after`
-/// emits the PRE-refund vault balance (stale copy) — here 5_000_000 while
-/// the refund that just executed leaves 2_000_000.
+/// REGRESSION PIN (A-042 part 2 of 3 — fixed 2026-11-02): the emitter
+/// reloads the vault after the refund CPI, so
+/// `PrepayRefunded.vault_balance_after` must be the POST-refund balance —
+/// 5_000_000 − 3_000_000 = 2_000_000, the value the executed leg leaves.
+/// (Before the fix this asserted the stale PRE-refund 5_000_000.)
 #[tokio::test]
 async fn c2b_refund_event_emits_stale_vault_balance() {
     let f = fixture().await;
@@ -594,11 +662,11 @@ async fn c2b_refund_event_emits_stale_vault_balance() {
     let ev = find_event(&logs, &f.renter.pubkey()).expect("PrepayRefunded event emitted");
     assert_eq!(
         le_u64(&ev, 48),
-        5_000_000,
-        "A-042: emitted vault_balance_after is the PRE-refund balance (stale)"
+        2_000_000,
+        "A-042 fixed: emitted vault_balance_after is the POST-refund balance"
     );
 
-    // Executed truth: vault 5_000_000 - 3_000_000 = 2_000_000.
+    // Executed truth: vault 5_000_000 - 3_000_000 = 2_000_000 — equal.
     common::send(
         &f.banks,
         &f.payer,
@@ -618,15 +686,17 @@ async fn c2b_refund_event_emits_stale_vault_balance() {
     assert_eq!(
         common::token_balance(&f.banks, &addrs::vault()).await,
         2_000_000,
-        "on-chain truth diverges from the emitted mirror"
+        "on-chain truth equals the emitted mirror"
     );
 }
 
-/// FINDING PoC (A-042, part 3 of 3): `ContributionRecorded.supply_after`
-/// emits the PRE-mint supply — 0 on the registry's very first record,
-/// while the mint that just executed holds 10_000_000. A reconciler
-/// subscribing to events (lib.rs's stated M11 design) rebuilds a mirror
-/// that is wrong by exactly one instruction on every event.
+/// REGRESSION PIN (A-042 part 3 of 3 — fixed 2026-11-02): the emitter
+/// reloads the claim mint after the mint CPI, so
+/// `ContributionRecorded.supply_after` must be the POST-mint supply —
+/// 10_000_000 on the registry's very first record (before the fix this
+/// asserted the stale PRE-mint 0: exactly the value a subscribing
+/// reconciler would have rebuilt its `Σ claims.contributed` mirror from,
+/// wrong on every event).
 #[tokio::test]
 async fn c2c_record_event_emits_stale_supply() {
     let f = fixture().await;
@@ -650,11 +720,11 @@ async fn c2c_record_event_emits_stale_supply() {
     let ev = find_event(&logs, &f.depositor.pubkey()).expect("ContributionRecorded emitted");
     assert_eq!(
         le_u64(&ev, 48),
-        0,
-        "A-042: emitted supply_after is the PRE-mint supply (stale)"
+        10_000_000,
+        "A-042 fixed: emitted supply_after is the POST-mint supply"
     );
 
-    // Executed truth: the supply is 10_000_000.
+    // Executed truth: the supply is 10_000_000 — equal.
     f.record(&f.depositor.pubkey(), 10_000_000).await;
     let mint_ai = f
         .banks
@@ -665,7 +735,7 @@ async fn c2c_record_event_emits_stale_supply() {
     assert_eq!(
         common::claim_supply(&mint_ai.data),
         10_000_000,
-        "on-chain truth diverges from the emitted mirror"
+        "on-chain truth equals the emitted mirror"
     );
 }
 
@@ -673,13 +743,16 @@ async fn c2c_record_event_emits_stale_supply() {
 // A-043 — prepay identity not bound to the paying key
 // ---------------------------------------------------------------------------
 
-/// FINDING PoC (A-043, low): the `renter` ARG names whose record grows;
-/// the money's owner is checked only against `renter_key`. With the
+/// STANDING PIN (A-043, low — ACCEPTED-until-M10, director ruling
+/// 2026-11-02; founder may override): the `renter` ARG names whose record
+/// grows; the money's owner is checked only against `renter_key`. With the
 /// backend co-signing, wallet-owner A prepays money that lands as a
 /// refundable balance for identity B — who never signed anything and can
 /// then exit with it through the direct door. Conservation holds (no
 /// solvency break — vault == Σ prepaid throughout), so this is
 /// misattribution, not loss; the drift risk lands in M10/M11 attribution.
+/// Kept as-is (asserts the CURRENT behavior) so the M10 decision has a
+/// red-ready pin to flip when payer-identity binding is designed.
 #[tokio::test]
 async fn c3_prepay_can_credit_a_third_identitys_record() {
     let f = fixture().await;
@@ -1245,7 +1318,7 @@ async fn world() -> World {
             &admin.pubkey(),
             &backend.pubkey(),
         )],
-        &[],
+        &[common::deploy_authority()],
     )
     .await
     .unwrap();

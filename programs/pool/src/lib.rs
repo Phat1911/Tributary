@@ -49,6 +49,11 @@
 //!
 //! # Authority model (least privilege, devnet posture per kickoff)
 //!
+//! * deployment authority — the program's UPGRADE authority (the Squads
+//!   multisig vault on devnet). Its signature gates `initialize`
+//!   (A-041 fix, 2026-11-02): the pool cannot come into existence
+//!   without a 2-of-2 vote, so the window between program deploy and
+//!   initialize is not capturable by any funded interloper.
 //! * `admin_authority` — the Squads multisig vault PDA (devnet: 2-of-2,
 //!   founder + teammate; SPEC §12 keeps 2-of-3 as the production posture).
 //!   Pause/resume and authority rotations require its signature, which only
@@ -90,6 +95,11 @@
 //! phone book, never a bank.
 
 use anchor_lang::prelude::*;
+// The BPF Upgradeable Loader's program id + state layout, reached through
+// anchor's re-export of its own `solana_program` (the v3 cohort — A-033):
+// `initialize` reads THIS deployment's upgrade authority out of the
+// loader-owned ProgramData account (see the A-041 gate in `initialize`).
+use anchor_lang::solana_program::bpf_loader_upgradeable;
 use anchor_spl::token::{self, Token, TokenAccount};
 use anchor_spl::token_2022::{self, InitializeMint2, InitializeNonTransferableMint, Token2022};
 // The underlying Token-2022 crate, reached ONLY through anchor-spl's
@@ -159,14 +169,76 @@ pub mod pool_program {
     /// `NonTransferable` claim mint, and the USDC vault. Called by the
     /// deployer immediately after program deploy; the `admin_authority`
     /// passed in is the Squads multisig vault PDA (computed before this
-    /// call from the multisig's create key), so from its first block the
-    /// pool is admin-governed by 2-of-2 — there is no window where a
-    /// single dev key administers the pool.
+    /// call from the multisig's create key).
+    ///
+    /// # Who may call it — the A-041 gate (deployment front-run)
+    ///
+    /// The FIRST caller no longer wins: this instruction requires the
+    /// signature of THIS DEPLOYMENT'S UPGRADE AUTHORITY — the key or PDA
+    /// the BPF loader recorded in the program's ProgramData account when
+    /// the program was deployed. On devnet that authority is the Squads
+    /// multisig vault (2-of-2), so the pool cannot come into existence
+    /// without a 2-of-2 vote executing this instruction — the vault PDA's
+    /// signature arrives exactly the way `AdminGate`'s `admin_authority`
+    /// signatures do (Squads `execute_transaction` produces them
+    /// cross-program). Between deploy and initialize the singleton cannot
+    /// be captured: an attacker landing there has no multisig signature,
+    /// their initialize refuses (atomically — nothing is created), and
+    /// the operator's identical call succeeds whenever it lands. The dev
+    /// deploy key pays rent and holds nothing. An immutable deployment
+    /// (ProgramData authority `None`) can never birth a pool — refused
+    /// with the same error.
     pub fn initialize(
         ctx: Context<Initialize>,
         admin_authority: Pubkey,
         backend_authority: Pubkey,
     ) -> Result<()> {
+        // ---- A-041 gate: only this deployment's upgrade authority may
+        // initialize. The ProgramData account is the loader-owned source
+        // of truth for WHO controls this deployment; everything below is
+        // defense against a substituted or hand-crafted stand-in:
+        //   1. it must sit at the exact loader-derived PDA
+        //      `find_program_address(&[this_program_id], loader)` — no
+        //      other account can be parked at that address (only the
+        //      loader program creates it, at deploy time), so an
+        //      attacker cannot pass a ProgramData they control;
+        //   2. its owner must be the loader itself;
+        //   3. its bytes must be the ProgramData variant of
+        //      UpgradeableLoaderState (u32 variant tag 3 — the layout is
+        //      a stable public protocol constant: 4-byte tag, u64 slot,
+        //      1-byte option tag at offset 12, 32-byte authority at
+        //      13..45, ELF after — pinned the hard way by the live soak
+        //      parser, AUDIT A-040);
+        //   4. the declared authority must be `Some` and must BE the
+        //      signer of this transaction (a PDA signer only the
+        //      authority's owning program — Squads on devnet — can
+        //      produce).
+        let program_data_address =
+            Pubkey::find_program_address(&[crate::ID.as_ref()], &bpf_loader_upgradeable::ID).0;
+        require!(
+            ctx.accounts.program_data.key() == program_data_address,
+            PoolError::DeploymentAuthority
+        );
+        require!(
+            ctx.accounts.program_data.owner == &bpf_loader_upgradeable::ID,
+            PoolError::DeploymentAuthority
+        );
+        {
+            let data = ctx.accounts.program_data.try_borrow_data()?;
+            require!(data.len() >= 45, PoolError::DeploymentAuthority);
+            // `UpgradeableLoaderState::ProgramData` — variant tag 3, LE.
+            require!(data[0..4] == [3, 0, 0, 0], PoolError::DeploymentAuthority);
+            // Option tag at offset 12: 1 = Some(authority), 0 = None
+            // (immutable — nobody can sign, so no pool can be born).
+            require!(data[12] == 1, PoolError::DeploymentAuthority);
+            let authority =
+                Pubkey::new_from_array(data[13..45].try_into().expect("45-13 = 32 bytes"));
+            require!(
+                ctx.accounts.upgrade_authority.key() == authority,
+                PoolError::DeploymentAuthority
+            );
+        }
+
         let pool = &mut ctx.accounts.pool;
         pool.admin_authority = admin_authority;
         pool.backend_authority = backend_authority;
@@ -289,6 +361,14 @@ pub mod pool_program {
             amount,
         )?;
 
+        // A-042: Anchor deserialized `claim_mint` ONCE at instruction
+        // entry; the mint CPI above mutated the real account, not our
+        // stale copy. Reload so the event reports POST-instruction truth
+        // — these events are the M11 reconciler's source (A-039's
+        // detection layer): a subscriber rebuilds `Σ claims.contributed`
+        // from `supply_after`, so a value that is wrong by exactly one
+        // instruction corrupts the drift alarm on EVERY event.
+        ctx.accounts.claim_mint.reload()?;
         emit!(ContributionRecorded {
             depositor,
             amount,
@@ -342,6 +422,11 @@ pub mod pool_program {
             amount,
         )?;
 
+        // A-042 (same class as the record leg): reload the mint copy
+        // deserialized at entry so `supply_after` is post-burn truth —
+        // the M11 reconciler consumes this event symmetrically with
+        // `ContributionRecorded`.
+        ctx.accounts.claim_mint.reload()?;
         emit!(ClaimsBurned {
             depositor,
             amount,
@@ -392,6 +477,14 @@ pub mod pool_program {
             .ok_or(PoolError::Overflow)?;
         prepaid.bump = ctx.bumps.prepaid;
 
+        // A-042: reload the vault copy (deserialized at entry, mutated
+        // by the transfer CPI we just executed) so the event reports the
+        // POST-instruction `cash.escrow` balance. Reload — not
+        // pre-state + delta arithmetic — on purpose: the emitted value
+        // must equal chain truth BY CONSTRUCTION (a future
+        // fee-bearing USDC would make vault-delta ≠ amount and the
+        // computed mirror would lie again, silently).
+        ctx.accounts.vault.reload()?;
         emit!(PrepayRecorded {
             renter,
             amount,
@@ -444,6 +537,11 @@ pub mod pool_program {
             amount,
         )?;
 
+        // A-042 (same reload as the prepay leg): the refund CPI changed
+        // the vault; the event must mirror the resulting balance, or the
+        // M11 reconciler's `cash.escrow` mirror drifts by one
+        // instruction on every refund.
+        ctx.accounts.vault.reload()?;
         emit!(PrepayRefunded {
             renter,
             amount,
@@ -548,6 +646,27 @@ pub struct Initialize<'info> {
     /// and backend authorities arrive as instruction arguments.
     #[account(mut)]
     pub authority: Signer<'info>,
+
+    /// The BPF loader's ProgramData account FOR THIS PROGRAM — the
+    /// deployment-authority source the A-041 gate reads (see handler).
+    /// Checked accounts: exact loader-derived address + loader owner +
+    /// ProgramData variant, all verified there. Read-only.
+    /// CHECK: validated field-by-field in `initialize` (address = the
+    /// loader-derived ProgramData PDA of `crate::ID`, owner = the BPF
+    /// Upgradeable Loader, bytes = ProgramData variant with a Some
+    /// authority); the required signature is enforced on
+    /// `upgrade_authority` below. UncheckedAccount (not AccountInfo)
+    /// because anchor's derive must add nothing here — the handler IS
+    /// the check.
+    pub program_data: UncheckedAccount<'info>,
+
+    /// THIS deployment's upgrade authority (devnet: the Squads multisig
+    /// vault PDA, signing via a 2-of-2 `execute_transaction`). The
+    /// `Signer` type makes the runtime verify the signature; the handler
+    /// additionally requires the key to equal the ProgramData-declared
+    /// authority. This is the A-041 gate: without it, initialize is
+    /// refused and the singleton stays unborn.
+    pub upgrade_authority: Signer<'info>,
 
     /// The rent sysvar, DECLARED even though on-chain code could fetch it
     /// via syscall: host-side test execution (program-test builtins) has no
@@ -776,7 +895,11 @@ pub struct AdminGate<'info> {
 // ---------------------------------------------------------------------------
 // Events. Anchor serializes these into transaction logs (`emit!`), so M11's
 // reconciler can rebuild the on-chain mirror by subscribing — no polling of
-// every account needed.
+// every account needed. CONTRACT (A-042, fixed 2026-11-02): every *_after
+// field is POST-instruction truth — the emitters reload the CPI-mutated
+// account right before `emit!`, because Anchor otherwise holds the
+// deserialized-at-entry (stale) copy. A subscriber must never have to
+// wonder whether an event lags the state it claims to mirror.
 // ---------------------------------------------------------------------------
 
 /// Emitted once, at `initialize`.

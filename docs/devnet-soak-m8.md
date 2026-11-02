@@ -63,7 +63,7 @@ script is safely re-runnable after any interruption.
 | 1 | Squads multisig create (2-of-2) | devnet ruling implemented |
 | 2 | Upgrade authority → multisig vault PDA | no single-key upgrade authority |
 | 3 | Single-key upgrade attempt | REFUSED (this failing is the proof) |
-| 4 | `initialize` with admin = vault PDA | admin-gated from the first block |
+| 4 | `initialize` via 2-of-2 vote (vault PDA signs as the DEPLOYMENT authority) | A-041 fix live: the pool's birth itself needs the multisig — no front-run window |
 | 5 | `record_contribution` (25 USDC-worth) + `burn_claims` via the DIRECT door (depositor key only, backend absent) | D40 live: claims are records, vault stays at zero — and the escape hatch works with the operator absent |
 | 6 | Renter prepay (10 USDC) → partial refund (assisted door) → full refund (DIRECT door) | the ONLY USDC path: vault == Σ renter prepaid, round-trip exact, both doors live |
 | 7 | `pause` via 2-of-2 vote | admin gate is genuinely the multisig |
@@ -72,6 +72,18 @@ script is safely re-runnable after any interruption.
 | 10 | Teammate key rotation via 2-of-2 | multisig governance is operational |
 
 ## Executed run — evidence (final run 2026-11-01, ~11:55 ICT)
+
+> **Post-run change (2026-11-02, A-041 fix):** this run executed against the
+> pre-fix program, whose `initialize` was permissionless (AUDIT A-041 — the
+> singleton was captured-risk in the deploy→initialize window; devnet was
+> moot because the operator initialized first). The program now requires the
+> deployment authority's signature — the upgrade authority in the BPF
+> ProgramData, i.e. this multisig vault — and the soak client's step 4
+> routes `initialize` through a 2-of-2 vote (vault PDA as
+> `upgrade_authority` signer; deploy key only pays rent). The evidence below
+> is the historical record of the 2026-11-01 run; a FUTURE deployment (new
+> program id) will print its step-4 evidence line as an ms-executed
+> transaction.
 
 - Program id: `9pEmyxftdRUZV2iw6ZzCNgZz9QygG53i7APNaWcEHvjX`
   (deploy sig `4YEMbVJPzwdaPDzmv1tkYHvUcQXw5sQg2J2uYyQ8BZK84xciSwjRfPVBto7EZgt5Zc7ruiZSjTqSfm64PSFLuzfU`)

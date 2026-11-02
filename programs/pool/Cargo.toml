@@ -65,6 +65,12 @@ anchor-spl = { version = "=1.2.2", default-features = false, features = [
 # moved to wincode 0.6 and CANNOT be mixed in — `cargo update` must never
 # run blind here; CI builds --locked.
 solana-program-test = { version = "=4.1.2", features = ["agave-unstable-api"] }
+# solana-account: ONLY to build the genesis ProgramData override for the
+# A-041 rig (initialize's deployment-authority gate needs a signable
+# upgrade authority). Already inside the agave 4.1.2 lattice via
+# solana-program-test (the same 4.3.x line it pins — the lock does not
+# move). Dev-only; zero on-chain or release-binary reach.
+solana-account = "=4.3.1"
 solana-keypair = "=3.1.2"
 solana-signer = "=3.0.0"
 solana-pubkey = "=4.2.0"

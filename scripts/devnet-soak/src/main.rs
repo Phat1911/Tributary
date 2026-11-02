@@ -291,6 +291,12 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // ---- 4. initialize the pool (admin = multisig vault) ----------------------
+    // A-041 fix (2026-11-02): initialize now requires the DEPLOYMENT
+    // authority's signature — the program's upgrade authority, which
+    // step 2 moved to the multisig vault. So the pool is born through a
+    // 2-of-2 vote: the vault PDA signs as `upgrade_authority` (Squads
+    // execution produces the PDA signature cross-program, same as every
+    // AdminGate instruction), while the deploy key merely PAYS rent.
     let pool_pda = Pubkey::find_program_address(&[SEED_POOL], &ctx.pool).0;
     let vault_ta = Pubkey::find_program_address(&[SEED_POOL, SEED_VAULT], &ctx.pool).0;
     let claim_mint = Pubkey::find_program_address(&[SEED_POOL, SEED_CLAIM_MINT], &ctx.pool).0;
@@ -306,6 +312,12 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 AccountMeta::new_readonly(ctx.usdc, false),
                 AccountMeta::new(vault_ta, false),
                 AccountMeta::new(ctx.deploy.pubkey(), true),
+                // A-041 gate accounts (order mirrors the Initialize
+                // struct): the loader's ProgramData (declares the
+                // deployment authority = the vault) and its required
+                // signer — the vault PDA via Squads execution.
+                AccountMeta::new_readonly(program_data.0, false),
+                AccountMeta::new_readonly(vault, true),
                 // Rent sysvar — declared by Initialize (host-test compat;
                 // see lib.rs account docs). Anchor consumes accounts
                 // positionally: order must mirror the struct field order.
@@ -315,13 +327,18 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 AccountMeta::new_readonly(solana_program::system_program::ID, false),
             ],
         );
-        let sig = send(&ctx, &[ix], &ctx.deploy.pubkey(), &[&ctx.deploy]).await?;
+        // NOTE: fee/rent payer is the deploy key, but the SIGNATURE that
+        // authorizes birth is the vault's — exactly the separation the
+        // fixed initialize enforces (payer ≠ governor).
+        let ms_state = squads::get_multisig(&ctx.rpc, &ms).await?;
+        let idx =
+            propose_approve_execute(&ctx, &ms, &ms_state, ix, "initialize via 2-of-2").await?;
         evidence!(
             4,
-            "pool initialized admin=vault({}) backend={} sig={}",
+            "pool initialized admin=vault({}) backend={} via ms tx {} — deployment-authority gate satisfied by the vault signature",
             vault,
             ctx.backend.pubkey(),
-            sig
+            idx
         );
     }
 

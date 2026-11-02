@@ -49,4 +49,13 @@ pub enum PoolError {
     /// because money code never wraps silently.
     #[msg("Checked money arithmetic overflowed")]
     Overflow,
+    /// A-041: `initialize` is gated on the DEPLOYMENT authority — the
+    /// program's own upgrade authority, read from the BPF loader's
+    /// ProgramData account. Anything else (wrong signer, a substituted
+    /// program-data account, an immutable deployment) refuses here, so
+    /// the singleton cannot be front-run between deploy and initialize.
+    /// Appended LAST on purpose: Anchor numbers variants from 6000 in
+    /// declaration order, and the suites pin existing indices.
+    #[msg("Initializer is not this deployment's upgrade authority")]
+    DeploymentAuthority,
 }
