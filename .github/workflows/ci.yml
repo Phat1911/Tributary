@@ -88,7 +88,13 @@ jobs:
         # dormant-feature discipline; maxminddb is optional, not exempt).
         run: cargo clippy -p tributary-gateway --features geoip -- -D warnings
       - name: Test
-        run: cargo test --workspace
+        # --no-fail-fast (added on m9/doctrine-suite): a default cargo run
+        # stops at the first failing binary, which hid the ledger half of
+        # the expected-red doctrine suite behind the gateway half's
+        # failures. On a green main this flag changes nothing; on a red
+        # run it surfaces EVERY failing binary — the full inventory the
+        # doctrine GO gate reads.
+        run: cargo test --workspace --no-fail-fast
 
   dashboard:
     name: Dashboard (pnpm install, lint, typecheck, build)
