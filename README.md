@@ -10,6 +10,28 @@ dashboard). Pre-alpha software, real release: every org gets per-user
 keys over pooled provider capacity, with quotas, audit, and leak
 signals. Roadmap lives in [`SPEC.md`](SPEC.md) §14.
 
+## Why Tributary?
+
+Hosted API routers are convenient — but they hold your keys, your
+credits, and your usage data, and they optimize for one developer
+choosing among models. Tributary optimizes for **teams sharing their
+own capacity**:
+
+- **No middleman, no markup** — you pay provider prices directly; the
+  software is free (FSL-1.1-ALv2) and runs in one container on your own
+  machine.
+- **Your keys never leave your building** — envelope-encrypted at rest,
+  never exposed to any third party.
+- **Governance out of the box** — per-member keys, quotas, two-network
+  sharing detection, a purpose classifier, and an immutable audit log:
+  everything a key pasted into a group chat can never give you.
+- **On a router, your money only spends; here, idle credits can earn** —
+  the V2 roadmap adds a settlement layer where surplus credits become
+  supply for those who need them: append-only books, escrow no single
+  person can move, every money moment a public receipt.
+
+One line: **a router is something you rent; this is a building you own.**
+
 ## Quickstart
 
 > **Which terminal?** Run these in a **POSIX shell** — Linux, macOS, or
