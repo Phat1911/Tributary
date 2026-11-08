@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="UTF-8">
+<title>Tributary — DevExchange</title>
+<style>
+  html,body{margin:0;height:100%;background:#0b1020;color:#e8eef7;
+    font-family:'Segoe UI',system-ui,sans-serif;overflow:hidden}
+  .slide{display:none;height:100%;flex-direction:column;justify-content:center;
+    align-items:center;text-align:center;padding:0 8vw;gap:2.5vh}
+  .slide.active{display:flex}
+  .kicker{color:#14b8a6;font-size:clamp(14px,2vw,22px);letter-spacing:.35em;
+    text-transform:uppercase;font-weight:600}
+  h1{font-size:clamp(40px,7vw,96px);margin:0;font-weight:800}
+  h2{font-size:clamp(30px,5vw,64px);margin:0;font-weight:700;line-height:1.25}
+  .sub{color:#94a3b8;font-size:clamp(18px,2.6vw,32px);line-height:1.5}
+  .accent{color:#14b8a6}
+  .en{font-style:italic;color:#cbd5e1}
+  .tiny{position:fixed;bottom:3vh;left:0;right:0;text-align:center;
+    color:#475569;font-size:14px}
+</style>
+</head>
+<body>
+
+<div class="slide active">
+  <div class="kicker">Open source · Self-hosted</div>
+  <h1>TRIBUTARY</h1>
+  <div class="sub">Team chia sẻ một AI key.<br>Mỗi người vẫn có <span class="accent">key riêng</span>.</div>
+</div>
+
+<div class="slide">
+  <h2>Dùng chung = tiết kiệm.<br><span class="accent">Build pool = tốn time.</span></h2>
+  <div class="sub">Em build rồi. Anh chị cứ lấy.<br>github.com/Phat1911 → Tributary</div>
+</div>
+
+<div class="slide">
+  <div class="kicker">Live demo</div>
+  <h2>member → key → <span class="accent">429</span> → meter</h2>
+  <div class="sub">Mọi thứ được ghi lại.<br>Key này cắm vào Codex chạy y vậy.</div>
+</div>
+
+<div class="slide">
+  <div class="kicker">V2 · Solana</div>
+  <h2>Claim = vé gửi đồ<br><span class="accent">không trade được</span></h2>
+  <div class="sub">Escrow — không ai di chuyển được.<br>Kể cả em.</div>
+</div>
+
+<div class="slide">
+  <h2>RWA trade <span class="accent">tài sản</span>.<br>Tributary settle <span class="accent">nghĩa vụ</span>.</h2>
+  <div class="sub">Mọi money moment là receipt công khai.</div>
+</div>
+
+<div class="slide">
+  <h2 class="en">"Verifiable rules<br>instead of trust."</h2>
+  <div class="sub">github.com/Phat1911/Tributary · Star it 🌟</div>
+</div>
+
+<div class="tiny">→ / ← để chuyển slide · F11 toàn màn hình</div>
+
+<script>
+const s=[...document.querySelectorAll('.slide')];let i=0;
+function go(n){i=Math.max(0,Math.min(s.length-1,n));
+  s.forEach((x,k)=>x.classList.toggle('active',k===i));}
+addEventListener('keydown',e=>{
+  if(e.key==='ArrowRight'||e.key===' '||e.key==='PageDown')go(i+1);
+  if(e.key==='ArrowLeft'||e.key==='PageUp')go(i-1);});
+addEventListener('click',()=>go(i+1));
+</script>
+</body>
+</html>
