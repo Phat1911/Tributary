@@ -26,9 +26,18 @@ own capacity**:
   sharing detection, a purpose classifier, and an immutable audit log:
   everything a key pasted into a group chat can never give you.
 - **On a router, your money only spends; here, idle credits can earn** —
-  the V2 roadmap adds a settlement layer where surplus credits become
-  supply for those who need them: append-only books, escrow no single
-  person can move, every money moment a public receipt.
+  optional (V2 roadmap): a settlement layer where surplus credits become
+  supply for people who need cheap access.
+
+**Self-hosted *and* a marketplace? The boundary, stated plainly:** V1 is
+governance inside one trust domain — no blockchain, ever; your keys and
+usage data stay in your building. The V2 marketplace is **opt-in, pool by
+pool**, built for the same people V1 serves on both sides: teams and
+individuals holding **surplus AI credits** (students, startups, labs)
+supplying them, and cost-conscious builders drawing from them. Where
+strangers exchange value — and nowhere else — the chain carries the
+receipts: append-only books, escrow no single person can move, every
+money moment a public record.
 
 One line: **a router is something you rent; this is a building you own.**
 
