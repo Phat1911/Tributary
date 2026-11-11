@@ -117,20 +117,48 @@ test("F1: minute budget sends limit_requests; 5 pass, the 6th 429 names the requ
   await page.getByRole("option", { name: MEMBER_EMAIL }).click();
   await page.locator("#budget-tokens").fill("5");
   await page.getByRole("button", { name: /save budget/i }).click();
-  await expect(page.getByText(/minute/i).first()).toBeVisible({
-    timeout: 10_000,
-  });
 
   // ---- PIN 1: the wire payload. The minute-requests rule must carry
   // limit_requests (and NOT limit_tokens) — the exact v0.1.2 defect.
-  const minuteRule = await page.evaluate(async () => {
-    const rules = (await (await fetch("/api/v1/quota-rules")).json()) as {
-      period: string;
-      limit_tokens: number | null;
-      limit_requests: number | null;
-    }[];
-    return rules.find((r) => r.period === "minute");
-  });
+  //
+  // SETUP, STABILIZED (2026-11-11, two CI flakes, director rule-6 order):
+  // this read used to fire immediately after the save click, racing the
+  // dialog's own `await api.post("/quota-rules")` — on a cold runner the
+  // POST was still in flight, the still-open dialog's "Minute (requests)"
+  // combobox label satisfied the old text check, and the API read found
+  // no rule yet ("minute rule exists" → undefined; runs 42978859426 and
+  // 42983184933, both ~9 s after stack boot). The rule's EXISTENCE is
+  // setup, not the pin — so poll the API until the save has actually
+  // landed, then assert. Every assertion below is unchanged. (The day
+  // leg below needs no such guard: its "100,000 tokens" check can only
+  // match the rendered table row, which implies the POST already landed.)
+  type WireRule = {
+    period: string;
+    limit_tokens: number | null;
+    limit_requests: number | null;
+  };
+  const fetchRules = (): Promise<WireRule[]> =>
+    page.evaluate(async () => {
+      const rules = (await (await fetch("/api/v1/quota-rules")).json()) as {
+        period: string;
+        limit_tokens: number | null;
+        limit_requests: number | null;
+      }[];
+      return rules;
+    });
+  let minuteRule: WireRule | undefined;
+  await expect
+    .poll(
+      async () => {
+        minuteRule = (await fetchRules()).find((r) => r.period === "minute");
+        return minuteRule !== undefined;
+      },
+      {
+        message: "minute budget reaches the API (save POST completes)",
+        timeout: 15_000,
+      },
+    )
+    .toBe(true);
   console.log(`F1_RULE_ON_WIRE=${JSON.stringify(minuteRule)}`);
   expect(minuteRule, "minute rule exists").toBeDefined();
   expect(minuteRule!.limit_requests, "minute window sends limit_requests").toBe(5);
