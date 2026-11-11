@@ -12,6 +12,12 @@ signals. Roadmap lives in [`SPEC.md`](SPEC.md) §14.
 
 ## Why Tributary?
 
+**What Tributary is today: a free, self-hosted V1 governance tool.** One
+container on your own machine, no recurring cost, no hosted tier — your
+team's AI usage, governed by you. The V2 marketplace is a **gated
+roadmap**: it opens only behind provider/reseller agreements for credit
+transfer. It is not the storefront — V1 is the product.
+
 Hosted API routers are convenient — but they hold your keys, your
 credits, and your usage data, and they optimize for one developer
 choosing among models. Tributary optimizes for **teams sharing their
@@ -20,14 +26,17 @@ own capacity**:
 - **No middleman, no markup** — you pay provider prices directly; the
   software is free (FSL-1.1-ALv2) and runs in one container on your own
   machine.
-- **Your keys never leave your building** — envelope-encrypted at rest,
-  never exposed to any third party.
+- **Your keys and usage stay in the building by default** —
+  envelope-encrypted at rest, exposed to no third party. One optional
+  exception, taken only by org choice: the **purpose classifier** —
+  **off by default**, **disclosed to members** — sends prompts to the
+  classifier provider the org configures when (and only when) the org
+  enables it.
 - **Governance out of the box** — per-member keys, quotas, two-network
-  sharing detection, a purpose classifier, and an immutable audit log:
+  sharing detection, and a database-enforced append-only audit log:
   everything a key pasted into a group chat can never give you.
-- **On a router, your money only spends; here, idle credits can earn** —
-  optional (V2 roadmap): a settlement layer where surplus credits become
-  supply for people who need cheap access.
+- **On a router, your money only spends** — if V2 opens, idle credits
+  can optionally earn (gated roadmap — see below).
 
 **Self-hosted *and* a marketplace? The boundary, stated plainly:** V1 is
 governance inside one trust domain — no blockchain, ever; your keys and
@@ -39,7 +48,28 @@ strangers exchange value — and nowhere else — the chain carries the
 receipts: append-only books, escrow no single person can move, every
 money moment a public record.
 
+**Depositor mode (experimental).** A pool created with `kind:"root"`
+accepts depositor-supplied keys and credits and settles earnings per
+depositor for each burn window. Root pools are strictly opt-in — org
+pools (the default) are unchanged — and the feature is experimental:
+the adversarial audit session runs this week, and findings land in the
+public [`AUDIT.md`](AUDIT.md) as they always do. The settlement layer
+it targets is live on Solana devnet: program
+`9pEmyxftdRUZV2iw6ZzCNgZz9QygG53i7APNaWcEHvjX` — 2-of-2 multisig
+governed, upgrade history public on any explorer.
+
 One line: **a router is something you rent; this is a building you own.**
+
+## Business model, plainly
+
+V1 is free forever, by strategy: adoption first, zero recurring cost —
+the software costs us nothing per org you run. The first dollar
+Tributary plans to earn is an operator's settlement fee (a fixed 5–10%
+band) on V2 marketplace volume, paid by operators — never by members.
+V2's launch gate includes provider/reseller agreements for credit
+transfer; until that gate opens, Tributary is exactly what you see: a
+free, self-hosted governance tool. No dollar is planned from ToS-gray
+flows, and if V2 never opens, V1 stands on its own.
 
 ## Quickstart
 
