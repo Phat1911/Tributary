@@ -19,6 +19,7 @@ pub mod depositor_mode;
 pub mod error;
 pub mod geo;
 pub mod keys;
+pub mod m9_api;
 pub mod models_api;
 pub mod quota;
 pub mod routing;
@@ -90,7 +91,12 @@ pub async fn build_full_app(db: Db, config: Config) -> anyhow::Result<Router> {
     // dev/blank deployments leave it unset and skip the layer entirely.
     let static_dir = config.static_dir.clone();
     let mut app = build_app(app_state)
-        .merge(tributary_control::router(control_state))
+        .merge(tributary_control::router(control_state.clone()))
+        // M9: the depositor-mode control endpoints (deposits, bucket
+        // positions, settle) — same ControlState, same auth, merged so
+        // the single binary (and the integration tests via build_full_app)
+        // serve one /api/v1 surface.
+        .merge(m9_api::router(control_state))
         .route(
             "/healthz",
             get(move || {

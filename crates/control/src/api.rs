@@ -532,6 +532,9 @@ pub struct CreatePoolRequest {
     pub name: String,
     /// Omitted → ControlState.default_models (env config, SPEC §15).
     pub model_allowlist: Option<Vec<String>>,
+    /// M9: `"org"` (default — unchanged V1 family mode) or `"root"`
+    /// (depositor mode: bucket routing, deposits, settle — D43).
+    pub kind: Option<String>,
 }
 
 /// GET /api/v1/pools?org_id=… filter (optional).
@@ -581,11 +584,23 @@ pub async fn create_pool(
             "model_allowlist must name at least one model".into(),
         ));
     }
+    // M9 pool kinds: 'org' is the unchanged V1 default; 'root' opens
+    // depositor mode. Anything else is rejected loudly (a typo must not
+    // silently mint a family pool).
+    let kind = match body.kind.as_deref() {
+        None | Some("org") => "org".to_string(),
+        Some("root") => "root".to_string(),
+        Some(other) => {
+            return Err(ControlError::BadRequest(format!(
+                "kind must be 'org' or 'root', not '{other}'"
+            )));
+        }
+    };
     let pool = db::PoolRow {
         id: new_id(),
         org_id: body.org_id.clone(),
         name: name.to_string(),
-        kind: "org".to_string(),
+        kind,
         model_allowlist: serde_json::to_string(&allowlist)
             .map_err(|e| ControlError::Internal(e.into()))?,
         status: "active".to_string(),

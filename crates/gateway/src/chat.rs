@@ -21,12 +21,15 @@ use tokio::sync::mpsc;
 
 use crate::classifier::{self, ScoreContext};
 use crate::db::{self, UsageEvent};
+use crate::depositor_mode::RoutingPolicy;
 use crate::error::ApiError;
 use crate::keys::AuthedKey;
 use crate::quota::{Decision, QuotaSubject};
 use crate::routing;
 use crate::sse::{SseMeter, UsageOutcome};
 use crate::state::AppState;
+use tributary_ledger::money::MicroUsd;
+use tributary_ledger::settle::Bucket;
 
 /// Non-streaming calls may buffer; streaming calls must never hit it.
 const NON_STREAM_TIMEOUT: Duration = Duration::from_secs(120);
@@ -37,6 +40,20 @@ struct Admission {
     is_stream: bool,
     strip_injected_usage: bool,
     provider_key_id: String,
+    /// M9 depositor mode (root pools only): the resolved bucket, the
+    /// depositor whose key serves it, and the priced estimate reserved
+    /// against their bucket capacity (A-020, bucket edition). `None` on
+    /// V1 org pools — they never attribute and never reserve.
+    root: Option<RootRouting>,
+}
+
+/// The root-pool half of an admission: enough to settle the bucket
+/// reservation at response end and to write attribution with the usage
+/// row (attribution attaches at SETTLE — invariant 11).
+struct RootRouting {
+    depositor_id: String,
+    bucket: Bucket,
+    estimate: MicroUsd,
 }
 
 /// The model-not-allowed reject: one shared 400 for every locally denied
@@ -304,12 +321,26 @@ pub async fn chat_completions(
     };
 
     // --- Key selection + per-use decrypt (SPEC §5 steps 4–5). ------------
-    let selected = routing::select_provider_key(&state.db, &auth.pool_id)
-        .await
-        .map_err(|e| ApiError::Internal(anyhow::anyhow!("provider key selection failed: {e}")))?
-        .ok_or_else(|| {
-            ApiError::ServiceUnavailable("No provider key is available for this pool.".to_string())
-        })?;
+    // M9: root pools route through the depositor-mode registry (bucket
+    // resolution → eligibility → weighted pick → bucket-capacity
+    // reserve, ALL before any upstream call); org pools keep the V1
+    // first-available selection, byte-identical (invariant 9).
+    let mut root: Option<RootRouting> = None;
+    let selected = if pool.kind == "root" {
+        let (row, routing_ctx) =
+            select_depositor_key(&state, &auth.pool_id, &requested_model, &request_body).await?;
+        root = Some(routing_ctx);
+        row
+    } else {
+        routing::select_provider_key(&state.db, &auth.pool_id)
+            .await
+            .map_err(|e| ApiError::Internal(anyhow::anyhow!("provider key selection failed: {e}")))?
+            .ok_or_else(|| {
+                ApiError::ServiceUnavailable(
+                    "No provider key is available for this pool.".to_string(),
+                )
+            })?
+    };
     let upstream_key = routing::decrypt_provider_key(&state.config.master_key, &selected)?;
 
     // --- D37: provider-kind field drops (negation-only). -------------------
@@ -360,7 +391,20 @@ pub async fn chat_completions(
         Err(e) => {
             tracing::warn!("upstream request failed: {e:#}");
             // A-020: the upstream never took the request — give the window
-            // back (no usage row will land for it).
+            // back (no usage row will land for it). M9: the bucket's
+            // reserved estimate returns with it (nothing attributed).
+            // (let-chain: settle only runs when a root reservation exists.)
+            if let Some(ctx) = &root
+                && let Err(err) = crate::depositor_mode::release_bucket_capacity_for(
+                    &state.db,
+                    &selected.id,
+                    &ctx.bucket,
+                    ctx.estimate,
+                )
+                .await
+            {
+                tracing::error!("bucket capacity release failed: {err:#}");
+            }
             state.quota.release(&state.db, &reservation).await;
             return Err(ApiError::BadGateway("upstream request failed".to_string()));
         }
@@ -371,6 +415,7 @@ pub async fn chat_completions(
         is_stream,
         strip_injected_usage,
         provider_key_id: selected.id,
+        root,
     };
 
     let status = response.status();
@@ -423,6 +468,86 @@ async fn quota_denied(
     }
 }
 
+/// M9 root-pool selection: bucket resolution → eligibility → weighted
+/// pick (pro-rata by claims.contributed — D43's ROUTING half) →
+/// bucket-capacity reserve (the A-020 reserve step, bucket edition).
+/// Every refusal answers 429 in the OpenAI "no capacity" shape BEFORE
+/// any upstream call (invariants 5 and 6); a misfit or revoked key is
+/// never dialed, and an overdrawn bucket never leaks a request through.
+async fn select_depositor_key(
+    state: &AppState,
+    pool_id: &str,
+    model: &str,
+    body: &Value,
+) -> Result<(tributary_control::db::ProviderKeyRow, RootRouting), ApiError> {
+    use crate::depositor_mode as dm;
+
+    /// The 429 "no capacity" shape naming the bucket (the OpenAI
+    /// convention for exhausted upstream capacity).
+    fn no_capacity(note: String) -> ApiError {
+        ApiError::TooManyRequests {
+            message: format!("No depositor capacity available for this model: {note}"),
+            retry_after_secs: 1,
+        }
+    }
+
+    // Bucket fit: the registry decides which bucket serves this model.
+    let bucket = dm::bucket_for_model(&state.db, pool_id, model)
+        .await
+        .map_err(|e| ApiError::Internal(anyhow::anyhow!("bucket resolution failed: {e}")))?
+        .ok_or_else(|| no_capacity("no deposited key serves it in this pool".to_string()))?;
+    let keys = dm::keys_in_bucket(&state.db, pool_id, &bucket)
+        .await
+        .map_err(|e| ApiError::Internal(anyhow::anyhow!("bucket registry read failed: {e}")))?;
+    let eligible = dm::eligible_keys(&keys, &bucket);
+    if eligible.is_empty() {
+        return Err(no_capacity(format!(
+            "every key in bucket {}/{} is unhealthy or its contribution is exhausted",
+            bucket.provider, bucket.model_family
+        )));
+    }
+    // Weighted pick (weights ARE claims.contributed in the bucket), then
+    // the capacity reserve — refusal means the ceiling, and the request
+    // never dials upstream. (`select` borrows an OWNED slice — the stub
+    // contract's shape; cloning the handful of eligible keys is cheap
+    // and carries no key material.)
+    let eligible_owned: Vec<dm::DepositorKey> = eligible.iter().map(|key| (*key).clone()).collect();
+    let picked = dm::policy()
+        .select(&eligible_owned, dm::next_draw())
+        .ok_or_else(|| no_capacity("no eligible key carries routing weight".to_string()))?;
+    let estimate = dm::price_estimate(body);
+    if dm::reserve_bucket_capacity_for(&state.db, &picked.provider_key_id, &bucket, estimate)
+        .await
+        .is_err()
+    {
+        return Err(ApiError::TooManyRequests {
+            message: format!(
+                "bucket capacity exhausted: the estimated burn would exceed the depositor's contributed value in bucket {}/{}",
+                bucket.provider, bucket.model_family
+            ),
+            retry_after_secs: 1,
+        });
+    }
+    // Full key row only NOW, for the per-use decrypt — ciphertext never
+    // came near any routing decision (secrets convention).
+    let row = tributary_control::db::provider_key_by_id(&state.db, &picked.provider_key_id)
+        .await
+        .map_err(|e| ApiError::Internal(anyhow::anyhow!("depositor key load failed: {e}")))?
+        .ok_or_else(|| {
+            ApiError::ServiceUnavailable(
+                "The selected depositor key vanished before the call.".to_string(),
+            )
+        })?;
+    Ok((
+        row,
+        RootRouting {
+            depositor_id: picked.depositor_id.clone(),
+            bucket,
+            estimate,
+        },
+    ))
+}
+
 /// Forwards a fully-buffered upstream response (non-streaming or any error)
 /// and records its usage event.
 async fn buffered_response(
@@ -463,25 +588,69 @@ async fn buffered_response_inner(
 
     let outcome = parse_nonstream_usage(&bytes);
     let model = outcome.model.clone().unwrap_or(admission.requested_model);
+    // M9 pricing slice v0: root pools meter deterministic positive cost
+    // from the token counts; V1 org pools keep cost 0 (pinned until D23).
+    let cost_micros = match &admission.root {
+        Some(_) => {
+            crate::depositor_mode::price_tokens(outcome.prompt_tokens, outcome.completion_tokens)
+                .micros()
+        }
+        None => 0,
+    };
     let event = UsageEvent {
         id: db::new_id(),
         ts: db::now_ms(),
         pool_key_id: auth.id,
         user_id: auth.user_id,
         pool_id: Some(auth.pool_id),
-        provider_key_id: Some(admission.provider_key_id),
+        provider_key_id: Some(admission.provider_key_id.clone()),
         model,
         prompt_tokens: outcome.prompt_tokens,
         completion_tokens: outcome.completion_tokens,
-        cost_micros: 0, // pricing table lands with D23
+        cost_micros,
         latency_ms: started.elapsed().as_millis().min(i64::MAX as u128) as i64,
         status: status.as_u16().to_string(),
     };
-    if let Err(err) = db::insert_usage_event(&state.db, &event).await {
+    // M9 attribution attaches HERE — with the usage row, at the A-020
+    // response-end settle moment (never at reserve; invariant 11).
+    let attribution = admission.root.as_ref().map(|ctx| db::UsageAttribution {
+        depositor_id: &ctx.depositor_id,
+        bucket_provider: &ctx.bucket.provider,
+        bucket_model_family: &ctx.bucket.model_family,
+    });
+    if let Err(err) = db::insert_usage_event_attributed(&state.db, &event, attribution).await {
         // Metering is the product — fail loudly rather than drop rows.
+        // M9: the bucket reservation must not stay pinned by a request
+        // that never metered — release it (nothing attributed).
+        if let Some(ctx) = &admission.root {
+            let _ = crate::depositor_mode::release_bucket_capacity_for(
+                &state.db,
+                &admission.provider_key_id,
+                &ctx.bucket,
+                ctx.estimate,
+            )
+            .await;
+        }
         return Err(ApiError::Internal(anyhow::anyhow!(
             "failed to record usage event: {err}"
         )));
+    }
+    // A-020 settle, bucket edition: estimate → actual burn. On the plain
+    // V1 path there is no reservation to settle. (let-chain: the settle
+    // call only runs when a root reservation exists.)
+    if let Some(ctx) = &admission.root
+        && let Err(err) = crate::depositor_mode::settle_bucket_capacity_for(
+            &state.db,
+            &admission.provider_key_id,
+            &ctx.bucket,
+            ctx.estimate,
+            MicroUsd::new(cost_micros),
+        )
+        .await
+    {
+        // The books now hold truth (the usage row landed); a failed
+        // tracker adjustment is drift — loud, and Session C bait.
+        tracing::error!("bucket capacity settle failed: {err:#}");
     }
 
     let mut response = Response::builder().status(StatusCode::from_u16(status.as_u16()).unwrap());
@@ -518,9 +687,12 @@ async fn streaming_response(
     let pool_key_id = auth.id;
     let user_id = auth.user_id;
     let pool_id = auth.pool_id;
-    let provider_key_id = admission.provider_key_id;
+    let provider_key_id = admission.provider_key_id.clone();
     let requested_model = admission.requested_model;
     let strip = admission.strip_injected_usage;
+    // M9: the root-pool routing context rides into the task so the
+    // metering write can attribute and settle the bucket reservation.
+    let root = admission.root;
     tokio::spawn(async move {
         let mut upstream = response.bytes_stream();
         let mut meter = SseMeter::new(strip);
@@ -542,23 +714,54 @@ async fn streaming_response(
         drop(tx);
 
         let outcome: UsageOutcome = meter.outcome();
+        // M9 pricing + attribution, same doctrine as the buffered path:
+        // root pools meter priced, attributed rows; V1 rows stay bare.
+        let cost_micros = match &root {
+            Some(_) => crate::depositor_mode::price_tokens(
+                outcome.prompt_tokens,
+                outcome.completion_tokens,
+            )
+            .micros(),
+            None => 0,
+        };
         let event = UsageEvent {
             id: db::new_id(),
             ts: db::now_ms(),
             pool_key_id,
             user_id,
             pool_id: Some(pool_id),
-            provider_key_id: Some(provider_key_id),
+            provider_key_id: Some(provider_key_id.clone()),
             model: outcome.model.clone().unwrap_or(requested_model),
             prompt_tokens: outcome.prompt_tokens,
             completion_tokens: outcome.completion_tokens,
-            cost_micros: 0,
+            cost_micros,
             latency_ms: started.elapsed().as_millis().min(i64::MAX as u128) as i64,
             status: "200".to_string(),
         };
-        if let Err(err) = db::insert_usage_event(&db, &event).await {
+        let attribution = root.as_ref().map(|ctx| db::UsageAttribution {
+            depositor_id: &ctx.depositor_id,
+            bucket_provider: &ctx.bucket.provider,
+            bucket_model_family: &ctx.bucket.model_family,
+        });
+        if let Err(err) = db::insert_usage_event_attributed(&db, &event, attribution).await {
             // The response is already streaming; metering loss is logged loudly.
             tracing::error!("usage insert failed after stream: {err}");
+        }
+        // A-020 settle, bucket edition: the estimate is replaced by the
+        // actual burn (a short or aborted stream settles for less — the
+        // difference returns to the bucket's remaining capacity).
+        // (let-chain: settle only runs when a root reservation exists.)
+        if let Some(ctx) = &root
+            && let Err(err) = crate::depositor_mode::settle_bucket_capacity_for(
+                &db,
+                &provider_key_id,
+                &ctx.bucket,
+                ctx.estimate,
+                MicroUsd::new(cost_micros),
+            )
+            .await
+        {
+            tracing::error!("bucket capacity settle failed after stream: {err:#}");
         }
         // A-020 settle: the stream (and therefore the request) is over —
         // in every outcome, including client disconnects and metering

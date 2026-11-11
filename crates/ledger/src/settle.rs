@@ -32,6 +32,7 @@
 //! in new ledger mechanics.
 
 use crate::money::MicroUsd;
+use std::collections::HashMap;
 use tributary_common::db::Db;
 
 /// The accounting dimension (D43): provider + model family. Defined HERE,
@@ -109,12 +110,92 @@ pub fn split_settlement(
     burns: &[BurnRecord],
     fee_bps: i64,
 ) -> SettlementSplit {
-    // Session B implements (doctrine suite: tests/m9_doctrine.rs). The
-    // signature is the contract: pure, total, deterministic.
-    // (Names stay real for the contract; the touch silences unused-param
-    // warnings while the body is still a stub.)
-    let _ = (distributable_by_bucket, burns, fee_bps);
-    todo!("M9 Session B: implement the D43 split (earnings follow the burn, per bucket)")
+    // Aggregate burns per bucket → per depositor (HashMap: same inputs give
+    // the same aggregates regardless of row order; output order is made
+    // deterministic by the sort at the end).
+    let mut burn_map: HashMap<Bucket, HashMap<String, i64>> = HashMap::new();
+    for record in burns {
+        let micros = record.burn_micros.micros();
+        *burn_map
+            .entry(record.bucket.clone())
+            .or_default()
+            .entry(record.depositor_id.clone())
+            .or_insert(0) += micros;
+    }
+
+    // Merge duplicate bucket entries defensively (the contract says each
+    // bucket appears once; summing keeps conservation true if one doesn't).
+    let mut distributable: HashMap<Bucket, i64> = HashMap::new();
+    for (bucket, amount) in distributable_by_bucket {
+        *distributable.entry(bucket.clone()).or_insert(0) += amount.micros();
+    }
+
+    let mut fee_total: i64 = 0;
+    let mut undistributed_total: i64 = 0;
+    let mut payouts: Vec<Payout> = Vec::new();
+
+    for (bucket, dist_b) in &distributable {
+        // Only buckets with attributed burns pay out; a burnless bucket's
+        // distributable is RETURNED (D43: zero burn ⇒ zero earnings — it is
+        // never reallocated to another bucket's burners, never pocketed).
+        let Some(burners) = burn_map.get(bucket) else {
+            undistributed_total += dist_b;
+            continue;
+        };
+        let burn_total: i128 = burners.values().map(|&v| v as i128).sum();
+        if burn_total <= 0 {
+            undistributed_total += dist_b;
+            continue;
+        }
+
+        // Operator fee first (rule-8 band enforced by the endpoint; integer
+        // floor division in i128 — a float here would be a security finding).
+        // Clamped to [0, dist]: a malformed bps must never mint or burn money.
+        let fee_b = ((*dist_b as i128 * fee_bps as i128) / 10_000).clamp(0, *dist_b as i128) as i64;
+        fee_total += fee_b;
+        let rem = *dist_b - fee_b;
+
+        // Pro-rata by burns IN THIS BUCKET (earnings follow the burn):
+        // floor share first, then hand out the leftover micros one by one
+        // to the largest fractional remainders — deterministic (same
+        // inputs ⇒ identical split, reproducible for M11's Merkle root).
+        let mut shares: Vec<(&String, i128, i128)> = burners
+            .iter()
+            .map(|(depositor, &burn_d)| {
+                let numer = rem as i128 * burn_d as i128;
+                let floor_share = numer / burn_total;
+                let fraction = numer % burn_total;
+                (depositor, floor_share, fraction)
+            })
+            .collect();
+        let leftover: usize =
+            (rem as i128 - shares.iter().map(|(_, floor, _)| *floor).sum::<i128>()) as usize;
+        // Largest fraction first, depositor id as the deterministic tie-break.
+        shares.sort_by(|a, b| b.2.cmp(&a.2).then_with(|| a.0.cmp(b.0)));
+        for (index, (depositor, floor, _)) in shares.iter().enumerate() {
+            let bump = if index < leftover { 1 } else { 0 };
+            payouts.push(Payout {
+                depositor_id: (*depositor).clone(),
+                bucket: bucket.clone(),
+                amount: MicroUsd::new(*floor as i64 + bump),
+            });
+        }
+    }
+
+    // Deterministic output order: bucket (provider, family), then depositor.
+    payouts.sort_by(|a, b| {
+        a.bucket
+            .provider
+            .cmp(&b.bucket.provider)
+            .then_with(|| a.bucket.model_family.cmp(&b.bucket.model_family))
+            .then_with(|| a.depositor_id.cmp(&b.depositor_id))
+    });
+
+    SettlementSplit {
+        fee: MicroUsd::new(fee_total),
+        payouts,
+        undistributed: MicroUsd::new(undistributed_total),
+    }
 }
 
 /// Reads the per-depositor × per-bucket claim positions (migration 0016's
@@ -138,8 +219,31 @@ pub struct BucketPosition {
 /// Loads a pool's bucket positions (assertion/read path for the suite and
 /// M11; the routing hot path caches, but truth is these rows).
 pub async fn bucket_positions(db: &Db, pool_id: &str) -> sqlx::Result<Vec<BucketPosition>> {
-    // Session B implements. Kept in the LEDGER crate because positions
-    // are books-adjacent truth (D43: buckets live off-chain, in the books).
-    let _ = (db, pool_id); // stub: names kept for the contract
-    todo!("M9 Session B: read depositor_bucket_positions for the pool")
+    use sqlx::Row; // trait method `get` on the returned rows
+
+    // Ordered read: the caller (endpoint, suite, M11 Merkle walk) gets the
+    // SAME order for the SAME rows — determinism is part of the contract.
+    let sql = db.sql(
+        "SELECT depositor_id, provider, model_family, contributed_micros, \
+           burned_micros, earned_micros \
+         FROM depositor_bucket_positions WHERE pool_id = ? \
+         ORDER BY depositor_id, provider, model_family",
+    );
+    let rows = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
+        .bind(pool_id)
+        .fetch_all(db.pool())
+        .await?;
+    Ok(rows
+        .iter()
+        .map(|row| BucketPosition {
+            depositor_id: row.get("depositor_id"),
+            bucket: Bucket {
+                provider: row.get("provider"),
+                model_family: row.get("model_family"),
+            },
+            contributed_micros: MicroUsd::new(row.get("contributed_micros")),
+            burned_micros: MicroUsd::new(row.get("burned_micros")),
+            earned_micros: MicroUsd::new(row.get("earned_micros")),
+        })
+        .collect())
 }
