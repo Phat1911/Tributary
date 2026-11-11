@@ -28,7 +28,9 @@ async fn main() -> anyhow::Result<()> {
                  migrate       run pending migrations, then exit\n\
                  create-admin  bootstrap the FIRST host admin (only when no users\n\
                  \x20             exist); further users are created via the admin API\n\
-                 \x20             (options: --email <addr> --password <secret>)"
+                 \x20             (options: --email <addr>; password via the\n\
+                 \x20             TRIBUTARY_ADMIN_PASSWORD env var — preferred — or\n\
+                 \x20             --password <secret>, which lands in shell history)"
             );
             std::process::exit(2);
         }
@@ -66,6 +68,35 @@ async fn migrate() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Env var carrying the bootstrap admin password (preferred over argv —
+/// see [`resolve_admin_password`]).
+const ENV_ADMIN_PASSWORD: &str = "TRIBUTARY_ADMIN_PASSWORD";
+
+/// Resolves the first-admin password: `--password` argv wins, else the
+/// `TRIBUTARY_ADMIN_PASSWORD` env var. One of the two must be present.
+///
+/// The env var is the DOCUMENTED path (docs prefer it) because an argv
+/// password lands in the shell's history file and `docker exec` invocations
+/// get copy-pasted into runbooks; the flag stays for scripts that build the
+/// argument list in memory (v0.1.4 truth-release hardening).
+fn resolve_admin_password(
+    flag_password: Option<&str>,
+    env_password: Option<&str>,
+) -> anyhow::Result<String> {
+    if let Some(p) = flag_password {
+        return Ok(p.to_string());
+    }
+    // An EMPTY env var counts as unset — `TRIBUTARY_ADMIN_PASSWORD=` left
+    // over in an env file must not silently become an empty password.
+    if let Some(p) = env_password.filter(|p| !p.is_empty()) {
+        return Ok(p);
+    }
+    anyhow::bail!(
+        "create-admin requires a password: set {ENV_ADMIN_PASSWORD} (preferred) \
+         or pass --password <secret> — argv passwords land in shell history"
+    )
+}
+
 /// Bootstraps the first host admin (refuses when users already exist).
 async fn create_admin(args: &[String]) -> anyhow::Result<()> {
     let mut email: Option<String> = None;
@@ -81,9 +112,14 @@ async fn create_admin(args: &[String]) -> anyhow::Result<()> {
             _ => anyhow::bail!("unknown create-admin option: {flag} {value}"),
         }
     }
-    let (Some(email), Some(password)) = (email, password) else {
-        anyhow::bail!("create-admin requires --email and --password");
+    let Some(email) = email else {
+        anyhow::bail!("create-admin requires --email");
     };
+    // `std::env::var` returns Result; `.ok()` flattens "unset" and "not valid
+    // Unicode" into None — an undecodable env value behaves like unset and
+    // the error below names both accepted paths.
+    let env_password = std::env::var(ENV_ADMIN_PASSWORD).ok();
+    let password = resolve_admin_password(password.as_deref(), env_password.as_deref())?;
 
     let url = Config::database_url_from_env()?;
     let db = db::Db::connect(&url).await?;
@@ -91,6 +127,36 @@ async fn create_admin(args: &[String]) -> anyhow::Result<()> {
     let user = control::create_host_admin(&db, &email, &password).await?;
     println!("host admin created: {}", user.email);
     Ok(())
+}
+
+#[cfg(test)] // compile this module only for `cargo test` — unit tests below
+mod tests {
+    use super::resolve_admin_password;
+
+    #[test]
+    fn argv_password_wins_over_env() {
+        let got = resolve_admin_password(Some("argv-secret"), Some("env-secret"))
+            .expect("argv password must be accepted");
+        assert_eq!(got, "argv-secret");
+    }
+
+    #[test]
+    fn env_password_used_when_flag_absent() {
+        let got = resolve_admin_password(None, Some("env-secret"))
+            .expect("env password must be accepted");
+        assert_eq!(got, "env-secret");
+    }
+
+    #[test]
+    fn empty_env_counts_as_unset_and_both_absent_errors() {
+        // Empty string env → treated as unset → falls through to the error.
+        let err = resolve_admin_password(None, Some("")).expect_err("empty env must not pass");
+        assert!(err.to_string().contains("TRIBUTARY_ADMIN_PASSWORD"));
+        let err = resolve_admin_password(None, None).expect_err("no password must error");
+        // The error must name BOTH accepted paths (operators read this).
+        assert!(err.to_string().contains("TRIBUTARY_ADMIN_PASSWORD"));
+        assert!(err.to_string().contains("--password"));
+    }
 }
 
 /// Resolves when the process receives Ctrl-C (graceful shutdown hook).

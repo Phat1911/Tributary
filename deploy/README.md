@@ -84,10 +84,15 @@ first one is deliberately created out-of-band:
 ```sh
 # -e needed: `docker exec` does NOT inherit env_file defaults — the
 # entrypoint (which sets TRIBUTARY_DATABASE_URL) only runs for PID 1.
+# The password rides the TRIBUTARY_ADMIN_PASSWORD env var — the
+# documented path. (--password '<secret>' on the command line still
+# works, but argv passwords land in your shell history; the env var
+# keeps the secret out of it.)
 docker exec -it \
     -e TRIBUTARY_DATABASE_URL=sqlite:///data/tributary.db \
+    -e TRIBUTARY_ADMIN_PASSWORD='a-long-generated-password' \
     tributary tributary create-admin \
-  --email you@example.com --password 'a-long-generated-password'
+  --email you@example.com
 ```
 
 (`docker exec` runs the command in the running container; the entrypoint

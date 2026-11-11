@@ -98,8 +98,12 @@ git clone https://github.com/Phat1911/Tributary.git && cd Tributary
 cp deploy/.env.example .env
 echo "TRIBUTARY_MASTER_KEY=$(openssl rand -hex 32)" >> .env   # REQUIRED — your vault key; keep it secret
 docker compose up -d          # prefers the prebuilt image; builds from source only as fallback
-docker exec -it -e TRIBUTARY_DATABASE_URL=sqlite:///data/tributary.db \
-  tributary tributary create-admin --email you@example.com --password '<generated>'
+docker exec -it \
+  -e TRIBUTARY_DATABASE_URL=sqlite:///data/tributary.db \
+  -e TRIBUTARY_ADMIN_PASSWORD="$(openssl rand -base64 18)" \
+  tributary tributary create-admin --email you@example.com
+# (--password '<secret>' on the command line also works — but it lands in
+#  your shell history; the env var is the documented path)
 ```
 
 ```sh
