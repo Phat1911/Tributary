@@ -139,26 +139,20 @@ jobs:
       # Browsers land where scripts/e2e_j6.py points PLAYWRIGHT_BROWSERS_PATH;
       # the runner itself pins the CLI version (npx -y playwright@1.56.1).
       #
-      # 2026-11-11: sustained DNS flaps for the runner's DEFAULT apt mirror
-      # (azure.archive.ubuntu.com — four E2E reds 14:30–15:27 UTC, apt exit
-      # 100 in `playwright install --with-deps` BEFORE any test ran, on
-      # three different fresh runners; npm/crates.io/GitHub DNS were fine,
-      # so it is that mirror zone, not the runner's network). Point apt at
-      # the primary mirror before --with-deps needs it. Infra-only, no
-      # test impact; harmless when the Azure mirror is healthy.
-      - name: Use the primary Ubuntu apt mirror (Azure mirror DNS flaps)
+      # 2026-11-11: `--with-deps` needs apt, and the runner's Ubuntu-mirror
+      # DNS was down for 75+ minutes (five E2E reds across five fresh
+      # runners, azure AND primary mirrors unresolvable, apt exit 100
+      # BEFORE any test ran; npm/crates.io/GitHub resolved fine). The
+      # ubuntu-24.04 image ships SYSTEM Chromium 156 — i.e. every runtime
+      # lib Playwright's build links — so the deps install is belt-and-
+      # braces here: try it, and on apt failure fall back to the plain
+      # browser download. Playwright validates host libs at launch and
+      # names anything missing, so a real gap fails loud, never silent.
+      - name: Install Chromium for Playwright (deps best-effort)
         run: |
-          files=$(grep -rl 'azure\.archive\.ubuntu\.com' \
-            /etc/apt/sources.list /etc/apt/sources.list.d/ /etc/apt/apt-mirrors.txt \
-            2>/dev/null || true)
-          if [ -n "$files" ]; then
-            sudo sed -i 's|azure\.archive\.ubuntu\.com|archive.ubuntu.com|g' $files
-            echo "apt mirror rewritten in: $files"
-          else
-            echo "no azure-mirror references found (runner image changed?)"
-          fi
-      - name: Install Chromium for Playwright
-        run: pnpm -C apps/dashboard exec playwright install --with-deps chromium
+          pnpm -C apps/dashboard exec playwright install --with-deps chromium \
+            || { echo "::warning::apt --with-deps failed (mirror outage?) — installing browser only; system Chromium libs are on the image"; \
+                 pnpm -C apps/dashboard exec playwright install chromium; }
         env:
           PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}/target/pw-browsers
       - name: Run the browser journeys (boots the real stack first)
