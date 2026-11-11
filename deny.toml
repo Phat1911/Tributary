@@ -24,6 +24,16 @@ ignore = [
   "RUSTSEC-2026-0391", # agave-family advisory — dev-only
   "RUSTSEC-2026-0398", # agave-family advisory — dev-only
   "RUSTSEC-2026-0403", # agave-family advisory — dev-only
+  # M9-B close-out (2026-11-11): NOT-applicable-by-configuration. sqlx-sqlite
+  # 0.9.0 (latest release) resolves libsqlite3-sys >=0.30.1,<0.38.0 with
+  # default-features=false and only pkg-config/vcpkg — the `bundled`
+  # feature (the ONLY affected configuration per the advisory: SQLite
+  # 3.13.0–3.53.2 compiled from the bundled source) is never enabled in
+  # this workspace; all builds link the SYSTEM SQLite. The fixed
+  # libsqlite3-sys 0.39 is unreachable inside sqlx's range until sqlx
+  # ships a compatible release. Revisit on the next sqlx bump: deleting
+  # this line IS the revisit test.
+  "RUSTSEC-2026-0459", # libsqlite3-sys bundled-source CVE-2026-119375 — we link system sqlite (above)
 ]
 
 [licenses]

@@ -117,7 +117,12 @@ jobs:
 
   e2e:
     name: Dashboard E2E (Playwright — J6 journey + F1 budget wire)
-    runs-on: ubuntu-latest
+    # Pinned to 24.04 (2026-11-11): ubuntu-latest moved to 26.04 and
+    # Playwright's browser install cannot target ubuntu26.04-x64 yet
+    # ("Playwright does not support chromium on ubuntu26.04-x64" —
+    # pre-existing main red, run 42730913935). Unpin when Playwright
+    # ships 26.04 browser builds.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
       - uses: pnpm/action-setup@v4
