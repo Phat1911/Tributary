@@ -56,6 +56,15 @@ WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
 COPY crates crates
 COPY migrations migrations
+# Workspace resolution reads EVERY member's manifest — `programs/pool`
+# joined the workspace in M8 (after v0.1.3), and a `cargo build -p
+# tributary-gateway --locked` inside this image dies at manifest load
+# without it (found at the v0.1.4 tag: release run failed 0.2 s into the
+# build step). Cargo also demands src/lib.rs (library auto-discovery).
+# The image never COMPILES pool — manifest + lib source satisfy the
+# workspace walk; tests and the rest stay out of the layers.
+COPY programs/pool/Cargo.toml programs/pool/Cargo.toml
+COPY programs/pool/src programs/pool/src
 RUN cargo build --release --locked -p tributary-gateway
 
 # ---- Stage 3: runtime ------------------------------------------------------
