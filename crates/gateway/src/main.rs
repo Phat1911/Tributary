@@ -88,8 +88,10 @@ fn resolve_admin_password(
     }
     // An EMPTY env var counts as unset — `TRIBUTARY_ADMIN_PASSWORD=` left
     // over in an env file must not silently become an empty password.
+    // `filter` keeps the Option only when the predicate passes, so `p` is
+    // still the borrowed &str; `.to_string()` makes it an owned String.
     if let Some(p) = env_password.filter(|p| !p.is_empty()) {
-        return Ok(p);
+        return Ok(p.to_string());
     }
     anyhow::bail!(
         "create-admin requires a password: set {ENV_ADMIN_PASSWORD} (preferred) \
@@ -129,6 +131,24 @@ async fn create_admin(args: &[String]) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Resolves when the process receives Ctrl-C (graceful shutdown hook).
+async fn shutdown_signal() {
+    let _ = tokio::signal::ctrl_c().await;
+    tracing::info!("shutdown signal received");
+}
+
+/// Initializes tracing with env filtering; optional JSON output (§13).
+fn init_tracing(json: bool) {
+    use tracing_subscriber::EnvFilter;
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    let builder = tracing_subscriber::fmt().with_env_filter(filter);
+    if json {
+        builder.json().init();
+    } else {
+        builder.init();
+    }
+}
+
 #[cfg(test)] // compile this module only for `cargo test` — unit tests below
 mod tests {
     use super::resolve_admin_password;
@@ -156,23 +176,5 @@ mod tests {
         // The error must name BOTH accepted paths (operators read this).
         assert!(err.to_string().contains("TRIBUTARY_ADMIN_PASSWORD"));
         assert!(err.to_string().contains("--password"));
-    }
-}
-
-/// Resolves when the process receives Ctrl-C (graceful shutdown hook).
-async fn shutdown_signal() {
-    let _ = tokio::signal::ctrl_c().await;
-    tracing::info!("shutdown signal received");
-}
-
-/// Initializes tracing with env filtering; optional JSON output (§13).
-fn init_tracing(json: bool) {
-    use tracing_subscriber::EnvFilter;
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-    let builder = tracing_subscriber::fmt().with_env_filter(filter);
-    if json {
-        builder.json().init();
-    } else {
-        builder.init();
     }
 }
