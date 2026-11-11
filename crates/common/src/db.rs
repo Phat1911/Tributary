@@ -145,11 +145,13 @@ pub async fn connect_sqlite_memory() -> anyhow::Result<Db> {
 /// Run embedded migrations (idempotent — safe on every start).
 pub async fn run_migrations(db: &Db) -> anyhow::Result<()> {
     MIGRATIONS.run(db.pool()).await?;
-    run_ledger_guards(db).await?;
+    run_append_only_guards(db).await?;
     Ok(())
 }
 
-/// Engine-specific append-only guards for `ledger_entries` (rule 3, M7).
+/// Engine-specific append-only guards (rule 3) for the two history tables:
+/// `ledger_entries` (M7) and `audit_log` (v0.1.4 — makes the README's
+/// "append-only audit log" claim literally true at the DB level).
 ///
 /// Why this lives here and not in a migration file: sqlx applies every
 /// migration file to BOTH engines, and the guards are inherently
@@ -165,8 +167,18 @@ pub async fn run_migrations(db: &Db) -> anyhow::Result<()> {
 /// have; in that case the guard degrades to a loud warning instead of
 /// bricking an upgrading V1 deployment (zero-V1-behavior-change constraint,
 /// M7) — the role then becomes a documented deployment requirement
-/// (deploy/README, "Ledger append-only boundary").
-async fn run_ledger_guards(db: &Db) -> anyhow::Result<()> {
+/// (deploy/README, "Append-only boundary").
+///
+/// Interaction with `scrub_legacy_approval_audit` (control crate): that
+/// one-time A-010 privacy scrub REWRITES old `audit_log.after_json` rows
+/// and runs at boot AFTER these guards arm. On any database that has
+/// booted a released image (v0.1.0+) even once, the debt is already paid
+/// — the scrub is a SELECT-only no-op there. The only theoretical loser
+/// is a pre-release dev database that never booted v0.1.0+: its scrub
+/// UPDATE is now refused (the scrub already tolerates per-row failure
+/// silently), so the sealed-blob fields stay. Accepted deliberately:
+/// the wall must not have a door, even for a good cause — A-046.
+async fn run_append_only_guards(db: &Db) -> anyhow::Result<()> {
     // ONE transaction for the whole set: test harnesses share databases
     // between concurrently-booting apps, and separate autocommit statements
     // from two boots can interleave (DROP on one connection, CREATE on
@@ -196,12 +208,17 @@ async fn run_ledger_guards(db: &Db) -> anyhow::Result<()> {
             "GRANT SELECT, INSERT ON ledger_accounts TO tributary_app",
             "GRANT SELECT ON chart_of_accounts TO tributary_app",
             "GRANT SELECT, INSERT, UPDATE ON ledger_account_balances TO tributary_app",
+            // audit_log joins the append-only set in v0.1.4: the app may
+            // append rows and read them; history rewrite is not a grant it
+            // ever holds. (A second UPDATE/DELETE-free table, same shape.)
+            "GRANT SELECT, INSERT ON audit_log TO tributary_app",
             // Documentation of intent, NOT the enforcement: this role never
             // held UPDATE/DELETE (GRANT adds only what it names). Owners
             // bypass grants entirely — the ROLE SPLIT is the enforcement.
             // Kept so the invariant survives a future careless GRANT ALL.
             "REVOKE UPDATE, DELETE, TRUNCATE ON ledger_entries FROM tributary_app",
             "REVOKE UPDATE, DELETE ON ledger_accounts, ledger_account_balances FROM tributary_app",
+            "REVOKE UPDATE, DELETE, TRUNCATE ON audit_log FROM tributary_app",
         ] {
             if let Err(err) = sqlx::query(stmt).execute(&mut *tx).await {
                 // Roll back the partial guard set before continuing without
@@ -222,19 +239,31 @@ async fn run_ledger_guards(db: &Db) -> anyhow::Result<()> {
     } else {
         // SQLite has no roles; BEFORE-row triggers are the wall. Drop-then-
         // create (not IF NOT EXISTS) so the triggers re-arm on EVERY start —
-        // if a future migration rebuilds ledger_entries, its triggers die
+        // if a future migration rebuilds a guarded table, its triggers die
         // with the old table, and this step reinstalls them moments later.
-        for stmt in [
-            "DROP TRIGGER IF EXISTS ledger_entries_no_update",
-            "DROP TRIGGER IF EXISTS ledger_entries_no_delete",
-            "CREATE TRIGGER ledger_entries_no_update BEFORE UPDATE ON ledger_entries \
-             BEGIN SELECT RAISE(ABORT, 'ledger_entries is append-only'); END",
-            "CREATE TRIGGER ledger_entries_no_delete BEFORE DELETE ON ledger_entries \
-             BEGIN SELECT RAISE(ABORT, 'ledger_entries is append-only'); END",
+        // One (trigger, table, verb) triple per wall: ledger_entries (M7)
+        // and audit_log (v0.1.4) share the mechanism and the message shape.
+        for (trigger, table, verb) in [
+            ("ledger_entries_no_update", "ledger_entries", "UPDATE"),
+            ("ledger_entries_no_delete", "ledger_entries", "DELETE"),
+            ("audit_log_no_update", "audit_log", "UPDATE"),
+            ("audit_log_no_delete", "audit_log", "DELETE"),
         ] {
-            // No privilege mode can make trigger DDL on our own file
-            // "optional" — a failure here is real breakage: fail the start.
-            sqlx::query(stmt).execute(&mut *tx).await?;
+            for stmt in [
+                format!("DROP TRIGGER IF EXISTS {trigger}"),
+                format!(
+                    "CREATE TRIGGER {trigger} BEFORE {verb} ON {table} \
+                     BEGIN SELECT RAISE(ABORT, '{table} is append-only'); END"
+                ),
+            ] {
+                // No privilege mode can make trigger DDL on our own file
+                // "optional" — a failure here is real breakage: fail the
+                // start. AssertSqlSafe: sqlx::query wants a 'static string;
+                // the wrapper hands over our owned, runtime-built SQL.
+                sqlx::query(sqlx::AssertSqlSafe(stmt.as_str()))
+                    .execute(&mut *tx)
+                    .await?;
+            }
         }
     }
     tx.commit().await?;

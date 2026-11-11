@@ -457,27 +457,32 @@ and add a `postgres` service to your compose file; the binary and every
 migration work identically on both (the repo's CI tests both on every
 push).
 
-## Ledger append-only boundary (V2 truth spine, ships dark)
+## Append-only boundary (ledger + audit log)
 
-From v0.2.x the database carries a double-entry ledger
-(`chart_of_accounts`, `ledger_accounts`, `ledger_entries`,
-`ledger_account_balances`). Nothing in V1 reads or writes it — it is the
-accounting layer V2's root pool settles on, installed ahead of the
-features that use it. Its history is append-only **at the database
-level**, and the migration step arms the guard on every start:
+Two history tables are append-only **at the database level**, with the
+guard armed on every start:
+
+1. the **double-entry ledger** (`chart_of_accounts`, `ledger_accounts`,
+   `ledger_entries`, `ledger_account_balances`) — the accounting layer
+   the root-pool/depositor surface (V2) settles on; the org-pool surface
+   never touches it. Installed ahead of the features that use it.
+2. the **audit log** (`audit_log`) — every admin action. Since v0.1.4
+   the docs' "append-only audit log" claim is enforced, not aspirational:
+   the application's own DB connection cannot rewrite or erase history.
 
 - **SQLite** (the default): `BEFORE UPDATE` / `BEFORE DELETE` triggers on
-  `ledger_entries` abort with `ledger_entries is append-only`. Any
-  connection to the file gets this — the only way past it is dropping the
-  triggers as the file owner.
+  **both tables** abort with `<table> is append-only`. Any connection to
+  the file gets this — the only way past it is dropping the triggers as
+  the file owner.
 - **Postgres**: migrations run as the table owner and create a
   **non-owner role `tributary_app`** holding exactly `SELECT` + `INSERT`
-  on `ledger_entries` (plus what the balances cache needs). An app
-  connected *as that role* cannot UPDATE or DELETE history even if it
-  tries — owners bypass grants, so the role split, not the REVOKE lines,
-  is the enforcement. Today the binary still connects as the owner; the
-  role exists, is CI-tested against, and flips on when the ledger opens
-  for business (M10).
+  on `ledger_entries` and `audit_log` (plus what the balances cache
+  needs). An app connected *as that role* cannot UPDATE or DELETE history
+  even if it tries — owners bypass grants, so the role split, not the
+  REVOKE lines, is the enforcement. Today the binary still connects as
+  the owner; the role exists, is CI-tested against (burglar-alarm tests
+  attack both tables as that role on every run), and flips on when the
+  ledger opens for business (M10).
 
 **The honest boundary:** these guards bind the *application's connection*,
 not the person who owns the file or the database. A file owner can drop
@@ -490,6 +495,12 @@ rule-7 solvency check (`cash:escrow ≥ Σ payable + Σ prepaid`) fails loud
 on any violation. If your Postgres user cannot `CREATE ROLE` (some
 managed databases), the startup log prints a warning and the role split
 is simply absent — create `tributary_app` by hand as the DBA to arm it.
+
+One deliberate consequence: even a well-meant rewrite is now refused.
+The one-time privacy scrub of legacy audit rows (A-010, pre-v0.1.0 era)
+can no longer rewrite them on a database that never booted a released
+image; every real deployment scrubbed clean long before this wall went
+up. The wall has no door — that is the point.
 
 ## Provider keys — OpenAI and Gemini
 

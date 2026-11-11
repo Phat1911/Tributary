@@ -1,10 +1,13 @@
-//! Burglar-alarm tests (rule 3): direct UPDATE and direct DELETE on
-//! `ledger_entries` must FAIL on both engines, executed as the APP's
-//! connection — every CI run, forever.
+//! Burglar-alarm tests (rule 3): direct UPDATE and direct DELETE on the
+//! append-only history tables must FAIL on both engines, executed as the
+//! APP's connection — every CI run, forever. Two tables are walled:
+//! `ledger_entries` (M7) and `audit_log` (v0.1.4 — the README's
+//! "append-only audit log" claim, made literally true at the DB level).
 //!
 //! These tests seed rows with raw SQL. That is the ONE sanctioned exception
 //! to the journey-proof rule (workflow step 12): their entire job is proving
-//! raw SQL loses. Everywhere else, entries exist only via posting rules.
+//! raw SQL loses. Everywhere else, entries exist only via posting rules
+//! (ledger) or the audit API (audit_log).
 //!
 //! What "app connection" means per engine:
 //!   * PostgreSQL: the migrations run as the table OWNER, and a separate
@@ -12,7 +15,7 @@
 //!     executes `SET ROLE tributary_app` and attacks from there — exactly
 //!     the privileges a production app connection would have.
 //!   * SQLite: there are no roles; the guard is BEFORE UPDATE/DELETE
-//!     triggers that RAISE(ABORT, 'ledger_entries is append-only').
+//!     triggers that RAISE(ABORT, '<table> is append-only').
 //!
 //! The alarm must be PRECISE: INSERT (the legal append) still succeeds as
 //! the app role while UPDATE/DELETE are refused. A guard that blocks
@@ -154,6 +157,119 @@ async fn direct_update_and_delete_on_ledger_entries_must_fail() {
         assert_eq!(
             n, 2,
             "[{}] seeded entries must survive the attacks",
+            td.name
+        );
+    }
+}
+
+/// Seeds two audit rows as raw history (the sanctioned burglar exception —
+/// the app itself only ever writes audit rows through `control::audit`).
+async fn seed_audit_rows(db: &Db) {
+    for (id, action) in [
+        ("a-update", "member.created"),
+        ("a-delete", "pool.quota_set"),
+    ] {
+        let seed = db.sql(
+            "INSERT INTO audit_log \
+             (id, org_id, actor_id, actor_email, action, target_kind, target_id, ip, ts) \
+             VALUES (?, NULL, 'admin-1', 'admin@example.com', ?, 'org', 'org-1', \
+                     '203.0.113.7', 1)",
+        );
+        sqlx::query(sqlx::AssertSqlSafe(seed.as_str()))
+            .bind(id)
+            .bind(action)
+            .execute(db.pool())
+            .await
+            .expect("seed audit row");
+    }
+}
+
+/// v0.1.4: the SAME burglar alarm for `audit_log` — the admin trail is as
+/// append-only as the ledger. An attacker holding the app's own connection
+/// (the realistic compromise) must not be able to rewrite what an admin did
+/// or make an action vanish: no UPDATE, no DELETE, INSERT still legal.
+#[tokio::test]
+async fn direct_update_and_delete_on_audit_log_must_fail() {
+    for td in test_dbs().await {
+        let db = &td.pool;
+        seed_audit_rows(db).await;
+
+        let mut conn = db.pool().acquire().await.expect("acquire");
+        if db.postgres() {
+            sqlx::query("SET ROLE tributary_app")
+                .execute(&mut *conn)
+                .await
+                .expect("SET ROLE — tributary_app must exist (guards armed)");
+        }
+
+        // The legal append: the next honest audit row still fits through
+        // the door the wall guards.
+        let legal_insert = attempt(
+            db,
+            &mut conn,
+            "INSERT INTO audit_log \
+             (id, org_id, actor_id, actor_email, action, target_kind, target_id, ip, ts) \
+             VALUES ('a-legal', NULL, 'admin-1', 'admin@example.com', 'member.revoked', \
+                     'org', 'org-1', '203.0.113.7', 2)",
+        )
+        .await;
+        // The attacks: falsify what happened, then erase it.
+        let attack_update = attempt(
+            db,
+            &mut conn,
+            "UPDATE audit_log SET action = 'member.deleted' WHERE id = 'a-update'",
+        )
+        .await;
+        let attack_delete =
+            attempt(db, &mut conn, "DELETE FROM audit_log WHERE id = 'a-delete'").await;
+
+        if db.postgres() {
+            sqlx::query("RESET ROLE")
+                .execute(&mut *conn)
+                .await
+                .expect("RESET ROLE");
+        }
+        drop(conn);
+
+        assert!(
+            legal_insert.is_ok(),
+            "[{}] INSERT into audit_log as app role must still work: {:?}",
+            td.name,
+            legal_insert.err()
+        );
+        for (attack, name) in [(attack_update, "UPDATE"), (attack_delete, "DELETE")] {
+            let err = attack.err().unwrap_or_else(|| {
+                panic!(
+                    "[{}] direct {name} on audit_log SUCCEEDED — the admin \
+                     trail is mutable, the append-only claim is broken",
+                    td.name
+                )
+            });
+            let expected = if db.postgres() {
+                "permission denied"
+            } else {
+                "append-only"
+            };
+            assert!(
+                err.contains(expected),
+                "[{}] {name} failed for the wrong reason (wanted '{expected}'): {err}",
+                td.name
+            );
+        }
+
+        // The trail is provably intact: both victims kept their actions.
+        let survivors = db.sql(
+            "SELECT COUNT(*) AS n FROM audit_log \
+             WHERE id IN ('a-update', 'a-delete') \
+               AND action IN ('member.created', 'pool.quota_set')",
+        );
+        let n: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(survivors.as_str()))
+            .fetch_one(db.pool())
+            .await
+            .expect("count audit survivors");
+        assert_eq!(
+            n, 2,
+            "[{}] seeded audit rows must survive the attacks",
             td.name
         );
     }
