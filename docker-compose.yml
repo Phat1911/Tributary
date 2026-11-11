@@ -2,7 +2,9 @@
 #
 # Usage from the repo root:
 #   cp deploy/.env.example .env   # then set TRIBUTARY_MASTER_KEY
-#   docker compose up -d --build
+#   docker compose up -d          # prefers the PREBUILT image (pull on
+#                                 # first run); add --build to compile from
+#                                 # source instead
 #
 # Dashboard/API: http://localhost:8111  (see README.md "Deploy in one command")
 

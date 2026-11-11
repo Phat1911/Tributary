@@ -53,12 +53,18 @@ cp deploy/.env.example .env
 $EDITOR .env                # or: nano .env
 # Inside .env, the ONLY mandatory edit:
 #   TRIBUTARY_MASTER_KEY=<output of: openssl rand -hex 32>
-docker compose up -d --build
+docker compose up -d
 ```
 
-Compose builds the image from [`deploy/Dockerfile`](Dockerfile) and starts
-one service, `tributary`. **Nothing secret is baked into the image** — the
-master key and every credential are read from the environment at run time.
+Compose starts one service, `tributary`. **The prebuilt image is the
+normal path**: the shipped `pull_policy: missing` makes a plain
+`docker compose up -d` pull `ghcr.io/phat1911/tributary:latest` from the
+registry on first run (~2 minutes to first login). Pass `--build` only
+when you deliberately want to compile from [`deploy/Dockerfile`](Dockerfile)
+instead (~10–15 min: cold Rust + dashboard build; the repo-root quickstart
+in [`README.md`](../README.md) prefers the prebuilt path too). **Nothing
+secret is baked into the image either way** — the master key and every
+credential are read from the environment at run time.
 
 ### Ports — read this if you already run something on 8080
 
@@ -131,6 +137,16 @@ For a trusted local network (home, office):
    `sudo ufw allow 8111/tcp` (or your firewall's equivalent).
 4. Everyone on the LAN uses `http://<that-address>:8111`.
 
+   > **Dashboard logins need localhost or HTTPS — also on the LAN.** The
+   > session cookie is `Secure`, and browsers refuse to store Secure
+   > cookies on plain `http://` (except from `localhost`). So logging
+   > into the *dashboard* at `http://<lan-address>:8111` from another
+   > machine silently loops back to the login page. API-key traffic
+   > (`sk-pool-…` keys against `/v1/*`) is NOT affected — it never uses
+   > the cookie. Either log in from the host itself
+   > (`http://localhost:8111`), or put TLS in front (rung 3's
+   > `tailscale serve`, or rung 4's reverse proxy).
+
 No proxy is involved, so leave `TRIBUTARY_TRUSTED_PROXIES` unset —
 the socket address IS each client's real LAN address, which is exactly
 what allowlists and sharing detection want to see.
@@ -198,6 +214,26 @@ Never used Tailscale? The whole setup is about ten minutes:
    >    certificates in the admin console; `tailscale serve` prints
    >    the toggle if it is off). Then the dashboard works from any
    >    tailnet device, cookie and all.
+   >
+   >    **With `serve`, you MUST also set `TRIBUTARY_TRUSTED_PROXIES` —
+   >    without it, all members collapse to one IP and IP detection
+   >    goes blind.** `serve` is a reverse proxy: every member now
+   >    arrives at the container through the same local hop, and
+   >    Tributary (correctly) ignores the `X-Forwarded-For` header it
+   >    attaches unless the proxy is trusted — so allowlists and
+   >    sharing detection would see ONE address for the whole group.
+   >    The fix is one line in `.env` (the proxy's address, as the
+   >    container sees it, is the Docker bridge network):
+   >
+   >    ```sh
+   >    TRIBUTARY_TRUSTED_PROXIES=172.16.0.0/12   # or your compose
+   >    # network's exact CIDR — `docker network inspect <name>` shows it
+   >    ```
+   >
+   >    `tailscale serve` sets `X-Forwarded-For` to each member's real
+   >    tailnet address (and discards spoofed incoming values), so with
+   >    the proxy trusted, IP-derived controls see true per-member
+   >    tailnet addresses again.
 
    > **WSL note — put Tailscale on the Windows side, not inside WSL.**
    > If the host runs Tributary inside WSL, do **not** run steps 1–2
@@ -222,18 +258,23 @@ Never used Tailscale? The whole setup is about ten minutes:
    > remove -y tailscale`, then remove the WSL node from the admin
    > console.
    >
-   > Trade-off: through the `serve` tunnel every member arrives as
-   > the same proxy address, so IP-derived controls (allowlists,
-   > sharing detection) cannot tell members apart — for a real member
-   > group prefer a Linux-host or VPS deployment (this guide's
+   > Trade-off: through the `serve` tunnel every member arrives via the
+   > same proxy hop — which is exactly why the `serve` path REQUIRES
+   > `TRIBUTARY_TRUSTED_PROXIES` (the note above applies to WSL in
+   > full). With it set, members are told apart by their real tailnet
+   > addresses; without it, IP-derived controls (allowlists, sharing
+   > detection) cannot tell members apart — for a real member group
+   > prefer a Linux-host or VPS deployment (this guide's
    > default topology).
 
-**The trust note (read this):** tailnet traffic reaches the container
-directly — there is no reverse proxy in the path. So leave
+**The trust note (read this):** for **direct** tailnet access — members
+hitting `http://100.x.y.z:8111` with no proxy in the path — leave
 `TRIBUTARY_TRUSTED_PROXIES` **unset**: the socket address is the
-caller's real tailnet address, which is what IP-derived controls
-should see. Do **not** add `100.64.0.0/10` (the tailnet range) to the
-trusted list — that would tell the gateway to honor
+caller's real tailnet address, which is what IP-derived controls should
+see. If you use `tailscale serve` (the HTTPS option above), you are
+behind a proxy: set the DOCKER BRIDGE CIDR per that note instead. Do
+**not** add `100.64.0.0/10` (the tailnet range) to the trusted list in
+either case — that would tell the gateway to honor
 `X-Forwarded-For` headers from any tailnet device, and any member
 could then spoof their way past an IP allowlist with one header line.
 
@@ -247,6 +288,13 @@ The guide's default topology: a small VPS, ports published, and your
 own reverse proxy with TLS in front (Caddy or nginx + a certificate).
 The proxy changes what the gateway should trust — that is exactly
 what the next section is about.
+
+> **No cleartext on this rung — the warning, plainly.** Publishing port
+> 8111 straight to the internet over plain `http://` is a double
+> failure: dashboard logins die (the Secure cookie again — browsers
+> refuse it on non-localhost `http://`), and every member's API key
+> would cross the public internet unencrypted. This rung is
+> TLS-via-reverse-proxy or nothing.
 
 ## Trusted proxies — the one security setting that matters
 
@@ -267,6 +315,23 @@ internal Docker-network CIDR in the list).
 # In .env — e.g. your nginx container on the compose network:
 TRIBUTARY_TRUSTED_PROXIES=172.18.0.0/16
 ```
+
+## Leak signals — and the one false positive to know
+
+Sharing detection (D32) flags one pool key used from **two distinct
+networks** (different /24 v4 or /64 v6) inside a sliding window — the
+classic credential-sharing shape. It is **alert-only**: the flag lands
+in the dashboard's review queue; nothing is blocked or suspended
+automatically, a human decides (Resolve: dismiss / revoke).
+
+**Known false positive:** the same member using their own key from two
+of their own devices on different networks — laptop on office Wi-Fi,
+phone on mobile data — inside the window. That is one person with two
+devices, not a leaked key. Dismiss the flag; if the pattern is chronic
+and benign, tighten that member's quotas instead of treating it as a
+leak. (Impossible-travel flags share the same discipline: they fire on
+country jumps, and a member traveling with the key looks exactly like
+one.)
 
 ## Backups — it's one file
 
@@ -521,10 +586,11 @@ estimated_tokens = ceil(prompt_characters / 4) + max_completion_tokens
 ## Healthcheck
 
 `docker-compose.yml` healthchecks `http://127.0.0.1:8080/healthz` inside
-the container. `/healthz` ships with the M5 binary; until that phase
-lands, the compose file documents a TCP-check fallback in a comment (swap
-the `test:` line). The healthcheck marks the container `unhealthy` — it
-does not restart it (`restart: unless-stopped` handles crashes).
+the container. `/healthz` is a DB-backed liveness probe — `200` while
+the database answers, `503` when it does not — and has shipped in every
+released image since v0.1.0. The healthcheck marks the container
+`unhealthy` — it does not restart it (`restart: unless-stopped` handles
+crashes).
 
 ## Packaging notes (M5)
 

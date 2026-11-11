@@ -76,6 +76,15 @@ Two surfaces, both in the dashboard (admin login):
    member is suddenly blocked, it's usually a row here, with a Resolve
    action (unblock / revoke / dismiss) next to it.
 
+   > **Known false positive (don't panic, don't revoke):** the
+   > key-shared-across-networks flag is **alert-only** — it never
+   > blocks or suspends on its own. One member on two of their own
+   > devices on different networks (laptop on office Wi-Fi, phone on
+   > mobile data, inside the same window) trips it honestly. Ask the
+   > member "do you use the key from your phone too?"; if yes, dismiss
+   > the flag — that's a person, not a leak. Details:
+   > [deploy guide — leak signals](../deploy/README.md#leak-signals--and-the-one-false-positive-to-know).
+
 **Member-specific 429s** (the member can work, one can't): quota. Ask
 the admin — Budgets tab on the pool — "what rules exist for this member,
 and what window?" Remember the semantics from
