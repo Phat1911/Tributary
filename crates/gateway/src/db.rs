@@ -117,11 +117,35 @@ pub struct UsageEvent {
 
 /// Append one usage event (the metering truth quota checks aggregate over).
 pub async fn insert_usage_event(db: &Db, event: &UsageEvent) -> sqlx::Result<()> {
+    insert_usage_event_attributed(db, event, None).await
+}
+
+/// M9 depositor-mode attribution, written with the usage row at the
+/// A-020 response-end settle moment (NEVER at reserve — invariant 11).
+/// `None` keeps the three columns NULL: that is every V1 org-pool row,
+/// forever (invariant 9 — family pools never attribute).
+#[derive(Debug, Clone, Copy)]
+pub struct UsageAttribution<'a> {
+    pub depositor_id: &'a str,
+    pub bucket_provider: &'a str,
+    pub bucket_model_family: &'a str,
+}
+
+/// Appends one usage event with optional depositor attribution — the
+/// single metering write for BOTH pool kinds (V1 passes `None` and the
+/// row is byte-identical to the pre-M9 shape; the migration kept the
+/// three new columns nullable for exactly this reason).
+pub async fn insert_usage_event_attributed(
+    db: &Db,
+    event: &UsageEvent,
+    attribution: Option<UsageAttribution<'_>>,
+) -> sqlx::Result<()> {
     let sql = db.sql(
         "INSERT INTO usage_events \
          (id, ts, pool_key_id, user_id, pool_id, provider_key_id, model, \
-          prompt_tokens, completion_tokens, cost_micros, latency_ms, status) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+          prompt_tokens, completion_tokens, cost_micros, latency_ms, status, \
+          depositor_id, bucket_provider, bucket_model_family) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     );
     sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
         .bind(&event.id)
@@ -136,6 +160,9 @@ pub async fn insert_usage_event(db: &Db, event: &UsageEvent) -> sqlx::Result<()>
         .bind(event.cost_micros)
         .bind(event.latency_ms)
         .bind(&event.status)
+        .bind(attribution.map(|a| a.depositor_id))
+        .bind(attribution.map(|a| a.bucket_provider))
+        .bind(attribution.map(|a| a.bucket_model_family))
         .execute(db.pool())
         .await?;
     Ok(())

@@ -20,11 +20,14 @@ pub struct PoolInfo {
     pub allowlist: Vec<String>,
     /// Owning org — M4 detection/classifier payloads scope by org.
     pub org_id: String,
+    /// M9: 'org' (V1 family mode — first-available routing, no
+    /// attribution) or 'root' (depositor mode — bucket routing, D43).
+    pub kind: String,
 }
 
 /// Loads a pool's status + model allowlist.
 pub async fn pool_info(db: &Db, pool_id: &str) -> sqlx::Result<Option<PoolInfo>> {
-    let sql = db.sql("SELECT status, model_allowlist, org_id FROM pools WHERE id = ?");
+    let sql = db.sql("SELECT status, model_allowlist, org_id, kind FROM pools WHERE id = ?");
     let row = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
         .bind(pool_id)
         .fetch_optional(db.pool())
@@ -35,6 +38,7 @@ pub async fn pool_info(db: &Db, pool_id: &str) -> sqlx::Result<Option<PoolInfo>>
                 status: row.get("status"),
                 allowlist: serde_json::from_str(raw_allowlist.as_str()).unwrap_or_default(),
                 org_id: row.get("org_id"),
+                kind: row.get("kind"),
             }
         });
     Ok(row)

@@ -36,6 +36,10 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 tributary-common = { path = "../common" }
 tributary-control = { path = "../control" }
 tributary-crypto = { path = "../crypto" }
+# M9 (doctrine suite, D43): the data plane speaks the books' Bucket type and
+# hands attributed burns to the ledger's settlement split. In-tree path
+# dependency — no external crates added (workflow step 10).
+tributary-ledger = { path = "../ledger" }
 zeroize = "1"
 
 [dev-dependencies]
