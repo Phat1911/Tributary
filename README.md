@@ -150,6 +150,7 @@ surface as review flags, not silent surprises.
 | | |
 |---|---|
 | [`deploy/README.md`](deploy/README.md) | Detailed ops: ports, reverse proxies (the trusted-proxy setting matters), backups, Postgres, healthchecks, quota behavior, upgrades |
+| [`docs/threat-model.md`](docs/threat-model.md) | What is audited and how, what is **not** independently reviewed yet, bus factor — the honest boundaries |
 | [`docs/onboarding-org-admin.md`](docs/onboarding-org-admin.md) | Admin first-day guide (DRAFT v1) — empty box → org → pool → member key → first request |
 | [`docs/pilot-support.md`](docs/pilot-support.md) | "It broke" diagnostics runbook — healthz → logs → audit → review queue, with the known fixes |
 | [Pilot feedback](https://github.com/Phat1911/Tributary/issues/new?template=pilot-feedback.yml) | Running a pilot? Tell us what worked, what broke, what's missing — it drives the M6 rewrite |

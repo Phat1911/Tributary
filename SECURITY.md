@@ -104,4 +104,6 @@ also fine — just say so.
 ---
 
 *Deployment security notes — trusted proxies, key handling, backups — live
-in [`deploy/README.md`](deploy/README.md).*
+in [`deploy/README.md`](deploy/README.md). What is audited, how, and what
+is **not** independently reviewed yet: [`docs/threat-model.md`](docs/threat-model.md).
+Findings ledger: [`AUDIT.md`](AUDIT.md).*
