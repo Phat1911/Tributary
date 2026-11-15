@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Tributary — Dev3pack</title>
+<style>
+  html,body{margin:0;height:100%;background:#0b1020;color:#e8eef7;
+    font-family:'Segoe UI',system-ui,sans-serif;overflow:hidden}
+  .slide{display:none;height:100%;flex-direction:column;justify-content:center;
+    align-items:center;text-align:center;padding:0 8vw;gap:2.5vh}
+  .slide.active{display:flex}
+  .kicker{color:#14b8a6;font-size:clamp(14px,2vw,22px);letter-spacing:.35em;
+    text-transform:uppercase;font-weight:600}
+  h1{font-size:clamp(40px,7vw,96px);margin:0;font-weight:800}
+  h2{font-size:clamp(30px,5vw,64px);margin:0;font-weight:700;line-height:1.25}
+  .sub{color:#94a3b8;font-size:clamp(18px,2.6vw,32px);line-height:1.5}
+  .accent{color:#14b8a6}
+  .en{font-style:italic;color:#cbd5e1}
+  .tiny{position:fixed;bottom:3vh;left:0;right:0;text-align:center;
+    color:#475569;font-size:14px}
+</style>
+</head>
+<body>
+
+<div class="slide active">
+  <div class="kicker">Solana University Hackathon · Nov 27–29</div>
+  <h1>TRIBUTARY</h1>
+  <div class="sub">Governed AI capacity —<br><span class="accent">settled on Solana</span>.</div>
+</div>
+
+<div class="slide">
+  <h2>Teams share one AI key.<br><span class="accent">Nobody knows who burned the tokens.</span></h2>
+  <div class="sub">And the credits problem: granted credits expire unused.<br>Agents hit rate limits before they hit cost.</div>
+</div>
+
+<div class="slide">
+  <div class="kicker">V1 · shipped &amp; self-hosted</div>
+  <h2>Every member gets<br>their <span class="accent">own key</span></h2>
+  <div class="sub">Quotas · leak detection · append-only audit.<br>One container, open source.</div>
+</div>
+
+<div class="slide">
+  <div class="kicker">The marketplace economics</div>
+  <h2>Sellers discount because<br>their <span class="accent">basis is zero</span></h2>
+  <div class="sub">Grants, prizes, expiring credits — salvage, not price war.<br>
+  A pool of N keys = <span class="accent">N× rate limits</span> — speed, not just price.</div>
+</div>
+
+<div class="slide">
+  <div class="kicker">V2 · live on Solana devnet</div>
+  <h2>Escrow <span class="accent">no one person can move</span></h2>
+  <div class="sub">Claims that can never trade · 2-of-2 multisig ·<br>every money moment a public receipt.</div>
+</div>
+
+<div class="slide">
+  <div class="kicker">Built here, this weekend</div>
+  <h2>Merkle-batched <span class="accent">settlement</span></h2>
+  <div class="sub">Claims with proofs · challenge window · operator bond —<br>turning metered burns into provable payouts.</div>
+</div>
+
+<div class="slide">
+  <div class="kicker">Why Solana</div>
+  <h2>PDA escrow · Token-2022 ·<br>Squads multisig</h2>
+  <div class="sub">The machinery itself — not decoration.</div>
+</div>
+
+<div class="slide">
+  <h2 class="en">"Verifiable rules<br>instead of trust."</h2>
+  <div class="sub">github.com/Phat1911/Tributary<br>My teammates are agents. 🤖</div>
+</div>
+
+<div class="tiny">→ / ← to navigate · F11 fullscreen</div>
+
+<script>
+const s=[...document.querySelectorAll('.slide')];let i=0;
+function go(n){i=Math.max(0,Math.min(s.length-1,n));
+  s.forEach((x,k)=>x.classList.toggle('active',k===i));}
+addEventListener('keydown',e=>{
+  if(e.key==='ArrowRight'||e.key===' '||e.key==='PageDown')go(i+1);
+  if(e.key==='ArrowLeft'||e.key==='PageUp')go(i-1);});
+addEventListener('click',()=>go(i+1));
+</script>
+</body>
+</html>
