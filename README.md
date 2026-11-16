@@ -48,6 +48,16 @@ strangers exchange value — and nowhere else — the chain carries the
 receipts: append-only books, escrow no single person can move, every
 money moment a public record.
 
+**Why the marketplace works — the economics, plainly.** Credits bought
+at face value never enter the market; the official provider is the
+correct answer for those. The market lives on supply with a **zero or
+sunk cost basis**: granted credits, hackathon prizes, education
+allocations, expiring promos, and committed spend a team has already
+paid for but won't consume — for that supply, selling below face value
+is salvage, not a price war. And pools offer one thing no single key
+can: **a pool of N keys serves N× the rate limits** — for AI agents,
+speed runs out before money does.
+
 **Depositor mode (experimental).** A pool created with `kind:"root"`
 accepts depositor-supplied keys and credits and settles earnings per
 depositor for each burn window. Root pools are strictly opt-in — org
