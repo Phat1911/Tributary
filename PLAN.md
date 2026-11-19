@@ -71,6 +71,8 @@
 
 **Fast jump:** `crates/gateway/tests/m9c_audit_poc.rs` (new — all 12 PoCs) · `AUDIT.md` (A-047..A-054) · `PLAN.md` (this entry). No source file touched.
 
+**Post-audit ruling (2026-11-19, director, on A-049):** fix direction RULED — settle posts the books automatically (settle.distribute → payable.depositor; settle.fee → equity.operator per D39); positions become true caches (books lead). Operator-approval staging is an M10+ option, built stage→approve→post, never cache-leads-books. Fix session pending; MUST land with A-048's window marking/idempotency (coupling recorded in AUDIT A-049 — auto-posting over unmarked windows would double-post the ledger).
+
 ### 2026-11-11 — v0.1.4 TRUTH RELEASE: docs-honesty + small hardening (GO with 4 approved defaults + reviewer-readiness addendum)
 
 **Scope.** Make the external review's docs-honesty findings obsolete, as a tagged release shipping before the Nov-12 video record. GO granted 2026-11-11; all four worker defaults approved (devexchange docs frozen verbatim; devnet-soak stays 0.1.3; `TRIBUTARY_ADMIN_PASSWORD`; scrub unchanged with guards-first documented). Addendum executed: repo topics, public devnet receipts, "For reviewers" release block, generic external-review credit.
