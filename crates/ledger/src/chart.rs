@@ -219,8 +219,9 @@ pub const SEED: &[ChartRow] = &[
         account_type: AccountType::Liability,
         definition: "Depositor contributed-principal claims — capacity-backed, NOT cash-backed; \
                      deliberately outside rule 7, governed by the §11 withdrawal liquidity \
-                     buffer (director ruling 2026-10-28).",
-        allowed_counterparties: &[AccountCode::CapacityContributed],
+                     buffer (director ruling 2026-10-28). M9-D: settled burns draw it down \
+                     via capacity.consume (revenue.usage added as counterparty 2026-11-19).",
+        allowed_counterparties: &[AccountCode::CapacityContributed, AccountCode::RevenueUsage],
     },
     ChartRow {
         code: AccountCode::EquityOperator,
@@ -233,11 +234,14 @@ pub const SEED: &[ChartRow] = &[
         code: AccountCode::RevenueUsage,
         account_type: AccountType::Revenue,
         definition: "Metered pool usage revenue. At settlement splits into the operator fee \
-                     (→ equity.operator) and the distributable (→ payable.depositor).",
+                     (→ equity.operator) and the distributable (→ payable.depositor). M9-D: \
+                     root-pool settlement pots are funded here by capacity.consume \
+                     (claims.contributed added as counterparty 2026-11-19).",
         allowed_counterparties: &[
             AccountCode::PrepaidRenter,
             AccountCode::EquityOperator,
             AccountCode::PayableDepositor,
+            AccountCode::ClaimsContributed,
         ],
     },
 ];

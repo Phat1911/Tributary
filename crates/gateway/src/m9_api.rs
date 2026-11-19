@@ -2,11 +2,12 @@
 //! positions, settle — the endpoints the doctrine suite's header names.
 //!
 //! WHY THESE LIVE IN THE GATEWAY CRATE (not control): the deposit path
-//! posts `deposit.capacity` through `SqlLedger` and the settle path calls
-//! `settle::split_settlement` + the burn-batching read — all ledger
-//! surface the gateway already depends on (Session A wired that edge for
-//! the single `Bucket` type). Control stays ledger-free; no crate cycle,
-//! and no second SQL truth for the same rows.
+//! posts `deposit.capacity` and the settle path posts the full M9-D
+//! settlement batch (`capacity.consume` → `settle.fee` →
+//! `settle.distribute`) through `SqlLedger`, plus the positions read —
+//! all ledger surface the gateway already depends on (Session A wired
+//! that edge for the single `Bucket` type). Control stays ledger-free;
+//! no crate cycle, and no second SQL truth for the same rows.
 //!
 //! Auth is the control plane's own (`AuthedAdmin` over `ControlState`)
 //! — the fragment is merged into the full app by `build_full_app`, which
@@ -19,12 +20,14 @@ use axum::http::StatusCode;
 use axum::routing::{get, post};
 use serde::Deserialize;
 use serde::Serialize;
+use sqlx::Row;
+use std::collections::HashMap;
 use tributary_control::ControlState;
 use tributary_control::auth::AuthedAdmin;
 use tributary_control::db::PoolRow;
 use tributary_control::error::{ApiResult, ControlError};
 use tributary_crypto::{row_ad, seal};
-use tributary_ledger::chart::{AccountCode, OwnerKind};
+use tributary_ledger::chart::{AccountCode, OwnerKind, PLATFORM_OWNER_ID};
 use tributary_ledger::money::MicroUsd;
 use tributary_ledger::settle::{Bucket, BurnRecord, split_settlement};
 use tributary_ledger::{Ledger, PostingRequest, SqlLedger, TemplateCode};
@@ -121,8 +124,11 @@ pub struct SettleRequest {
     pub fee_bps: i64,
 }
 
-/// The settle response — the contract the suite's header names.
-#[derive(Serialize)]
+/// The settle response — the contract the suite's header names. Also the
+/// payload persisted on the settle-run journal (`response_json`): an
+/// identical-window retry deserializes and replays it verbatim (A-048),
+/// hence the Deserialize half.
+#[derive(Serialize, Deserialize)]
 pub struct SettleResponse {
     pub distributable_micros: i64,
     pub fee_micros: i64,
@@ -131,7 +137,7 @@ pub struct SettleResponse {
 }
 
 /// One payout row: depositor × bucket × amount (M11 Merkle leaves).
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 pub struct SettlePayout {
     pub depositor_id: String,
     pub provider: String,
@@ -359,16 +365,63 @@ pub async fn list_bucket_positions(
     ))
 }
 
-/// Settles a period: batch the window's attributed usage rows into burns,
-/// derive each bucket's distributable (Σ row cost), split it with the D43
-/// doctrine (fee on burned buckets; earnings follow the burn, per bucket;
-/// burnless distributable returned), credit the payouts onto the bucket
-/// positions, and return the split.
+/// A settle-run journal row, as the endpoint reads it back.
+struct SettleRun {
+    status: String,
+    response_json: String,
+}
+
+/// Finds the run for an exact (pool, window), if any — A-048's
+/// idempotency lookup. SQL-only helper, assertion-free by design.
+async fn find_settle_run(
+    state: &ControlState,
+    pool_id: &str,
+    from_ms: i64,
+    to_ms: i64,
+) -> Result<Option<SettleRun>, ControlError> {
+    let sql = state.db.sql(
+        "SELECT status, response_json FROM settle_runs \
+         WHERE pool_id = ? AND from_ms = ? AND to_ms = ?",
+    );
+    let row = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
+        .bind(pool_id)
+        .bind(from_ms)
+        .bind(to_ms)
+        .fetch_optional(state.db.pool())
+        .await
+        .map_err(|e| ControlError::Internal(e.into()))?;
+    Ok(row.map(|row| SettleRun {
+        status: row.get("status"),
+        response_json: row.get("response_json"),
+    }))
+}
+
+/// Settles a period (A-048/A-049-fixed, 2026-11-19):
 ///
-/// M9 SCOPE (director-accepted asymmetry): positions update directly; the
-/// endpoint does NOT post settle.fee/settle.distribute through the books
-/// (the ledger side of settle is pinned by the ledger suite via the
-/// public trait — Session C probes this seam).
+/// 1. IDEMPOTENCY — an identical (pool, window) retry replays the FIRST
+///    run's stored response verbatim: a client retry after a timed-out
+///    settle is a NO-OP on positions AND on the books (director ruling:
+///    retry = no-op on both sides). A 'failed' run is a loud tombstone
+///    (409) — its window is spent; an adjacent window still settles,
+///    because attribution is delta-based, never window-re-read.
+/// 2. ATTRIBUTION — per (depositor, bucket) position, exactly the
+///    un-attributed slice `burned − settled_burn`: the same burn can
+///    never re-batch (A-048), and the slice can never exceed backing
+///    because the response-end tracker is clamped at `contributed`
+///    (A-047) — absorbed overage never becomes distributable.
+/// 3. THE BOOKS (director ruling 2026-11-19: settle posts automatically;
+///    positions become true caches) — per depositor, `capacity.consume`
+///    converts the attributed burn from a principal claim into the
+///    settlement pot (claims.contributed → revenue.usage; founder-
+///    approved template), then `settle.fee` takes the operator cut
+///    (→ equity.operator, D39) and `settle.distribute` moves each payout
+///    to `payable.depositor`. Every posting references the run id — one
+///    run = one batch of postings, replayable by audit.
+/// 4. POSITIONS — `earned` grows by the payouts and the attributed slice
+///    is marked settled via a compare-and-set on `settled_burn`, so a
+///    concurrent overlapping settle cannot double-credit; drift between
+///    the books and the positions is the drift alarm the house ledger
+///    rule already owns.
 pub async fn settle_pool(
     State(state): State<ControlState>,
     admin: AuthedAdmin,
@@ -390,70 +443,54 @@ pub async fn settle_pool(
         ));
     }
 
-    // The batch: every attributed row in the window (V1 rows never carry
-    // attribution; a root pool's rows always do — the suite hunts gaps).
-    let attributions = crate::depositor_mode::attribute_period_burns(
-        &state.db,
-        &pool.id,
-        body.from_ms,
-        body.to_ms,
-    )
-    .await
-    .map_err(|e| ControlError::Internal(e.into()))?;
+    // (1) Idempotency: the exact window's first run is the only answer.
+    if let Some(run) = find_settle_run(&state, &pool.id, body.from_ms, body.to_ms).await? {
+        return replay_run(run);
+    }
 
-    // Distributable per bucket = Σ cost of that bucket's attributed rows
-    // (a bucket with rows but zero total still burned nothing payable —
-    // the split treats burn_total <= 0 as burnless and returns it).
-    let mut distributable: Vec<(Bucket, i64)> = Vec::new();
+    // (2) Attribution: the un-attributed slice of every position. i128
+    // accumulators throughout (A-053 leg 1): hostile row costs saturate
+    // i64 at METERING, but settlement arithmetic can never panic on them.
+    let positions = tributary_ledger::settle::bucket_positions(&state.db, &pool.id)
+        .await
+        .map_err(|e| ControlError::Internal(e.into()))?;
     let mut burns: Vec<BurnRecord> = Vec::new();
-    for attribution in &attributions {
-        match distributable
-            .iter_mut()
-            .find(|(bucket, _)| bucket == &attribution.bucket)
-        {
-            Some((_, total)) => *total += attribution.burn_micros.micros(),
-            None => {
-                distributable.push((attribution.bucket.clone(), attribution.burn_micros.micros()))
-            }
+    let mut distributable_acc: HashMap<Bucket, i128> = HashMap::new();
+    let mut attribution_by_depositor: HashMap<String, i64> = HashMap::new();
+    for p in &positions {
+        let delta = (p.burned_micros.micros() - p.settled_burn_micros).max(0);
+        if delta == 0 {
+            continue; // nothing un-attributed in this bucket (A-048)
         }
+        *distributable_acc.entry(p.bucket.clone()).or_insert(0) += delta as i128;
+        *attribution_by_depositor
+            .entry(p.depositor_id.clone())
+            .or_insert(0) += delta;
         burns.push(BurnRecord {
-            depositor_id: attribution.depositor_id.clone(),
-            bucket: attribution.bucket.clone(),
-            burn_micros: attribution.burn_micros,
+            depositor_id: p.depositor_id.clone(),
+            bucket: p.bucket.clone(),
+            burn_micros: MicroUsd::new(delta),
         });
     }
-
-    let split = split_settlement(
-        &distributable
-            .iter()
-            .map(|(bucket, micros)| (bucket.clone(), MicroUsd::new(*micros)))
-            .collect::<Vec<_>>(),
-        &burns,
-        body.fee_bps,
-    );
-
-    // Credit the payouts onto the bucket positions (earned grows by the
-    // settled amount; contributed/burned are untouched here).
-    for payout in &split.payouts {
-        let update = state.db.sql(
-            "UPDATE depositor_bucket_positions \
-             SET earned_micros = earned_micros + ?, updated_at = ? \
-             WHERE pool_id = ? AND depositor_id = ? AND provider = ? AND model_family = ?",
-        );
-        sqlx::query(sqlx::AssertSqlSafe(update.as_str()))
-            .bind(payout.amount.micros())
-            .bind(now_ms())
-            .bind(&pool.id)
-            .bind(&payout.depositor_id)
-            .bind(&payout.bucket.provider)
-            .bind(&payout.bucket.model_family)
-            .execute(state.db.pool())
-            .await
-            .map_err(|e| ControlError::Internal(e.into()))?;
+    let mut distributable: Vec<(Bucket, MicroUsd)> = Vec::new();
+    let mut distributable_total: i128 = 0;
+    for (bucket, micros) in distributable_acc {
+        // Checked narrowing — a beyond-i64 bucket total is a hard error,
+        // never a wrapped number (A-053 leg 1).
+        let bucket_label = format!("{}/{}", bucket.provider, bucket.model_family);
+        let narrowed = i64::try_from(micros).map_err(|_| {
+            ControlError::Internal(anyhow::anyhow!(
+                "distributable overflow for bucket {bucket_label}"
+            ))
+        })?;
+        distributable.push((bucket, MicroUsd::new(narrowed)));
+        distributable_total += micros;
     }
+    let distributable_total = i64::try_from(distributable_total)
+        .map_err(|_| ControlError::Internal(anyhow::anyhow!("distributable total overflow")))?;
 
-    let distributable_total: i64 = distributable.iter().map(|(_, micros)| *micros).sum();
-    Ok(Json(SettleResponse {
+    let split = split_settlement(&distributable, &burns, body.fee_bps);
+    let response = SettleResponse {
         distributable_micros: distributable_total,
         fee_micros: split.fee.micros(),
         undistributed_micros: split.undistributed.micros(),
@@ -467,7 +504,265 @@ pub async fn settle_pool(
                 amount_micros: p.amount.micros(),
             })
             .collect(),
-    }))
+    };
+    let response_json =
+        serde_json::to_string(&response).map_err(|e| ControlError::Internal(e.into()))?;
+
+    // Claim the window: the UNIQUE (pool, window) row is the idempotency
+    // lock (A-048). A concurrent identical settle loses this insert and
+    // takes the replay/409 path above.
+    let run_id = new_id();
+    let insert = state.db.sql(
+        "INSERT INTO settle_runs \
+         (id, pool_id, from_ms, to_ms, fee_bps, distributable_micros, \
+          fee_micros, undistributed_micros, response_json, status, created_at) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)",
+    );
+    let inserted = sqlx::query(sqlx::AssertSqlSafe(insert.as_str()))
+        .bind(&run_id)
+        .bind(&pool.id)
+        .bind(body.from_ms)
+        .bind(body.to_ms)
+        .bind(body.fee_bps)
+        .bind(response.distributable_micros)
+        .bind(response.fee_micros)
+        .bind(response.undistributed_micros)
+        .bind(&response_json)
+        .bind(now_ms())
+        .execute(state.db.pool())
+        .await;
+    if inserted.is_err() {
+        // Lost the race (or real failure): the run that exists owns the
+        // window — replay it or refuse, never double-settle.
+        if let Some(run) = find_settle_run(&state, &pool.id, body.from_ms, body.to_ms).await? {
+            return replay_run(run);
+        }
+        return Err(ControlError::Internal(anyhow::anyhow!(
+            "settle run insert failed"
+        )));
+    }
+
+    // (3) The books + (4) the position caches run as one phase: any
+    // failure tombstones the run ('failed') and fails loudly — the books
+    // are append-only, so a partial batch is named by the run row for
+    // recovery (documented residual in AUDIT.md A-049).
+    let ledger = SqlLedger::new(state.db.clone());
+    if let Err(err) = books_and_positions(
+        &state,
+        &ledger,
+        &run_id,
+        &positions,
+        &attribution_by_depositor,
+        &split,
+        &pool.id,
+    )
+    .await
+    {
+        tombstone_run(&state, &run_id).await;
+        return Err(ControlError::Internal(err));
+    }
+
+    // Finalize the run: only now does the window replay on retry.
+    let finalize = state
+        .db
+        .sql("UPDATE settle_runs SET status = 'ok' WHERE id = ?");
+    if let Err(err) = sqlx::query(sqlx::AssertSqlSafe(finalize.as_str()))
+        .bind(&run_id)
+        .execute(state.db.pool())
+        .await
+    {
+        tombstone_run(&state, &run_id).await;
+        return Err(ControlError::Internal(err.into()));
+    }
+
+    tributary_control::audit::record(
+        &state.db,
+        tributary_control::audit::AuditEntry {
+            org_id: Some(&pool.org_id),
+            actor_id: &admin.user_id,
+            actor_email: &admin.email,
+            action: "depositor.settle",
+            target_kind: tributary_control::audit::TargetKind::Pool,
+            target_id: &pool.id,
+            before: None,
+            after: Some(serde_json::json!({
+                "run_id": run_id,
+                "from_ms": body.from_ms,
+                "to_ms": body.to_ms,
+                "fee_bps": body.fee_bps,
+                "distributable_micros": response.distributable_micros,
+                "fee_micros": response.fee_micros,
+                "posted": true,
+            })),
+            ip: None,
+        },
+    )
+    .await;
+
+    Ok(Json(response))
+}
+
+/// Replays or refuses a found settle run (A-048): 'ok' runs answer with
+/// their stored response — byte-identical to the first answer — anything
+/// else is an in-progress/failed window and refuses with 409.
+fn replay_run(run: SettleRun) -> ApiResult<Json<SettleResponse>> {
+    if run.status == "ok" {
+        let response: SettleResponse = serde_json::from_str(&run.response_json)
+            .map_err(|e| ControlError::Internal(e.into()))?;
+        Ok(Json(response))
+    } else {
+        Err(ControlError::Conflict(
+            "a settle of this exact window is in progress or failed; retry an adjacent \
+             window instead (attribution is delta-based — outstanding burns still settle)"
+                .into(),
+        ))
+    }
+}
+
+/// The books phase + the position-cache phase of one settle run (A-049,
+/// director ruling 2026-11-19: settle posts automatically; positions are
+/// true caches — books lead).
+///
+/// Postings, in the ruled order, every reference naming the run id (one
+/// run = one batch of postings): per depositor `capacity.consume`
+/// converts the attributed burn from principal claim into the settlement
+/// pot (claims.contributed → revenue.usage; the founder-approved M9-D
+/// template — root pools have no renter prepayment to fund the pot
+/// through prepaid.consume); `settle.fee` takes the operator cut
+/// (→ equity.operator, D39); `settle.distribute` moves each payout to
+/// `payable.depositor`. Zero-amount rows (a split's floor arithmetic can
+/// produce them) do not post — templates are positive-only.
+///
+/// Then the caches: `earned += payout` and the attributed slice is
+/// marked settled via a compare-and-set on `settled_burn_micros`, so a
+/// concurrent overlapping settle loses LOUDLY here instead of
+/// double-crediting anything.
+async fn books_and_positions(
+    state: &ControlState,
+    ledger: &SqlLedger,
+    run_id: &str,
+    positions: &[tributary_ledger::settle::BucketPosition],
+    attribution_by_depositor: &HashMap<String, i64>,
+    split: &tributary_ledger::settle::SettlementSplit,
+    pool_id: &str,
+) -> Result<(), anyhow::Error> {
+    // Accounts open idempotently (open_account is ON CONFLICT DO NOTHING).
+    for code in [AccountCode::RevenueUsage, AccountCode::EquityOperator] {
+        ledger
+            .open_account(code, OwnerKind::Operator, PLATFORM_OWNER_ID)
+            .await?;
+    }
+    for depositor in attribution_by_depositor.keys() {
+        ledger
+            .open_account(
+                AccountCode::PayableDepositor,
+                OwnerKind::Depositor,
+                depositor,
+            )
+            .await?;
+    }
+    let reference = format!("m9.settle.{run_id}");
+    for (depositor, amount) in attribution_by_depositor {
+        ledger
+            .post(
+                PostingRequest::new(TemplateCode::CapacityConsume, MicroUsd::new(*amount))
+                    .depositor(depositor)
+                    .reference(&reference),
+            )
+            .await?;
+    }
+    if split.fee.micros() > 0 {
+        ledger
+            .post(PostingRequest::new(TemplateCode::SettleFee, split.fee).reference(&reference))
+            .await?;
+    }
+    for payout in &split.payouts {
+        if payout.amount.micros() <= 0 {
+            continue; // zero-payout floor rows exist; postings are positive-only
+        }
+        ledger
+            .post(
+                PostingRequest::new(TemplateCode::SettleDistribute, payout.amount)
+                    .depositor(&payout.depositor_id)
+                    .reference(&reference),
+            )
+            .await?;
+    }
+
+    // The position caches. CAS on settled_burn: the WHERE pins the read
+    // basis, the += marks exactly this run's attributed slice.
+    let payout_map: HashMap<(String, String, String), i64> = split
+        .payouts
+        .iter()
+        .map(|p| {
+            (
+                (
+                    p.depositor_id.clone(),
+                    p.bucket.provider.clone(),
+                    p.bucket.model_family.clone(),
+                ),
+                p.amount.micros(),
+            )
+        })
+        .collect();
+    for p in positions {
+        let delta = (p.burned_micros.micros() - p.settled_burn_micros).max(0);
+        if delta == 0 {
+            continue;
+        }
+        let earned_add = payout_map
+            .get(&(
+                p.depositor_id.clone(),
+                p.bucket.provider.clone(),
+                p.bucket.model_family.clone(),
+            ))
+            .copied()
+            .unwrap_or(0);
+        let update = state.db.sql(
+            "UPDATE depositor_bucket_positions \
+             SET earned_micros = earned_micros + ?, \
+                 settled_burn_micros = settled_burn_micros + ?, updated_at = ? \
+             WHERE pool_id = ? AND depositor_id = ? AND provider = ? AND model_family = ? \
+               AND settled_burn_micros = ?",
+        );
+        let result = sqlx::query(sqlx::AssertSqlSafe(update.as_str()))
+            .bind(earned_add)
+            .bind(delta)
+            .bind(now_ms())
+            .bind(pool_id)
+            .bind(&p.depositor_id)
+            .bind(&p.bucket.provider)
+            .bind(&p.bucket.model_family)
+            .bind(p.settled_burn_micros)
+            .execute(state.db.pool())
+            .await?;
+        if result.rows_affected() == 0 {
+            return Err(anyhow::anyhow!(
+                "settle lost the attribution race on position {}/{} of {} — \
+                 a concurrent settle touched it; nothing was double-credited",
+                p.bucket.provider,
+                p.bucket.model_family,
+                p.depositor_id
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Tombstones a failed run ('failed') — best-effort by design: the error
+/// path must never mask its own failure, and the run row + audit trail
+/// (the loud 500 the caller returns) name the window to reconcile.
+async fn tombstone_run(state: &ControlState, run_id: &str) {
+    let sql = state
+        .db
+        .sql("UPDATE settle_runs SET status = 'failed' WHERE id = ?");
+    if let Err(err) = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
+        .bind(run_id)
+        .execute(state.db.pool())
+        .await
+    {
+        tracing::error!("settle run {run_id}: tombstone write failed: {err:#}");
+    }
 }
 
 /// Masks a raw key into the display form (first-5…last-4, secrets rule).

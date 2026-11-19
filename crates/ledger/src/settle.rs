@@ -210,10 +210,18 @@ pub struct BucketPosition {
     pub bucket: Bucket,
     /// This bucket's share of the depositor's claims.contributed.
     pub contributed_micros: MicroUsd,
-    /// Metered burn attributed to this depositor's keys in this bucket.
+    /// Metered burn attributed to this depositor's keys in this bucket
+    /// (A-047-fixed: CLAMPED at `contributed_micros` — the tracker never
+    /// credit-burns past the position; the unbacked overage of a hostile
+    /// or under-estimated request is absorbed at settle time).
     pub burned_micros: MicroUsd,
     /// Settled D43 earnings credited in this bucket.
     pub earned_micros: MicroUsd,
+    /// Cumulative burn already attributed into settlements (migration
+    /// 0017, A-048): the un-attributed slice is exactly
+    /// `burned − settled_burn`, which is what the next settle
+    /// distributes — the same rows can never re-batch.
+    pub settled_burn_micros: i64,
 }
 
 /// Loads a pool's bucket positions (assertion/read path for the suite and
@@ -225,7 +233,7 @@ pub async fn bucket_positions(db: &Db, pool_id: &str) -> sqlx::Result<Vec<Bucket
     // SAME order for the SAME rows — determinism is part of the contract.
     let sql = db.sql(
         "SELECT depositor_id, provider, model_family, contributed_micros, \
-           burned_micros, earned_micros \
+           burned_micros, earned_micros, settled_burn_micros \
          FROM depositor_bucket_positions WHERE pool_id = ? \
          ORDER BY depositor_id, provider, model_family",
     );
@@ -244,6 +252,7 @@ pub async fn bucket_positions(db: &Db, pool_id: &str) -> sqlx::Result<Vec<Bucket
             contributed_micros: MicroUsd::new(row.get("contributed_micros")),
             burned_micros: MicroUsd::new(row.get("burned_micros")),
             earned_micros: MicroUsd::new(row.get("earned_micros")),
+            settled_burn_micros: row.get("settled_burn_micros"),
         })
         .collect())
 }

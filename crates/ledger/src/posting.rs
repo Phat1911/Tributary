@@ -13,6 +13,14 @@
 //!   settle.distribute   distributable to a depositor   → revenue ↓, payable ↑
 //!   deposit.capacity    depositor contributes keys     → capacity ↑, claims ↑
 //!   withdraw.payable    depositor cashes out earnings  → payable ↓, escrow ↓
+//!   capacity.consume    deposited capacity burns       → claims ↓, revenue ↑
+//!
+//! `capacity.consume` (M9-D, appended 2026-11-19 with founder approval —
+//! AUDIT.md A-049): the M7 six are byte-identical above; this seventh
+//! template funds the settlement pot on ROOT pools, where no renter
+//! prepayment exists. `prepaid.consume` is its exact V1 mirror (a
+//! prepaid balance converts to revenue; here the burned principal claim
+//! converts instead).
 
 use crate::chart::{AccountCode, Direction, OwnerKind, PLATFORM_OWNER_ID};
 use crate::error::LedgerError;
@@ -29,6 +37,7 @@ pub enum TemplateCode {
     SettleDistribute,
     DepositCapacity,
     WithdrawPayable,
+    CapacityConsume,
 }
 
 impl TemplateCode {
@@ -41,6 +50,7 @@ impl TemplateCode {
             Self::SettleDistribute => "settle.distribute",
             Self::DepositCapacity => "deposit.capacity",
             Self::WithdrawPayable => "withdraw.payable",
+            Self::CapacityConsume => "capacity.consume",
         }
     }
 
@@ -68,6 +78,7 @@ impl FromStr for TemplateCode {
             "settle.distribute" => Ok(Self::SettleDistribute),
             "deposit.capacity" => Ok(Self::DepositCapacity),
             "withdraw.payable" => Ok(Self::WithdrawPayable),
+            "capacity.consume" => Ok(Self::CapacityConsume),
             other => Err(LedgerError::UnknownTemplate(other.to_string())),
         }
     }
@@ -207,6 +218,29 @@ pub const TEMPLATES: &[Template] = &[
             },
         ],
     },
+    Template {
+        code: TemplateCode::CapacityConsume,
+        description: "Deposited capacity is consumed by metered usage on a ROOT pool \
+                      (Dr claims.contributed, Cr revenue.usage): the burned slice of the \
+                      depositor's principal claim converts into the settlement pot that \
+                      settle.fee + settle.distribute then split (D39). Sufficiency: \
+                      claims.contributed must cover the amount. Founder-approved \
+                      2026-11-19 (AUDIT.md A-049) — the M7 six templates above are \
+                      unchanged; this one exists because root pools have no renter \
+                      prepayment to fund revenue through prepaid.consume.",
+        legs: &[
+            LegSpec {
+                account: AccountCode::ClaimsContributed,
+                direction: Direction::Debit,
+                party: PartySlot::Depositor,
+            },
+            LegSpec {
+                account: AccountCode::RevenueUsage,
+                direction: Direction::Credit,
+                party: PartySlot::Platform,
+            },
+        ],
+    },
 ];
 
 /// What a caller asks the ledger to post: a template by name, one amount,
@@ -341,6 +375,11 @@ mod tests {
             TemplateCode::SettleDistribute,
             TemplateCode::DepositCapacity,
             TemplateCode::WithdrawPayable,
+            // M9-D append (founder-approved 2026-11-19, AUDIT.md A-049):
+            // the array extension STRENGTHENS this completeness pin — the
+            // new variant is covered by the same exactly-one-definition
+            // assertion as the M7 six.
+            TemplateCode::CapacityConsume,
         ];
         assert_eq!(TEMPLATES.len(), all.len());
         for code in all {

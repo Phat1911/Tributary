@@ -474,6 +474,12 @@ async fn quota_denied(
 /// Every refusal answers 429 in the OpenAI "no capacity" shape BEFORE
 /// any upstream call (invariants 5 and 6); a misfit or revoked key is
 /// never dialed, and an overdrawn bucket never leaks a request through.
+///
+/// A-052 fix (2026-11-19, founder-ruled in-doctrine): a pick whose
+/// reserve is REFUSED falls back to the bucket's remaining candidates —
+/// capacity that exists must be reachable. The request 429s only when
+/// every candidate refused (or none was eligible): the refusal then
+/// names real exhaustion, not a dead-weight pick.
 async fn select_depositor_key(
     state: &AppState,
     pool_id: &str,
@@ -496,10 +502,12 @@ async fn select_depositor_key(
         .await
         .map_err(|e| ApiError::Internal(anyhow::anyhow!("bucket resolution failed: {e}")))?
         .ok_or_else(|| no_capacity("no deposited key serves it in this pool".to_string()))?;
-    let keys = dm::keys_in_bucket(&state.db, pool_id, &bucket)
+    // A-050: candidates per the serves-contract (a prefix-declaring key
+    // is NOT exiled by a longer declaration elsewhere in the pool).
+    let keys = dm::keys_for_model(&state.db, pool_id, model, &bucket)
         .await
         .map_err(|e| ApiError::Internal(anyhow::anyhow!("bucket registry read failed: {e}")))?;
-    let eligible = dm::eligible_keys(&keys, &bucket);
+    let eligible = dm::eligible_keys(&keys);
     if eligible.is_empty() {
         return Err(no_capacity(format!(
             "every key in bucket {}/{} is unhealthy or its contribution is exhausted",
@@ -507,27 +515,50 @@ async fn select_depositor_key(
         )));
     }
     // Weighted pick (weights ARE claims.contributed in the bucket), then
-    // the capacity reserve — refusal means the ceiling, and the request
-    // never dials upstream. (`select` borrows an OWNED slice — the stub
+    // the capacity reserve. A-052: refusal excludes the key and re-picks
+    // among the rest — members are served while ANY candidate can hold
+    // the estimate. (`select` borrows an OWNED slice — the stub
     // contract's shape; cloning the handful of eligible keys is cheap
     // and carries no key material.)
-    let eligible_owned: Vec<dm::DepositorKey> = eligible.iter().map(|key| (*key).clone()).collect();
-    let picked = dm::policy()
-        .select(&eligible_owned, dm::next_draw())
-        .ok_or_else(|| no_capacity("no eligible key carries routing weight".to_string()))?;
+    let mut candidates: Vec<dm::DepositorKey> = eligible.iter().map(|key| (*key).clone()).collect();
     let estimate = dm::price_estimate(body);
-    if dm::reserve_bucket_capacity_for(&state.db, &picked.provider_key_id, &bucket, estimate)
+    // The fallback loop's answer: the first candidate whose reserve holds.
+    let picked = loop {
+        // Clone the pick out of the slice: the fallback below mutates the
+        // candidate list, so nothing may hold a borrow across it.
+        let candidate = dm::policy().select(&candidates, dm::next_draw()).cloned();
+        let Some(candidate) = candidate else {
+            return Err(no_capacity(
+                "no eligible key carries routing weight".to_string(),
+            ));
+        };
+        if dm::reserve_bucket_capacity_for(
+            &state.db,
+            &candidate.provider_key_id,
+            &candidate.bucket,
+            estimate,
+        )
         .await
-        .is_err()
-    {
-        return Err(ApiError::TooManyRequests {
-            message: format!(
-                "bucket capacity exhausted: the estimated burn would exceed the depositor's contributed value in bucket {}/{}",
-                bucket.provider, bucket.model_family
-            ),
-            retry_after_secs: 1,
-        });
-    }
+        .is_ok()
+        {
+            break candidate;
+        }
+        // This candidate cannot hold the estimate: drop it (not the
+        // request) and re-pick from the survivors.
+        let refused_id = candidate.provider_key_id.clone();
+        candidates.retain(|key| key.provider_key_id != refused_id);
+        if candidates.is_empty() {
+            return Err(ApiError::TooManyRequests {
+                message: format!(
+                    "bucket capacity exhausted: the estimated burn would exceed every depositor's contributed value in bucket {}/{}",
+                    bucket.provider, bucket.model_family
+                ),
+                retry_after_secs: 1,
+            });
+        }
+    };
+    // The picked key's OWN declared family is the accounting bucket —
+    // capacity, attribution, and earnings all book there (A-050).
     // Full key row only NOW, for the per-use decrypt — ciphertext never
     // came near any routing decision (secrets convention).
     let row = tributary_control::db::provider_key_by_id(&state.db, &picked.provider_key_id)
@@ -542,7 +573,7 @@ async fn select_depositor_key(
         row,
         RootRouting {
             depositor_id: picked.depositor_id.clone(),
-            bucket,
+            bucket: picked.bucket.clone(),
             estimate,
         },
     ))
@@ -590,10 +621,22 @@ async fn buffered_response_inner(
     let model = outcome.model.clone().unwrap_or(admission.requested_model);
     // M9 pricing slice v0: root pools meter deterministic positive cost
     // from the token counts; V1 org pools keep cost 0 (pinned until D23).
+    // A-053 leg-2 floor: an upstream reporting usage 0/0 is UN-METERED —
+    // the request burns the reserve estimate instead (zero-usage cannot
+    // mean zero-burn-forever; capacity must still deplete). Honest
+    // positive reports bill exactly what was metered.
     let cost_micros = match &admission.root {
-        Some(_) => {
-            crate::depositor_mode::price_tokens(outcome.prompt_tokens, outcome.completion_tokens)
-                .micros()
+        Some(ctx) => {
+            let metered = crate::depositor_mode::price_tokens(
+                outcome.prompt_tokens,
+                outcome.completion_tokens,
+            )
+            .micros();
+            if outcome.prompt_tokens <= 0 && outcome.completion_tokens <= 0 {
+                ctx.estimate.micros().max(metered)
+            } else {
+                metered
+            }
         }
         None => 0,
     };
@@ -716,12 +759,22 @@ async fn streaming_response(
         let outcome: UsageOutcome = meter.outcome();
         // M9 pricing + attribution, same doctrine as the buffered path:
         // root pools meter priced, attributed rows; V1 rows stay bare.
+        // A-053 leg-2 floor applies here too: a stream that never carried
+        // a usage chunk (0/0) burns the reserve estimate — an un-metered
+        // request is never a free one.
         let cost_micros = match &root {
-            Some(_) => crate::depositor_mode::price_tokens(
-                outcome.prompt_tokens,
-                outcome.completion_tokens,
-            )
-            .micros(),
+            Some(ctx) => {
+                let metered = crate::depositor_mode::price_tokens(
+                    outcome.prompt_tokens,
+                    outcome.completion_tokens,
+                )
+                .micros();
+                if outcome.prompt_tokens <= 0 && outcome.completion_tokens <= 0 {
+                    ctx.estimate.micros().max(metered)
+                } else {
+                    metered
+                }
+            }
             None => 0,
         };
         let event = UsageEvent {

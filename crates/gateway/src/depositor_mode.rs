@@ -29,9 +29,14 @@
 //!
 //! SELECTION ORDER on the hot path (the contract B wires): quota
 //! reserve (member-scoped, A-020) → bucket resolution → eligibility
-//! (bucket fit + healthy + not revoked, all BEFORE any upstream call) →
+//! (serves-fit + healthy + unexhausted, all BEFORE any upstream call) →
 //! weighted pick via [`RoutingPolicy`] → bucket-capacity reservation →
-//! upstream call → settle (usage row + attribution) or release.
+//! upstream call → settle (usage row + attribution) or release. M9-D:
+//! a refused pick FALLS BACK to the bucket's other candidates (A-052
+//! fix — capacity exists ⇒ reachable); a settle clamps at the
+//! contribution (A-047 fix — the ceiling holds at settle, not just
+//! reserve); each key books against its OWN declared family (A-050
+//! fix — the serves-contract, no string-exact exile).
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -59,9 +64,14 @@ pub const PRICE_MICROS_PER_TOKEN: i64 = 150;
 
 /// Prices one metered usage row (root pools): (prompt + completion)
 /// tokens at the slice rate. Clamped inputs cannot produce negative
-/// money — metering is unsigned in spirit.
+/// money — metering is unsigned in spirit. Every arithmetic step
+/// saturates (A-053 leg 1): an upstream reporting hostile token counts
+/// can price a row at i64::MAX but can NEVER panic the metering path
+/// (debug builds included) — overflow is a saturated value, not a 500.
 pub fn price_tokens(prompt_tokens: i64, completion_tokens: i64) -> MicroUsd {
-    let tokens = prompt_tokens.max(0) + completion_tokens.max(0);
+    let tokens = prompt_tokens
+        .max(0)
+        .saturating_add(completion_tokens.max(0));
     MicroUsd::new(tokens.saturating_mul(PRICE_MICROS_PER_TOKEN))
 }
 
@@ -211,15 +221,25 @@ pub fn family_serves(family: &str, model: &str) -> bool {
 /// pool (provider + model family) — the registry read that anchors all
 /// bucket accounting. `None` ⇒ no depositor key serves this model here.
 ///
-/// Determinism: among every (key, family) that fits, the LONGEST family
-/// wins (the most specific declaration); ties break by family name, then
-/// provider — the same inputs always resolve to the same bucket.
+/// Determinism (A-050 fix, 2026-11-19): among every ACTIVE, non-invalid
+/// key's fitting declarations, the LONGEST family wins (the most
+/// specific declaration — the header contract's "gpt-4o serves
+/// gpt-4o-mini"); ties break by the SMALLEST family name, then the
+/// SMALLEST provider — the order the code comment always promised, and
+/// the opposite of the attacker-playable LARGER-string ordering Session
+/// C exploited (a 1%-weight "zzz" deposit capturing 100% of traffic).
+/// Revoked ('revoked') and broken ('invalid') keys never participate in
+/// resolution at all (A-051: a revoked key's zombie declaration must not
+/// strand a model a healthy key could serve).
 pub async fn bucket_for_model(db: &Db, pool_id: &str, model: &str) -> sqlx::Result<Option<Bucket>> {
     // Every depositor key of the pool declares its families in data; the
     // scan is pool-scoped and small (a pool holds a handful of deposits).
+    // The status/health filter is the resolution half of invariant 5: a
+    // key that may not serve must not steer the bucket either.
     let sql = db.sql(
         "SELECT provider, model_families FROM provider_keys \
-         WHERE pool_id = ? AND depositor_id IS NOT NULL",
+         WHERE pool_id = ? AND depositor_id IS NOT NULL \
+           AND status = 'active' AND health != 'invalid'",
     );
     let rows = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
         .bind(pool_id)
@@ -241,10 +261,17 @@ pub async fn bucket_for_model(db: &Db, pool_id: &str, model: &str) -> sqlx::Resu
             let better = match &best {
                 None => true,
                 Some((len, known_family, known_provider)) => {
-                    // Longer family first; then smallest family name; then
-                    // smallest provider — a total, deterministic order.
-                    (family.len(), family.as_str(), provider.as_str())
-                        > (*len, known_family.as_str(), known_provider.as_str())
+                    // Longer family first (the header contract); then the
+                    // SMALLEST family name; then the SMALLEST provider —
+                    // the directions the comment always promised. Tuple
+                    // compare cannot express mixed directions, so each
+                    // leg is explicit (A-050: no deposit payload string
+                    // can steer this order).
+                    family.len() > *len
+                        || (family.len() == *len
+                            && (family.as_str() < known_family.as_str()
+                                || (family.as_str() == known_family.as_str()
+                                    && provider.as_str() < known_provider.as_str())))
                 }
             };
             if better {
@@ -262,71 +289,151 @@ pub async fn bucket_for_model(db: &Db, pool_id: &str, model: &str) -> sqlx::Resu
 // Key registry
 // ---------------------------------------------------------------------------
 
-/// Loads one bucket's depositor keys for routing (the per-depositor key
+/// Loads a model's candidate keys for routing (the per-depositor key
 /// registry view over provider_keys × depositor_bucket_positions).
 /// Deterministic order (provider key id) — `select` walks it stably.
-pub async fn keys_in_bucket(
+///
+/// A-050 fix (2026-11-19): admission follows the header CONTRACT, not
+/// string equality — a key is a candidate iff it is active, not invalid,
+/// its provider is the resolved bucket's provider, and it DECLARES some
+/// family F that serves the requested model (F == model, or F is a
+/// hyphen-prefix of model). A longer declaration by another depositor
+/// therefore no longer exiles a prefix-declaring key. The key's
+/// ACCOUNTING bucket is its own longest serving declaration F* (ties:
+/// smallest name): capacity, attribution, and earnings all book against
+/// F*, which is exactly the position row the deposit opened — so a "m"
+/// key serving "m-test" burns and earns in the "m" bucket.
+pub async fn keys_for_model(
     db: &Db,
     pool_id: &str,
+    model: &str,
     bucket: &Bucket,
 ) -> sqlx::Result<Vec<DepositorKey>> {
-    // LEFT JOIN: a key whose position row is missing still appears (with
-    // zero contributed/burned) — eligibility then filters it out; a
-    // silent drop would hide book drift from the routing layer.
+    // All of the provider's depositor keys joined with ALL their position
+    // rows for that provider; the per-key accounting family F* is derived
+    // from the key's own declarations, so the F* row is matched in Rust
+    // (a fixed SQL join cannot name a per-key family).
     let sql = db.sql(
         "SELECT pk.id AS pk_id, pk.depositor_id, pk.health, pk.status, pk.model_families, \
-           dbp.contributed_micros, dbp.burned_micros \
+           dbp.model_family AS pos_family, \
+           dbp.contributed_micros AS pos_contributed, dbp.burned_micros AS pos_burned \
          FROM provider_keys pk \
          LEFT JOIN depositor_bucket_positions dbp \
            ON dbp.pool_id = pk.pool_id AND dbp.depositor_id = pk.depositor_id \
-          AND dbp.provider = pk.provider AND dbp.model_family = ? \
+          AND dbp.provider = pk.provider \
          WHERE pk.pool_id = ? AND pk.depositor_id IS NOT NULL AND pk.provider = ? \
-         ORDER BY pk.id",
+           AND pk.status = 'active' AND pk.health != 'invalid' \
+         ORDER BY pk.id, dbp.model_family",
     );
     let rows = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
-        .bind(&bucket.model_family)
         .bind(pool_id)
         .bind(&bucket.provider)
         .fetch_all(db.pool())
         .await?;
-    let mut keys = Vec::new();
-    for row in &rows {
-        let raw_families: String = row.get("model_families");
-        let Ok(families) = serde_json::from_str::<Vec<String>>(&raw_families) else {
-            continue; // same skip rule as bucket_for_model
-        };
-        // The key serves THIS bucket only if it declares this family.
-        if !families.iter().any(|family| family == &bucket.model_family) {
-            continue;
-        }
-        let health: String = row.get("health");
-        let status: String = row.get("status");
-        keys.push(DepositorKey {
-            provider_key_id: row.get("pk_id"),
-            depositor_id: row.get("depositor_id"),
-            bucket: bucket.clone(),
-            contributed_micros: MicroUsd::new(
-                row.get::<Option<i64>, _>("contributed_micros").unwrap_or(0),
-            ),
-            burned_micros: MicroUsd::new(row.get::<Option<i64>, _>("burned_micros").unwrap_or(0)),
-            // Invariant 5: revoked ('revoked') and broken ('invalid')
-            // keys are skipped BEFORE any upstream call.
-            healthy: status == "active" && health != "invalid",
-        });
+    // Walk the grouped rows: one contiguous run per provider key,
+    // accumulated in a small struct (a 4-tuple of nested generics reads
+    // worse than it behaves).
+    /// One provider key's rows, mid-accumulation.
+    struct KeyGroup {
+        pk_id: String,
+        depositor_id: String,
+        families: Vec<String>,
+        /// (model_family, contributed_micros, burned_micros) per position.
+        positions: Vec<(String, i64, i64)>,
     }
+    let mut keys = Vec::new();
+    let mut current: Option<KeyGroup> = None;
+    // Emits one candidate from a finished group (or nothing, for keys
+    // that declare nothing serving the model).
+    let flush = |current: &mut Option<KeyGroup>, keys: &mut Vec<DepositorKey>| {
+        let Some(group) = current.take() else {
+            return;
+        };
+        // F* = the key's LONGEST declared family serving the model; ties
+        // break by the smallest family name (the same order resolution
+        // uses — deterministic for the same declarations).
+        let f_star = group
+            .families
+            .iter()
+            .filter(|family| family_serves(family, model))
+            .max_by(|a, b| {
+                a.len()
+                    .cmp(&b.len())
+                    .then_with(|| b.as_str().cmp(a.as_str()))
+            });
+        let Some(f_star) = f_star else {
+            return; // the key declares nothing that serves this model
+        };
+        // The position row for F* is the capacity this key may spend;
+        // a missing row means nothing was ever deposited for F* — the
+        // key appears with zero contributed and eligibility drops it
+        // (visible, never silently skipped: the LEFT JOIN keeps the key).
+        let (contributed, burned) = group
+            .positions
+            .iter()
+            .find(|(family, _, _)| family == f_star)
+            .map(|(_, contributed, burned)| (*contributed, *burned))
+            .unwrap_or((0, 0));
+        keys.push(DepositorKey {
+            provider_key_id: group.pk_id,
+            depositor_id: group.depositor_id,
+            bucket: Bucket {
+                provider: bucket.provider.clone(),
+                model_family: f_star.clone(),
+            },
+            contributed_micros: MicroUsd::new(contributed),
+            burned_micros: MicroUsd::new(burned),
+            // Invariant 5: revoked ('revoked') and broken ('invalid')
+            // keys never even load (SQL filter) — healthy is structural
+            // here, kept on the struct for the stub-contract shape.
+            healthy: true,
+        });
+    };
+    for row in &rows {
+        let pk_id: String = row.get("pk_id");
+        if current.as_ref().is_some_and(|group| group.pk_id != pk_id) {
+            flush(&mut current, &mut keys);
+        }
+        if current.is_none() {
+            let raw_families: String = row.get("model_families");
+            // Unparseable declaration ⇒ declares nothing (the same skip
+            // rule as bucket_for_model) — an empty family list flushes
+            // to no candidate.
+            let families = serde_json::from_str::<Vec<String>>(&raw_families).unwrap_or_default();
+            current = Some(KeyGroup {
+                pk_id,
+                depositor_id: row.get("depositor_id"),
+                families,
+                positions: Vec::new(),
+            });
+        }
+        if let Some(group) = current.as_mut() {
+            let position = (
+                row.try_get::<Option<String>, _>("pos_family")
+                    .ok()
+                    .flatten(),
+                row.try_get::<Option<i64>, _>("pos_contributed")
+                    .ok()
+                    .flatten(),
+                row.try_get::<Option<i64>, _>("pos_burned").ok().flatten(),
+            );
+            if let (Some(family), Some(contributed), Some(burned)) = position {
+                group.positions.push((family, contributed, burned));
+            }
+        }
+    }
+    flush(&mut current, &mut keys);
     Ok(keys)
 }
 
-/// Filters a bucket's keys down to those that MAY serve: the bucket
-/// matches AND the key is healthy AND the depositor has unexhausted
-/// capacity. Invariant 5: this runs BEFORE any upstream call — a key
-/// that cannot serve is never dialed.
-pub fn eligible_keys<'k>(keys: &'k [DepositorKey], bucket: &Bucket) -> Vec<&'k DepositorKey> {
+/// Filters a model's candidate keys down to those that MAY serve: healthy
+/// AND unexhausted capacity in their accounting bucket. Invariant 5: this
+/// runs BEFORE any upstream call — a key that cannot serve is never
+/// dialed. (Bucket fit was resolved at load time by [`keys_for_model`].)
+pub fn eligible_keys(keys: &[DepositorKey]) -> Vec<&DepositorKey> {
     keys.iter()
         .filter(|key| {
-            key.bucket == *bucket
-                && key.healthy
-                && (key.contributed_micros.micros() - key.burned_micros.micros()) > 0
+            key.healthy && (key.contributed_micros.micros() - key.burned_micros.micros()) > 0
         })
         .collect()
 }
@@ -497,16 +604,30 @@ async fn reserve_for_owner(
     Ok(result.rows_affected() == 1)
 }
 
-/// Applies `delta` to the position's burned tracker with no ceiling
-/// check — the settle/release half of A-020 (truth replaces estimate;
-/// the ceiling was enforced at reserve time).
+/// Applies `delta` to the position's burned tracker with the ceiling
+/// CLAMPED at the contribution — the settle/release half of A-020
+/// (truth replaces estimate), A-047-fixed (2026-11-19): the tracker may
+/// NEVER credit-burn past the key's remaining position, so an actual
+/// burn beyond the estimate lands at exactly `contributed` and the
+/// OVERAGE is absorbed (it is never attributed into a settlement, never
+/// becomes a payable — the operator eats the served-but-unbacked slice,
+/// rule-7 posture; the usage ROW keeps the honest metered cost, so
+/// metering integrity is untouched). The clamp is a CASE inside the
+/// single UPDATE — atomic on both engines, the same race-free shape as
+/// the reserve guard.
 async fn adjust_for_owner(db: &Db, owner: &KeyOwner, family: &str, delta: i64) -> sqlx::Result<()> {
+    // Portable clamp: CASE, not MIN()/LEAST() — SQLite's MIN is a scalar
+    // but Postgres's is aggregate-only (dual-DB rule: one SQL shape that
+    // parses on BOTH engines).
     let sql = db.sql(
         "UPDATE depositor_bucket_positions \
-         SET burned_micros = burned_micros + ?, updated_at = ? \
+         SET burned_micros = CASE WHEN burned_micros + ? <= contributed_micros \
+             THEN burned_micros + ? ELSE contributed_micros END, \
+             updated_at = ? \
          WHERE pool_id = ? AND depositor_id = ? AND provider = ? AND model_family = ?",
     );
     sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
+        .bind(delta)
         .bind(delta)
         .bind(crate::db::now_ms())
         .bind(&owner.pool_id)

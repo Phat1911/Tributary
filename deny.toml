@@ -34,6 +34,33 @@ ignore = [
   # ships a compatible release. Revisit on the next sqlx bump: deleting
   # this line IS the revisit test.
   "RUSTSEC-2026-0459", # libsqlite3-sys bundled-source CVE-2026-119375 — we link system sqlite (above)
+  # M9-D (2026-11-19, FOUNDER RULING — no dependency changes before the
+  # hackathon; ignore-with-justification + revisit tripwire). Full
+  # per-advisory detail lives in AUDIT.md A-055 (chrono/humantime) and
+  # A-056 (lettre). TRIPWIRE: revisit AFTER the Dev3pack hackathon
+  # (target 2026-11-24, before M11-A and the Nov 26 travel) — bump
+  # lettre to >=0.11.24 and DELETE every line in this block; CI going
+  # red on a deleted line is the tripwire firing, not a break.
+  # Unmaintained (not vulnerabilities); both reach the graph ONLY
+  # through the pool program's dev-dependency chain
+  # (solana-program-test → tarpc / chrono-humanize — the agave-4.1.2
+  # lattice, same boundary as the A-033 block above): never compiled
+  # into any release binary.
+  "RUSTSEC-2026-0542", # humantime unmaintained — dev-only via tarpc/agave
+  "RUSTSEC-2026-0543", # chrono unmaintained — dev-only via chrono-humanize/agave
+  # lettre 0.11.23 SMTP advisories (all fixed in 0.11.24 — a patch the
+  # founder ruling defers past the hackathon). Release-path via
+  # tributary-control's ALERT EMAILS only: exposure requires the
+  # operator-configured SMTP relay (or a network MITM on that
+  # connection, 0560) to be hostile; detections persist to the DB
+  # regardless — email is best-effort, no product data flows through
+  # SMTP. AUDIT.md A-056 records the honest severity and the tripwire.
+  "RUSTSEC-2026-0560", # STARTTLS response injection (MITM on the SMTP connection)
+  "RUSTSEC-2026-0561", # bare LF/CR dot-stuffing SMTP command injection
+  "RUSTSEC-2026-0562", # EHLO whitespace-only reply panic (DoS)
+  "RUSTSEC-2026-0563", # lettre 0.11.23 advisory (see A-056)
+  "RUSTSEC-2026-0564", # lettre 0.11.23 advisory (see A-056)
+  "RUSTSEC-2026-0565", # unbounded SMTP reply buffering (memory exhaustion)
 ]
 
 [licenses]

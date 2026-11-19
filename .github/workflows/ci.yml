@@ -88,13 +88,58 @@ jobs:
         # dormant-feature discipline; maxminddb is optional, not exempt).
         run: cargo clippy -p tributary-gateway --features geoip -- -D warnings
       - name: Test
-        # --no-fail-fast (added on m9/doctrine-suite): a default cargo run
-        # stops at the first failing binary, which hid the ledger half of
-        # the expected-red doctrine suite behind the gateway half's
-        # failures. On a green main this flag changes nothing; on a red
-        # run it surfaces EVERY failing binary — the full inventory the
-        # doctrine GO gate reads.
-        run: cargo test --workspace --no-fail-fast
+        # M9-D (2026-11-19): the workspace run EXCLUDES tributary-gateway,
+        # whose binaries are enumerated in the next step — because
+        # `crates/gateway/tests/m9c_audit_poc.rs` is Session C's
+        # assert-the-EXPLOIT standing-pin suite, EDIT-FROZEN by the M9-D
+        # kickoff (no ruling names its tests; the M8 fix session instead
+        # flipped its PoCs — this session's directive deliberately keeps
+        # them red). Its 10 exploit pins are EXPECTED-RED forever after
+        # (green there = an exploit is LIVE AGAIN), verified as a first-
+        # class invariant by the "Standing pins" step below — so the
+        # green-must-pass run must not include that binary. --no-fail-fast
+        # stays (doctrine GO-gate precedent): every failing binary is
+        # surfaced, never hidden behind the first failure.
+        run: cargo test --workspace --exclude tributary-gateway --no-fail-fast
+      - name: Test (gateway binaries, m9c standing pins excluded)
+        # The gateway's own suites — lib + bins + every integration binary
+        # EXCEPT the frozen m9c PoC suite (see the step above; the pins
+        # get their own verdict below). A new integration binary added
+        # later MUST be appended here or CI silently stops running it.
+        run: >
+          cargo test -p tributary-gateway --lib --bins --no-fail-fast &&
+          cargo test -p tributary-gateway --no-fail-fast
+          --test api --test concurrency --test m2_isolation --test m4_journeys
+          --test m55_gemini --test m5_journeys --test m9_doctrine
+          --test m9d_fix_pins --test streaming
+      - name: Standing pins (m9c — exploits MUST stay dead)
+        # The frozen PoC suite's verdict, INVERTED into the green
+        # contract: CI passes iff exactly the 10 exploit pins are RED
+        # (their findings fixed) and exactly the 2 clean probes are GREEN
+        # (honest behavior intact). A poc_* going green means its exploit
+        # regressed; a clean_* going red means the honest edges broke.
+        # Either way this step fails LOUD — the pins are the spec.
+        run: |
+          set -euo pipefail
+          LOG="$(mktemp)"
+          if cargo test -p tributary-gateway --test m9c_audit_poc --no-fail-fast >"$LOG" 2>&1; then
+            echo "::error::m9c went ALL GREEN — an exploit PoC passing means its finding is live again"
+            exit 1
+          fi
+          PASSED=$(grep -c '^test .* \.\.\. ok' "$LOG" || true)
+          FAILED=$(grep -c '^test .* \.\.\. FAILED' "$LOG" || true)
+          if [ "$PASSED" -ne 2 ] || [ "$FAILED" -ne 10 ]; then
+            echo "::error::expected 2 green clean probes + 10 red exploit pins, got $PASSED green / $FAILED red"
+            grep '^test ' "$LOG" || true
+            exit 1
+          fi
+          for clean in clean_fee_band_edges_and_window_validation_hold \
+                       clean_mid_window_deposit_and_row_reconciliation_hold; do
+            grep -q "^test $clean \.\.\. ok" "$LOG" || {
+              echo "::error::clean probe $clean is not green"; exit 1; }
+          done
+          echo "standing pins hold: 10 exploit PoCs red (exploits dead), 2 clean probes green"
+          grep '^test ' "$LOG"
 
   dashboard:
     name: Dashboard (pnpm install, lint, typecheck, build)
