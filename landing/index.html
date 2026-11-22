@@ -170,6 +170,74 @@ docker exec -it -e TRIBUTARY_DATABASE_URL=sqlite:///data/tributary.db \
       </p>
     </section>
 
+    <!-- ================= FAQ (the questions strangers actually ask) ================= -->
+    <section class="faq">
+      <h2>Honest answers to the obvious questions</h2>
+
+      <details>
+        <summary>How is this different from OpenRouter or API relays?</summary>
+        <p>They are hosted routers — one company's pipes. Your keys, traffic,
+        and usage data pass through <em>their</em> building. Tributary is the
+        building you own: self-hosted, open source, your rules, your data.
+        And on the market side they route spend — they don't settle
+        <em>surplus</em> credits between strangers.</p>
+      </details>
+
+      <details>
+        <summary>Why does reselling credits need a blockchain?</summary>
+        <p>Between friends, trust is fine. Between strangers, someone has to
+        hold the receipts — and if the operator holds them, the operator
+        grades their own homework. The optional V2 layer makes escrow a
+        program no single person can move, payouts un-rewritable, and every
+        money moment a public record. Inside one org you never see it.</p>
+      </details>
+
+      <details>
+        <summary>Why would anyone sell below the official price?</summary>
+        <p>Nobody resells credits they bought at face value — and we say so
+        publicly. The market lives on credits nobody bought: grants,
+        hackathon prizes, education allocations, expiring promos, and
+        committed spend a team has already paid for but won't consume. For
+        that supply the cost basis is zero or sunk — selling at half of face
+        is salvage, not a price war. Same economics as the gift-card resale
+        industry. A pool of N keys also serves N× the rate limits — for AI
+        agents, speed runs out before money.</p>
+      </details>
+
+      <details>
+        <summary>Why Solana and not another chain?</summary>
+        <p>The chain here is plumbing: micro-USD payouts, frequent windows.
+        That needs fees that don't eat a micro-payment, finality in seconds,
+        and mature tooling. Solana adds two things we'd have to fake
+        elsewhere: Token-2022's native NonTransferable receipts (claims that
+        <em>cannot</em> trade, by standard, not by promise) and a 2-of-2
+        Squads multisig vault. Users never need a wallet — so it's an
+        engineering choice, not a religion, and multi-chain remains a
+        roadmap option if operators ever pull elsewhere.</p>
+      </details>
+
+      <details>
+        <summary>Where does the first dollar come from?</summary>
+        <p>V1 is free forever, by strategy. The first dollar Tributary plans
+        to earn is an operator's settlement fee (a fixed 5–10% band) on V2
+        marketplace volume — paid by operators, never by members. V2's
+        launch gate includes provider/reseller agreements for credit
+        transfer; until that gate opens, this is exactly what you see: a
+        free, self-hosted governance tool. No dollar is planned from
+        ToS-gray flows.</p>
+      </details>
+
+      <details>
+        <summary>Does my data stay in my building?</summary>
+        <p>Yes — with one stated exception. The optional purpose classifier
+        is off by default, disclosed to members, and sends prompts only to
+        the classifier provider <em>you</em> configure. The default flow
+        keeps keys and usage inside your infrastructure, and the audit log
+        is append-only at the database level — direct UPDATE or DELETE is
+        refused by the engine itself.</p>
+      </details>
+    </section>
+
     <!-- ================= next (one line, D35) ================= -->
     <section class="next">
       <p>What comes next: the network layer — many operators, one settlement rail (V2).</p>

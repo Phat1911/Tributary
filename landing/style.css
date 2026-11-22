@@ -105,3 +105,34 @@ main { max-width: var(--maxw); margin: 0 auto; padding: 0 1.25rem; }
   font-size: .9rem; text-align: center;
 }
 .site-footer p { margin: .35rem 0; }
+
+/* ---------- FAQ (2026-11-22: the questions strangers actually ask) ---------- */
+.faq { padding: 2.5rem 0 0; }
+.faq h2 { font-size: 1.6rem; margin: 0 0 1rem; }
+.faq details {
+  background: var(--bg-raise);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 0;
+  margin-bottom: .6rem;
+}
+.faq summary {
+  cursor: pointer;
+  padding: .85rem 1rem;
+  font-weight: 600;
+  color: var(--ink);
+  list-style: none;           /* hide the default triangle… */
+  position: relative;
+}
+.faq summary::-webkit-details-marker { display: none; }
+.faq summary::after {
+  content: "+";               /* …replace it with an explicit one */
+  position: absolute; right: 1rem; top: .7rem;
+  color: var(--accent); font-weight: 700;
+}
+.faq details[open] summary::after { content: "–"; }
+.faq details p {
+  margin: 0; padding: 0 1rem 1rem;
+  color: var(--ink-dim); line-height: 1.55;
+}
+.faq details p em { color: var(--ink); font-style: normal; font-weight: 600; }
