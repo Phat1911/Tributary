@@ -128,8 +128,14 @@ per-org, off by default.
 4. **No token sale.** The protocol is open source; no ICO/token launch. Shares
    are ledger claims, not investments sold to the public. (Regulatory posture;
    revisit with counsel before V2 public launch.)
-5. **Chain-optional UX.** Renters and org members never need a wallet in V1/V2.
-   On-chain settlement is an operator/back-end concern.
+5. **Chain-optional UX.** Renters and org members never *need* a wallet in V1/V2.
+   On-chain settlement is an operator/back-end concern. **Wallet-free never
+   means the renter's money sits with the operator (D44):** a wallet-free
+   renter's prepayment is funded into the program's escrow on their behalf
+   through `prepay_renter` before it is spendable; a renter who has a wallet
+   may call `prepay_renter` directly. Either way the spendable balance is
+   bounded by the on-chain record, and refunds leave through
+   `refund_renter`. (The step is spelled out in §11.)
 
 ---
 
@@ -294,6 +300,20 @@ The chain cannot see off-chain routing; hence staged trust:
   contributed / total pool (DB ledger first; SPL token in V2).
 - **Consumption:** renter prepays (custodial balance) → each request debits
   renter, credits the pool revenue account.
+- **The custodial step (D44), stated explicitly:** a wallet-free renter pays
+  the operator off-chain (card/bank; D24: $50 cap, manual review). The
+  operator then calls `prepay_renter` for that renter, moving the same
+  amount as USDC into the program escrow. **Only then does the backend mark
+  the renter's balance spendable** — the off-chain `prepaid.fund` posting is
+  made against the on-chain record, never ahead of it. A renter with a
+  wallet calls `prepay_renter` themselves and has no custodial step. In both
+  cases `refund_renter` bounds refunds to `deposited − consumed`
+  (`prepaid ≤ Σ on-chain renter prepaid`; rule 7).
+- **What the custodial step still exposes (honest boundary):** between the
+  renter's off-chain payment and the operator's `prepay_renter` call, the
+  money is in the operator's hands and only the operator's. That window is
+  the reason for D24's cap; it is a trust in the operator, not in the
+  protocol. The wallet door removes it.
 - **Settlement (periodic):** revenue − operator fee = distributable; per
   depositor payout = distributable × share. DB double-entry ledger with clean
   `LedgerTrait` interface so the backend swaps to Solana without touching
@@ -315,6 +335,10 @@ The chain cannot see off-chain routing; hence staged trust:
   (frozen) after the program is battle-tested. *(No EVM proxy patterns —
   Solana programs are natively upgradeable via upgrade authority.)*
 - **Renter UX:** wallet-free. Custodial prepaid; chain settlement is back-end.
+  *(Clarified 2026-11-25, D44: "custodial" describes who performs the escrow
+  deposit for a wallet-free renter — the operator — not where the money rests.
+  Renter prepayments rest in the program escrow via `prepay_renter`; the
+  custodial step is §11.)*
 
 ---
 
@@ -360,7 +384,7 @@ for any hosted demo (Hetzner-class, student budget); English docs first.
 - [x] **M7** — `LedgerTrait` + double-entry ledger — implemented at f0c25ca→8bbee09 (migrations/0015_ledger.sql + guards in crates/common/src/db.rs; crates/ledger/{src/{money,chart,posting,ledger,error}.rs,tests/{harness,append_only,journey,properties,alarms}}; deploy/README.md ledger boundary; SPEC D38 same-commit; dual-DB 172/172 incl. 16 new tests, red-first burglar alarms), 2026-10-28
 - [x] **M8** — Solana program: shares, escrow *(D40/D41/D42 doctrine fix applied 2026-10-31; 28/28 program tests + CI green with the SBF prerequisite; **devnet soak COMPLETE 2026-11-01**: program deployed under the 2-of-2 Squads vault, renter round-trip proven through BOTH doors, D40 invariant live (vault untouched by contributions), registry NonTransferable-locked, pause/resume/upgrade/rotation all executed via 2-of-2 votes — evidence sigs in docs/devnet-soak-m8.md)* — implemented at d194d0f→7ccb844→c845b83+ `programs/pool/` + `scripts/devnet-soak/` + `scripts/devnet_soak_m8.sh` + `docs/devnet-soak-m8.md`, 2026-11-01
 - [x] **M9** — depositor mode: multi-key routing, pro-rata *(doctrine-suite A/B/C/D complete: 13/13 red→green at merge cf3f991; Session C audit A-047..A-054 with 12 dual-DB PoCs; Session D fix 7400f40 closed all seven findings — settle posts the books via the 7th template `capacity.consume` (founder-approved, A-049 ruling: books lead, positions are caches), settle idempotent via `settle_runs`, burn clamped at settle, serves-based bucket admission, in-doctrine fallback, hostile-usage hardening; exploit-death enforced in CI by the Standing-pins step: 10 red / 2 green exactly; shipped in v0.1.4 as experimental)* — implemented at 1ed4ac0 (B) + audit/m9c-session-c (C, ff-merged) + 7400f40 (D) `crates/gateway/src/{depositor_mode,m9_api,chat}.rs` + `crates/ledger/src/{posting,chart,settle}.rs` + `migrations/0016..0017` + `crates/gateway/tests/{m9_doctrine,m9d_fix_pins,m9c_audit_poc}.rs`, 2026-11-19
-- [ ] **M10** — renter self-serve (Polar checkout)
+- [ ] **M10** — renter self-serve (Polar checkout) *(scope note, D44: the checkout funds the custodial step of §11 — off-chain payment → operator calls the existing `prepay_renter` → balance becomes spendable only once the on-chain record exists; a renter with a wallet may call `prepay_renter` directly. Program side `prepay_renter`/`refund_renter` already exists from D40 (devnet-proven M8); M10 builds the gateway/backend side and the checkout.)*
 - [ ] **M11** — Merkle settlement + challenge window + bonds
 - [ ] **M12** — operator registry on-chain
 - [ ] **M13** — multi-operator routing & discovery
@@ -487,5 +511,6 @@ for any hosted demo (Hetzner-class, student budget); English docs first.
 | D41 | Utility marketplace, never a lending protocol; yield is pool-scoped; exits are two-door (2026-10-31, director doctrine audit on M8; executed same session) | **Tributary is a utility marketplace, never a lending protocol. Yield is pool-scoped: a depositor earns ONLY from real consumption of their contributed credits inside the pool they chose — pro-rata within that pool (M9). There is no global yield, no protocol-wide blending, no interest, no borrowing, no collateral anywhere. The claim mint is per-pool; claims of pool A can never draw on pool B's escrow. A depositor diversifies by depositing into multiple pools themselves — the protocol never blends for them.** Enforced structurally: every PDA derives from the single deployment's program id (adversarial `forged_claim_mint_from_foreign_deployment_refused`), no lending vocabulary exists in the program. Companion ruling from the same audit: every exit is TWO-DOOR — backend (assisted, rule 10) OR the named identity's own key (direct; exit-without-cooperation). Both doors share every ceiling; neither door can skip one. |
 | D42 | A pool is one program deployment per operator (2026-10-31, director doctrine audit on M8) | **A pool is ONE program deployment per operator — the singleton is by construction, and it is doctrine: the protocol is code + standards, never a shared place. Each operator's pool runs under their own multisig; there is no shared program authority, no protocol-level kill switch, and cross-pool drawing is structurally impossible. M12's registry indexes deployments — a phone book, never a bank.** |
 | D43 | M9 doctrine: pro-rata is routing-only; buckets are the off-chain accounting dimension (2026-11-01 founder rulings; recorded 2026-11-02 at the M9 doctrine-suite GO) | **M9 doctrine: pro-rata applies to ROUTING WEIGHTS, never to earnings attribution — earnings follow the burn; a depositor earns nothing in a period where their credits burned nothing. Buckets are the accounting dimension (provider + model family): attribution, routing fairness, and exhaustion are per-bucket; earnings never cross buckets. Buckets live OFF-CHAIN — in the M7 books and M11 Merkle leaves; the on-chain claim registry stays the aggregate per-depositor record. (Founder rulings 2026-11-01.)** Companion naming ruling (M9-A GO, 2026-11-02): the single contributed-value source is `claims.contributed` (per-depositor) — `capacity.contributed` is only the `deposit.capacity` posting's asset leg; routing and overdraw logic never read it. Recorded same-commit as the M9 doctrine suite (branch `m9/doctrine-suite`). |
+| D44 | Renter prepayments rest in escrow; wallet-free is the custodial step, never operator-held funds (2026-11-25, founder ruling after a director drift) | **Every spendable renter balance is backed by the on-chain escrow before it is spendable.** A wallet-free renter pays the operator off-chain (D24 cap + review); the operator must call `prepay_renter` for them, and only the on-chain record makes the balance spendable. A renter with a wallet calls `prepay_renter` directly and has no custodial step. Refunds leave only through `refund_renter`, bounded `deposited − consumed`. **Why recorded:** §4 rule 5 and §12 said "wallet-free / custodial prepaid" without stating the step in between, and the director repeatedly described renter prepayments as held by the operator with the escrow as a separate pot — which is not the design (D40: USDC enters the protocol exclusively as renter prepayment; `prepay_renter`/`refund_renter` exist and were proven on devnet in M8). This entry makes the step explicit so it cannot be lost again. Companion decisions from the same sitting: x402 (pay-per-request) evaluated and **declined** — fixed-price-before-serving conflicts with metered cost, one chain transaction per request, no refund path; the pay-per-request renter door is closed. Rule 10 (AGENTS numbering; §4 rule 5) wording updated in the same commit, with founder approval. |
 
 

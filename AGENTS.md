@@ -49,7 +49,7 @@ commit it or `git add -f` it; it is excluded in `.gitignore` by design).
 7. Prepaid renter balances are LIABILITIES, never revenue. Nightly solvency check: `cash:escrow ≥ Σ payable + Σ prepaid` — a violation is a High finding (§11).
 8. Operator fee stays within the 5–10% band (target 8%, D21). Changing it requires explicit user approval + a D-log entry.
 9. No token sale/ICO — shares are ledger claims only (§4.4).
-10. Chain-optional UX: members/renters never need a wallet; chain settlement is back-end only (§4.5).
+10. Chain-optional UX: members/renters never *need* a wallet; chain settlement is back-end only (§4.5). **Wallet-free never means the renter's money sits with the operator (SPEC D44):** a wallet-free renter's prepayment is funded into the program escrow via `prepay_renter` (by the operator, custodially) before it becomes spendable; a renter with a wallet calls `prepay_renter` directly; refunds leave only via `refund_renter`. Cite this when describing the renter side — "custodial prepaid" names the funding step, not where the money rests.
 
 ## Default workflow (cite items as "workflow step N", never "rule N")
 
