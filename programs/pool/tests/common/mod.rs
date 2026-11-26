@@ -27,13 +27,18 @@ use solana_instruction::{AccountMeta, Instruction};
 use solana_instruction_error::InstructionError;
 use solana_keypair::Keypair;
 use solana_message::Message;
-use solana_program_test::{BanksClient, BanksClientError, ProgramTest};
+use solana_program_test::{BanksClient, BanksClientError, ProgramTest, ProgramTestContext};
 use solana_pubkey::Pubkey;
 use solana_rent::Rent;
 use solana_signer::Signer;
 use solana_system_interface::instruction::create_account as system_create_account;
 use solana_transaction::Transaction;
+// The simulate path takes the versioned shape; `From<Transaction>` converts
+// the signed legacy transaction the harness builds.
+use solana_transaction::versioned::VersionedTransaction;
+// The subscriber's maps: ordered, so two mirrors compare deterministically.
 use solana_transaction_error::TransactionError;
+use std::collections::BTreeMap;
 // The program's own world: anchor 1.2 keeps ITS Pubkey (3.x line) inside
 // the program; `AccountInfo` and `ProgramResult` are single-version crates
 // shared with the harness.
@@ -93,6 +98,15 @@ pub const RENT_SYSVAR: Pubkey = Pubkey::new_from_array([
     0x58, 0xda, 0xee, 0x08, 0x9b, 0xa1, 0xfd, 0x44, 0xe3, 0xdb, 0xd9, 0x8a, 0x00, 0x00, 0x00, 0x00,
 ]);
 
+/// Clock sysvar address. `post_root` and `challenge` DECLARE the clock the
+/// same way `initialize` declares rent (see lib.rs): the program reads the
+/// slot from the account the test passes, so host and SBF execution share
+/// one source of time. Taken from the program crate's own re-export so the
+/// two sides can never disagree, and self-checked against the canonical
+/// string in `boot`.
+pub const CLOCK_SYSVAR: Pubkey =
+    Pubkey::new_from_array(anchor_lang::solana_program::clock::sysvar::ID.to_bytes());
+
 /// Token v3 `Mint` account length: COption tag(4)+key(32), supply u64,
 /// decimals u8, is_initialized u8, freeze COption(36) = 82.
 pub const MINT_LEN: usize = 82;
@@ -149,6 +163,38 @@ pub mod addrs {
     /// &bpf_loader_upgradeable)`.
     pub fn program_data() -> Pubkey {
         Pubkey::find_program_address(&[program_id().as_ref()], &BPF_LOADER_UPGRADEABLE).0
+    }
+
+    // ---- M11 settlement (seeds mirrored from programs/pool/src/settlement.rs)
+
+    /// A posted settlement root: `[settlement_root, window_le_u64]` — one
+    /// address per window, EVER (invariant 7).
+    pub fn root(window: u64) -> Pubkey {
+        Pubkey::find_program_address(&[pool::SEED_ROOT, &window.to_le_bytes()], &program_id()).0
+    }
+
+    /// A claim marker: `[claim_marker, root_pubkey, leaf_index_le_u32]` —
+    /// one address per leaf of a root, EVER (invariant 3).
+    pub fn claim_marker(root: &Pubkey, leaf_index: u32) -> Pubkey {
+        Pubkey::find_program_address(
+            &[
+                pool::SEED_CLAIM_MARKER,
+                root.as_ref(),
+                &leaf_index.to_le_bytes(),
+            ],
+            &program_id(),
+        )
+        .0
+    }
+
+    /// The operator bond record: `[pool, bond]`.
+    pub fn bond() -> Pubkey {
+        Pubkey::find_program_address(&[pool::SEED_POOL, pool::SEED_BOND], &program_id()).0
+    }
+
+    /// The operator bond VAULT token account: `[pool, bond_vault]`.
+    pub fn bond_vault() -> Pubkey {
+        Pubkey::find_program_address(&[pool::SEED_POOL, pool::SEED_BOND_VAULT], &program_id()).0
     }
 }
 
@@ -279,7 +325,11 @@ pub fn claim_supply(data: &[u8]) -> u64 {
 ///
 /// Consequence: run `anchor build` (or `cargo build-sbf`) before
 /// `cargo test -p pool`. A missing ELF is a hard error, never a skip.
-pub async fn start() -> (BanksClient, Keypair) {
+///
+/// Returns the validator BEFORE it starts: [`start`] and
+/// [`start_with_context`] both begin here, so every suite boots the
+/// identical rig.
+pub fn boot() -> ProgramTest {
     // Self-check the hardcoded program ids (decoded offline; verified here
     // against the canonical strings so a bad byte never slips through).
     assert_eq!(
@@ -293,6 +343,10 @@ pub async fn start() -> (BanksClient, Keypair) {
     assert_eq!(
         BPF_LOADER_UPGRADEABLE.to_string(),
         "BPFLoaderUpgradeab1e11111111111111111111111"
+    );
+    assert_eq!(
+        CLOCK_SYSVAR.to_string(),
+        "SysvarC1ock11111111111111111111111111111111"
     );
 
     // Locate the compiled program: explicit env override first, then the
@@ -361,9 +415,24 @@ pub async fn start() -> (BanksClient, Keypair) {
             rent_epoch: u64::MAX,
         },
     );
+    pt
+}
 
-    let (banks, payer, _last_blockhash) = pt.start().await;
+/// Boots the rig and returns a client plus a funded payer — the entry point
+/// every M8 suite uses (its behavior is unchanged by the M11-A split that
+/// extracted [`boot`]: same program bytes, same A-041 override).
+pub async fn start() -> (BanksClient, Keypair) {
+    let (banks, payer, _last_blockhash) = boot().start().await;
     (banks, payer)
+}
+
+/// Boots the rig and keeps the [`ProgramTestContext`]. The M11 suite needs
+/// it for ONE thing the bare client cannot do: `warp_to_slot`. The
+/// challenge window is measured in slots, and only the context can move the
+/// clock forward ("inside the window" has meaning only once a test can also
+/// stand outside it).
+pub async fn start_with_context() -> ProgramTestContext {
+    boot().start_with_context().await
 }
 
 /// Anchor instruction discriminator: sha256("global:<snake_name>")
@@ -528,6 +597,486 @@ pub async fn prepaid_amount(banks: &BanksClient, renter: &Pubkey) -> u64 {
         anchor_lang::AccountDeserialize::try_deserialize(&mut &ai.data[..])
             .expect("prepaid record deserializes");
     rec.amount
+}
+
+/// Reads a posted settlement root. `None` while the window has no root —
+/// "nothing was created" is itself a pinned outcome (invariant 1).
+pub async fn settlement_root(banks: &BanksClient, window: u64) -> Option<pool::SettlementRoot> {
+    let ai = banks.get_account(addrs::root(window)).await.unwrap()?;
+    Some(
+        anchor_lang::AccountDeserialize::try_deserialize(&mut &ai.data[..])
+            .expect("settlement root deserializes"),
+    )
+}
+
+/// Reads a claim marker. `None` while the leaf is unpaid — the marker's
+/// EXISTENCE is the one-claim fact (invariant 3).
+pub async fn claim_marker(
+    banks: &BanksClient,
+    root: &Pubkey,
+    leaf_index: u32,
+) -> Option<pool::ClaimMarker> {
+    let ai = banks
+        .get_account(addrs::claim_marker(root, leaf_index))
+        .await
+        .unwrap()?;
+    Some(
+        anchor_lang::AccountDeserialize::try_deserialize(&mut &ai.data[..])
+            .expect("claim marker deserializes"),
+    )
+}
+
+/// Reads the operator bond record's amount (the on-chain twin of the bond
+/// vault's USDC balance).
+pub async fn bond_amount(banks: &BanksClient) -> u64 {
+    let ai = banks
+        .get_account(addrs::bond())
+        .await
+        .unwrap()
+        .expect("bond record exists (fund_bond first)");
+    let rec: pool::OperatorBond =
+        anchor_lang::AccountDeserialize::try_deserialize(&mut &ai.data[..])
+            .expect("bond record deserializes");
+    rec.amount
+}
+
+/// Reads a Token v3 account's OWNER (offset 32: mint 32, then owner 32) —
+/// "who can move this balance" is a byte-level fact.
+pub fn v3_owner(data: &[u8]) -> Pubkey {
+    Pubkey::new_from_array(data[32..64].try_into().expect("32 owner bytes"))
+}
+
+/// Runs the instructions in SIMULATION (no state commit) and returns the
+/// program log lines — BanksClient's simulate path is the one surface that
+/// exposes logs, and `emit!` events land there as
+/// `Program data: <base64>`. (The M8 audit suite carries a private twin of
+/// this helper; this one is shared so the settlement suite can decode
+/// events the same way.)
+pub async fn simulate_logs(
+    banks: &BanksClient,
+    payer: &Keypair,
+    instructions: Vec<Instruction>,
+    signers: &[&Keypair],
+) -> Vec<String> {
+    let blockhash = banks.get_latest_blockhash().await.unwrap();
+    let mut all: Vec<&Keypair> = vec![payer];
+    all.extend(signers.iter());
+    let mut tx = Transaction::new_unsigned(Message::new(&instructions, Some(&payer.pubkey())));
+    tx.sign(&all, blockhash);
+    let res = banks
+        .simulate_transaction(VersionedTransaction::from(tx))
+        .await
+        .expect("simulation runs");
+    res.simulation_details
+        .expect("simulation details (logs) present")
+        .logs
+}
+
+// ---------------------------------------------------------------------------
+// Test-side Merkle tree — the OFF-CHAIN operator's view (what the books
+// build before posting a root). Deliberately independent of the program's
+// verifier: two implementations of one published recipe that must agree.
+// Recipe (programs/pool/src/settlement.rs, module docs): leaf = SHA-256(
+// depositor ‖ amount_le_u64); node = SHA-256(left ‖ right), ORDER-SENSITIVE;
+// an odd level pairs its last node with itself; proof = siblings bottom-up,
+// verified by walking the bits of the leaf's index.
+// ---------------------------------------------------------------------------
+pub mod merkle {
+    use super::*;
+    use sha2::{Digest, Sha256};
+
+    /// One payout leaf: WHO gets paid, and how much (micro-USDC).
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct Leaf {
+        pub depositor: Pubkey,
+        pub amount: u64,
+    }
+
+    /// SHA-256, with the harness's own `sha2` (the crate that already
+    /// computes the instruction discriminators — no new dependency).
+    pub fn sha256(data: &[u8]) -> [u8; 32] {
+        let mut out = [0u8; 32];
+        out.copy_from_slice(&Sha256::digest(data));
+        out
+    }
+
+    /// The leaf preimage: depositor pubkey, then the amount as LE u64.
+    pub fn leaf_hash(leaf: &Leaf) -> [u8; 32] {
+        let mut preimage = Vec::with_capacity(40);
+        preimage.extend_from_slice(leaf.depositor.as_ref());
+        preimage.extend_from_slice(&leaf.amount.to_le_bytes());
+        sha256(&preimage)
+    }
+
+    /// An interior node: the LEFT child's hash, then the RIGHT child's.
+    /// The preimage is 64 bytes where a leaf's is 40: the two layers
+    /// cannot stand in for each other.
+    pub fn node_hash(left: [u8; 32], right: [u8; 32]) -> [u8; 32] {
+        let mut preimage = Vec::with_capacity(64);
+        preimage.extend_from_slice(&left);
+        preimage.extend_from_slice(&right);
+        sha256(&preimage)
+    }
+
+    /// A payout tree: `levels[0]` is the leaf hashes, the last level is the
+    /// single root. The leaves are kept too, so a test reads a leaf's
+    /// amount and depositor off the tree it posted — never off a copy.
+    pub struct Tree {
+        leaves: Vec<Leaf>,
+        levels: Vec<Vec<[u8; 32]>>,
+    }
+
+    impl Tree {
+        /// Builds every level above the leaves.
+        pub fn new(leaves: &[Leaf]) -> Self {
+            assert!(!leaves.is_empty(), "a tree needs at least one leaf");
+            let mut levels = vec![leaves.iter().map(leaf_hash).collect::<Vec<_>>()];
+            while levels.last().expect("at least the leaf level").len() > 1 {
+                let prev = levels.last().expect("at least the leaf level");
+                let mut next = Vec::with_capacity(prev.len().div_ceil(2));
+                for pair in prev.chunks(2) {
+                    // An unpaired last node is its own sibling.
+                    next.push(node_hash(pair[0], *pair.last().expect("non-empty chunk")));
+                }
+                levels.push(next);
+            }
+            Tree {
+                leaves: leaves.to_vec(),
+                levels,
+            }
+        }
+
+        /// Leaf `index`, as it was built.
+        pub fn leaf(&self, index: usize) -> Leaf {
+            self.leaves[index]
+        }
+
+        /// The sum of the leaf amounts — the `total_payout` a root over this
+        /// tree attests to.
+        pub fn total(&self) -> u64 {
+            self.leaves.iter().map(|leaf| leaf.amount).sum()
+        }
+
+        /// The root to hand to `post_root`.
+        pub fn root(&self) -> [u8; 32] {
+            self.levels.last().expect("at least the leaf level")[0]
+        }
+
+        /// The inclusion proof for the leaf at `index`: one sibling per
+        /// level, from the leaf's level upward.
+        pub fn proof(&self, index: usize) -> Vec<[u8; 32]> {
+            let top = self.levels.len() - 1;
+            let mut proof = Vec::with_capacity(top);
+            let mut at = index;
+            for level in &self.levels[..top] {
+                // The pair partner: 2k pairs with 2k+1 and vice versa.
+                let partner = at ^ 1;
+                // An odd level's last node pairs with itself.
+                proof.push(level[partner.min(level.len() - 1)]);
+                at /= 2;
+            }
+            proof
+        }
+    }
+
+    /// Applies a proof the way the program must, walking the bits of
+    /// `leaf_index`: an even index puts the running hash on the LEFT of its
+    /// sibling, an odd one on the right. Used to build FORGERIES too (flip
+    /// a sibling, swap leaves, pick another tree) and to check the tree
+    /// builder against itself.
+    pub fn apply_proof(leaf_index: u32, mut h: [u8; 32], proof: &[[u8; 32]]) -> [u8; 32] {
+        let mut at = leaf_index;
+        for sibling in proof {
+            h = if at.is_multiple_of(2) {
+                node_hash(h, *sibling)
+            } else {
+                node_hash(*sibling, h)
+            };
+            at /= 2;
+        }
+        h
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Event decoding — invariant 8's instrument. Anchor's `emit!` lands one
+// `Program data: <base64>` line per event: an 8-byte discriminator
+// (sha256("event:<StructName>")[..8]) followed by the borsh fields in
+// declaration order.
+// ---------------------------------------------------------------------------
+pub mod events {
+    use super::*;
+
+    /// Every event this program declares — M8's eight and M11's six.
+    pub const NAMES: &[&str] = &[
+        "PoolOpened",
+        "ContributionRecorded",
+        "ClaimsBurned",
+        "PrepayRecorded",
+        "PrepayRefunded",
+        "PauseToggled",
+        "BackendAuthorityRotated",
+        "AdminAuthorityRotated",
+        "BondFunded",
+        "RootPosted",
+        "ClaimPaid",
+        "RootChallenged",
+        "ChallengeResolved",
+        "BondSlashed",
+    ];
+
+    /// One emitted event: its declared name and its fields, verbatim.
+    #[derive(Debug, PartialEq, Eq)]
+    pub struct Decoded {
+        pub name: &'static str,
+        /// Everything after the 8-byte discriminator.
+        pub body: Vec<u8>,
+    }
+
+    /// Standard-alphabet base64 decode (padding-aware). Anchor logs event
+    /// data through `sol_log_data`, and the harness deliberately carries no
+    /// base64 dependency (the M8 audit suite hand-rolls the same 20 lines).
+    fn b64_decode(s: &str) -> Vec<u8> {
+        fn val(c: u8) -> u32 {
+            match c {
+                b'A'..=b'Z' => u32::from(c - b'A'),
+                b'a'..=b'z' => u32::from(c - b'a' + 26),
+                b'0'..=b'9' => u32::from(c - b'0' + 52),
+                b'+' => 62,
+                b'/' => 63,
+                _ => 0, // '=' padding contributes nothing
+            }
+        }
+        let bytes: Vec<u8> = s.bytes().filter(|b| *b != b'=').collect();
+        let mut out = Vec::with_capacity(bytes.len() * 3 / 4);
+        for chunk in bytes.chunks(4) {
+            let b0 = val(chunk[0]) as u8;
+            let b1 = val(chunk[1]) as u8;
+            out.push((b0 << 2) | (b1 >> 4));
+            if chunk.len() > 2 {
+                let b2 = val(chunk[2]) as u8;
+                out.push((b1 << 4) | (b2 >> 2));
+                if chunk.len() > 3 {
+                    let b3 = val(chunk[3]) as u8;
+                    out.push((b2 << 6) | b3);
+                }
+            }
+        }
+        out
+    }
+
+    /// `sha256("event:<name>")[..8]` — the same recipe as `disc`, with the
+    /// event namespace.
+    pub fn event_disc(name: &str) -> [u8; 8] {
+        let mut out = [0u8; 8];
+        out.copy_from_slice(&Sha256::digest(format!("event:{name}").as_bytes())[..8]);
+        out
+    }
+
+    /// Decodes EVERY `Program data:` line of a log into a named event. A
+    /// line whose discriminator matches no declared event panics — an
+    /// undeclared event is exactly the kind of state change a subscriber
+    /// could not reconstruct (invariant 8), so it must stop the test.
+    pub fn decode(logs: &[String]) -> Vec<Decoded> {
+        let known: Vec<([u8; 8], &'static str)> =
+            NAMES.iter().map(|name| (event_disc(name), *name)).collect();
+        let mut out = Vec::new();
+        for line in logs {
+            if let Some(payload) = line.strip_prefix("Program data: ") {
+                let bytes = b64_decode(payload);
+                assert!(
+                    bytes.len() >= 8,
+                    "event shorter than a discriminator: {line}"
+                );
+                let (disc, body) = bytes.split_at(8);
+                let name = known
+                    .iter()
+                    .find(|(d, _)| d.as_slice() == disc)
+                    .unwrap_or_else(|| {
+                        panic!("UNDECLARED event (discriminator {disc:?}) — invariant 8 needs every event named")
+                    })
+                    .1;
+                out.push(Decoded {
+                    name,
+                    body: body.to_vec(),
+                });
+            }
+        }
+        out
+    }
+
+    // Field readers for borsh layouts — fixed widths, little-endian.
+
+    /// A `u64` field at `offset` in the body.
+    pub fn u64_at(body: &[u8], offset: usize) -> u64 {
+        u64::from_le_bytes(body[offset..offset + 8].try_into().expect("u64 field fits"))
+    }
+
+    /// An `i64` field (slots and timestamps) at `offset` in the body.
+    pub fn i64_at(body: &[u8], offset: usize) -> i64 {
+        i64::from_le_bytes(body[offset..offset + 8].try_into().expect("i64 field fits"))
+    }
+
+    /// A `u32` field at `offset` in the body.
+    pub fn u32_at(body: &[u8], offset: usize) -> u32 {
+        u32::from_le_bytes(body[offset..offset + 4].try_into().expect("u32 field fits"))
+    }
+
+    /// A `Pubkey` field at `offset` in the body.
+    pub fn pubkey_at(body: &[u8], offset: usize) -> Pubkey {
+        Pubkey::new_from_array(
+            body[offset..offset + 32]
+                .try_into()
+                .expect("32 pubkey bytes"),
+        )
+    }
+
+    /// A `[u8; 32]` field at `offset` in the body.
+    pub fn bytes32_at(body: &[u8], offset: usize) -> [u8; 32] {
+        body[offset..offset + 32].try_into().expect("32 bytes")
+    }
+
+    /// A `bool` field at `offset` in the body.
+    pub fn bool_at(body: &[u8], offset: usize) -> bool {
+        body[offset] != 0
+    }
+
+    /// The one event of `name` in a decoded list — or a panic naming what
+    /// WAS emitted instead (a missing event is a missing state change).
+    pub fn one<'a>(decoded: &'a [Decoded], name: &str) -> &'a Decoded {
+        decoded.iter().find(|d| d.name == name).unwrap_or_else(|| {
+            panic!(
+                "no {name} event — emitted: {:?}",
+                decoded.iter().map(|d| d.name).collect::<Vec<_>>()
+            )
+        })
+    }
+
+    /// How a subscriber that reads ONLY events sees one settlement root.
+    #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+    pub struct RootMirror {
+        pub merkle_root: [u8; 32],
+        pub total_payout: u64,
+        pub posted_at: i64,
+        pub bond: u64,
+        pub challenger: Pubkey,
+        pub evidence: [u8; 32],
+        pub ruled_slash: u64,
+        pub victim: Pubkey,
+    }
+
+    /// How a subscriber that reads ONLY events sees one paid leaf.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct MarkerMirror {
+        pub depositor: Pubkey,
+        pub amount: u64,
+    }
+
+    /// A SUBSCRIBER: the settlement state rebuilt from events alone — no
+    /// account is ever read. Invariant 8 is exactly the claim that this
+    /// mirror equals the chain once every instruction has run.
+    #[derive(Debug, Default, PartialEq, Eq)]
+    pub struct Subscriber {
+        /// Vault USDC, rebuilt from the `*_after` mirrors (the A-042 contract).
+        pub vault: u64,
+        /// The operator bond, rebuilt from `BondFunded` / `BondSlashed`.
+        pub bond: u64,
+        /// Window → the root as the events describe it.
+        pub roots: BTreeMap<u64, RootMirror>,
+        /// Status by window, beside the immutable root fields.
+        pub status: BTreeMap<u64, pool::RootStatus>,
+        /// (window, leaf_index) → who was paid, how much.
+        pub markers: BTreeMap<(u64, u32), MarkerMirror>,
+    }
+
+    impl Subscriber {
+        /// Applies ONE decoded event. Offsets are the borsh layouts of the
+        /// event structs in programs/pool/src/{lib,settlement}.rs.
+        pub fn apply(&mut self, event: &Decoded) {
+            let b = &event.body;
+            match event.name {
+                // ---- M8 events that move the vault mirror
+                "PrepayRecorded" | "PrepayRefunded" => {
+                    // renter(32) amount(8) vault_balance_after(8) prepaid_after(8)
+                    self.vault = u64_at(b, 40);
+                }
+                // ---- M11 events
+                "BondFunded" => {
+                    // funder(32) amount(8) bond_after(8)
+                    self.bond = u64_at(b, 40);
+                }
+                "BondSlashed" => {
+                    // window(8) amount(8) victim(32) bond_after(8)
+                    self.bond = u64_at(b, 48);
+                    self.status.insert(u64_at(b, 0), pool::RootStatus::Slashed);
+                }
+                "RootPosted" => {
+                    // window(8) merkle_root(32) total_payout(8) bond(8) posted_at(8)
+                    let window = u64_at(b, 0);
+                    self.roots.insert(
+                        window,
+                        RootMirror {
+                            merkle_root: bytes32_at(b, 8),
+                            total_payout: u64_at(b, 40),
+                            bond: u64_at(b, 48),
+                            posted_at: i64_at(b, 56),
+                            ..RootMirror::default()
+                        },
+                    );
+                    self.status.insert(window, pool::RootStatus::Active);
+                }
+                "ClaimPaid" => {
+                    // window(8) leaf_index(4) depositor(32) amount(8) vault_balance_after(8)
+                    self.markers.insert(
+                        (u64_at(b, 0), u32_at(b, 8)),
+                        MarkerMirror {
+                            depositor: pubkey_at(b, 12),
+                            amount: u64_at(b, 44),
+                        },
+                    );
+                    self.vault = u64_at(b, 52);
+                }
+                "RootChallenged" => {
+                    // window(8) challenger(32) evidence(32)
+                    let window = u64_at(b, 0);
+                    let root = self.roots.entry(window).or_default();
+                    root.challenger = pubkey_at(b, 8);
+                    root.evidence = bytes32_at(b, 40);
+                    self.status.insert(window, pool::RootStatus::Challenged);
+                }
+                "ChallengeResolved" => {
+                    // window(8) root_stands(1) slash_amount(8) victim(32)
+                    let window = u64_at(b, 0);
+                    let stands = bool_at(b, 8);
+                    let root = self.roots.entry(window).or_default();
+                    root.ruled_slash = if stands { 0 } else { u64_at(b, 9) };
+                    root.victim = if stands {
+                        Pubkey::default()
+                    } else {
+                        pubkey_at(b, 17)
+                    };
+                    self.status.insert(
+                        window,
+                        if stands {
+                            pool::RootStatus::Active
+                        } else {
+                            pool::RootStatus::ProvenFalse
+                        },
+                    );
+                }
+                // ---- M8 events that touch no settlement mirror
+                "PoolOpened"
+                | "ContributionRecorded"
+                | "ClaimsBurned"
+                | "PauseToggled"
+                | "BackendAuthorityRotated"
+                | "AdminAuthorityRotated" => {}
+                // `decode` only yields names from NAMES, and every name is
+                // handled above — a new event must be added HERE.
+                _ => unreachable!("every declared event is applied: {}", event.name),
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -699,5 +1248,208 @@ pub mod ixs {
                 AccountMeta::new_readonly(*admin, true),
             ],
         )
+    }
+
+    // ---- M11 settlement. Each builder mirrors its Accounts struct in
+    // programs/pool/src/settlement.rs field-for-field, in order.
+
+    /// `fund_bond(amount)` — signer: backend (gate AND rent payer).
+    pub fn fund_bond(
+        pool: &Pubkey,
+        backend: &Pubkey,
+        source: &Pubkey,
+        usdc_mint: &Pubkey,
+        bond_vault: &Pubkey,
+        bond: &Pubkey,
+        amount: u64,
+    ) -> Instruction {
+        ix(
+            "fund_bond",
+            (amount,),
+            vec![
+                AccountMeta::new_readonly(*pool, false),
+                AccountMeta::new(*backend, true), // backend_authority (mut, signer)
+                AccountMeta::new(*source, false),
+                AccountMeta::new_readonly(*usdc_mint, false),
+                AccountMeta::new(*bond_vault, false),
+                AccountMeta::new(*bond, false),
+                AccountMeta::new_readonly(TOKEN_V3, false),
+                AccountMeta::new_readonly(solana_system_interface::program::ID, false),
+            ],
+        )
+    }
+
+    /// `post_root(window, merkle_root, total_payout)` — signer: backend.
+    /// The vault is READ-ONLY in this list: posting a root cannot move it.
+    // Eight parameters — one per account the instruction names, in wire
+    // order (the harness convention: builders mirror their Accounts struct).
+    #[allow(clippy::too_many_arguments)]
+    pub fn post_root(
+        pool: &Pubkey,
+        backend: &Pubkey,
+        settlement_root: &Pubkey,
+        vault: &Pubkey,
+        bond: &Pubkey,
+        window: u64,
+        merkle_root: [u8; 32],
+        total_payout: u64,
+    ) -> Instruction {
+        ix(
+            "post_root",
+            (window, merkle_root, total_payout),
+            vec![
+                AccountMeta::new_readonly(*pool, false),
+                AccountMeta::new(*backend, true), // backend_authority (mut, signer)
+                AccountMeta::new(*settlement_root, false),
+                AccountMeta::new_readonly(*vault, false),
+                AccountMeta::new_readonly(*bond, false),
+                AccountMeta::new_readonly(TOKEN_V3, false),
+                AccountMeta::new_readonly(CLOCK_SYSVAR, false),
+                AccountMeta::new_readonly(solana_system_interface::program::ID, false),
+            ],
+        )
+    }
+
+    /// `claim(window, leaf_index, depositor, amount, proof)` — THE TWO
+    /// DOORS: `authority` is the backend (assisted) or the leaf's depositor
+    /// (direct); `payer` pays the marker's rent (any funded key).
+    #[allow(clippy::too_many_arguments)]
+    pub fn claim(
+        pool: &Pubkey,
+        authority: &Pubkey,
+        settlement_root: &Pubkey,
+        destination: &Pubkey,
+        vault: &Pubkey,
+        claim_marker: &Pubkey,
+        payer: &Pubkey,
+        window: u64,
+        leaf_index: u32,
+        depositor: &Pubkey,
+        amount: u64,
+        proof: &[[u8; 32]],
+    ) -> Instruction {
+        ix(
+            "claim",
+            (window, leaf_index, depositor, amount, proof),
+            vec![
+                AccountMeta::new_readonly(*pool, false),
+                AccountMeta::new_readonly(*authority, true), // the one signer (either door)
+                AccountMeta::new_readonly(*settlement_root, false),
+                AccountMeta::new(*destination, false),
+                AccountMeta::new(*vault, false),
+                AccountMeta::new(*claim_marker, false),
+                AccountMeta::new(*payer, true), // rent payer
+                AccountMeta::new_readonly(TOKEN_V3, false),
+                AccountMeta::new_readonly(solana_system_interface::program::ID, false),
+            ],
+        )
+    }
+
+    /// `challenge(window, evidence)` — signer: ANY key (SPEC §10).
+    pub fn challenge(
+        pool: &Pubkey,
+        challenger: &Pubkey,
+        settlement_root: &Pubkey,
+        window: u64,
+        evidence: [u8; 32],
+    ) -> Instruction {
+        ix(
+            "challenge",
+            (window, evidence),
+            vec![
+                AccountMeta::new_readonly(*pool, false),
+                AccountMeta::new_readonly(*challenger, true),
+                AccountMeta::new(*settlement_root, false),
+                AccountMeta::new_readonly(CLOCK_SYSVAR, false),
+            ],
+        )
+    }
+
+    /// `resolve_challenge(window, ruling)` — signer: the admin (multisig).
+    pub fn resolve_challenge(
+        pool: &Pubkey,
+        admin: &Pubkey,
+        settlement_root: &Pubkey,
+        bond: &Pubkey,
+        window: u64,
+        ruling: Ruling<'_>,
+    ) -> Instruction {
+        ix(
+            "resolve_challenge",
+            (window, ruling),
+            vec![
+                AccountMeta::new_readonly(*pool, false),
+                AccountMeta::new_readonly(*admin, true), // admin_authority
+                AccountMeta::new(*settlement_root, false),
+                AccountMeta::new_readonly(*bond, false),
+            ],
+        )
+    }
+
+    /// `slash_bond(window)` — NO signer: it executes a ruling that already
+    /// exists; amount and destination come from the root account.
+    pub fn slash_bond(
+        pool: &Pubkey,
+        settlement_root: &Pubkey,
+        bond_vault: &Pubkey,
+        bond: &Pubkey,
+        destination: &Pubkey,
+        window: u64,
+    ) -> Instruction {
+        ix(
+            "slash_bond",
+            (window,),
+            vec![
+                AccountMeta::new_readonly(*pool, false),
+                AccountMeta::new(*settlement_root, false),
+                AccountMeta::new(*bond_vault, false),
+                AccountMeta::new(*bond, false),
+                AccountMeta::new(*destination, false),
+                AccountMeta::new_readonly(TOKEN_V3, false),
+            ],
+        )
+    }
+
+    /// A RAW Token v3 transfer — what any key would try against the vault
+    /// without going through the program (invariant 10's attack shape).
+    pub fn raw_v3_transfer(
+        source: &Pubkey,
+        destination: &Pubkey,
+        authority: &Pubkey,
+        amount: u64,
+    ) -> Instruction {
+        super::raw_token::transfer(source, destination, authority, amount)
+    }
+
+    /// The multisig's ruling, as an external integrator hand-encodes it for
+    /// `resolve_challenge`: borsh writes an enum as its variant byte
+    /// followed by that variant's fields.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum Ruling<'a> {
+        /// The root stands — variant 0, no fields.
+        Stands,
+        /// The root is false — variant 1, then `slash_amount`, then `victim`.
+        False {
+            slash_amount: u64,
+            victim: &'a Pubkey,
+        },
+    }
+
+    // Borsh by hand (the harness's borsh is pinned without its `derive`
+    // feature): variant byte, then the fields, in declaration order.
+    impl BorshSerialize for Ruling<'_> {
+        fn serialize<W: std::io::Write>(&self, writer: &mut W) -> std::io::Result<()> {
+            match self {
+                Ruling::Stands => writer.write_all(&[0u8]),
+                Ruling::False {
+                    slash_amount,
+                    victim,
+                } => {
+                    writer.write_all(&[1u8])?;
+                    slash_amount.serialize(writer)?;
+                    victim.serialize(writer)
+                }
+            }
+        }
     }
 }
