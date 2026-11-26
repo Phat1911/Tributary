@@ -90,9 +90,26 @@
 7. **The journey's Part A was not executed here** — it needs the real Gemini key and the demo stack, both protected or absent. Its values are the runbook's, and its PASS column states relationships, not numbers. Part B and the §0 check were executed.
 8. **SPEC.md is untouched.** §14 has no tracker line for SCREEN-1 (a runbook step card, not a milestone), so nothing was ticked and no spec text changed. No dependency was added or changed (workflow step 10: nothing to justify).
 
-**Session residue (step 13):** *(filled in by the close-out note below.)*
+**Session residue (step 13) — everything below was removed at close, and the removal verified:**
+- Containers `tributary-screen1-check`, `tributary-screen1-upstream`, `tributary-screen1-upstream2`, `screen-journey-gw`, `screen-journey-mock` — each removed with `docker rm -f -v`, which also removes its anonymous `/data` volume. The final container, volume and network lists were compared with a snapshot taken before this session created anything: nothing of this session remains.
+- Network `screen1-net` — removed. It carried an explicit subnet because this machine's daemon refuses any new bridge (pre-existing, item 1 below).
+- Port 8147 (bound to 127.0.0.1 only) — released. No mock ever listened on a host port: both mocks ran as containers with no published port.
+- No host process outlived the session — each run closed its own Chromium; `pgrep` is clean.
+- The harness under `target/screen1-check/` (scripts, a private env file holding throwaway credentials, state, logs, screenshots, the Docker snapshot) — removed with a guarded delete; `target/` is otherwise untouched (31 entries besides it, before and after).
+- No file was created outside the repo: the `/tmp` scratch was deleted in the command that created it, and no browser was installed (`~/.cache/ms-playwright` does not exist — Chromium came from the pre-existing `target/pw-browsers`).
+
+**Kept on purpose (deliberate deliverables):** two screenshots of the final tree, in the repo's designated gitignored evidence folder — `apps/dashboard/test-results/screen1-settlement-books.png` and `apps/dashboard/test-results/screen1-settlement-settled.png`.
+
+**Inherited or pre-existing — NOT this session's, not touched, listed so that nobody inherits a surprise:**
+1. **Docker cannot allocate a new bridge network from its predefined pools** ("all predefined address pools have been fully subnetted"), although only a handful of bridges exist. Inspect with `docker network ls`. Not diagnosed further (no readable `/etc/docker/daemon.json`); any throwaway network on this machine needs `--subnet`, as this session's did.
+2. **The demo stack appeared mid-session** — `tributary-m9exp` (0.0.0.0:8113), `m9exp-upstream`, the volume `m9exp-data` and the network `m9exp-net`, created 2026-11-26 19:01–19:04 local time by someone else while this session ran. Protected and untouched: this session used port 8147 only, and its only contact was read-only (`docker inspect`, plus one `GET /org/settlement/` on 8113 that returned 404 — which confirms that the demo stack serves the OLD dashboard, and that this session's rebuilds of `apps/dashboard/out` never leaked into it: that container mounts only its own volume).
+3. **Older stopped containers and anonymous volumes** from earlier sessions (`elegant_sutherland`, `agitated_colden`, `trib-pg-m5`, `condescending_booth`, `backend`, `tributary-pg-m55`, and the anonymous volumes) — present in the session-start snapshot, left alone; not this session's to clear.
+4. **`git push` prints `fatal: unable to get credential storage lock in 1000 ms: Permission denied` and then succeeds** (exit 0, remote head verified) — a credential-helper complaint that predates this session.
+5. **Gitignored build outputs rebuilt from the new `main`:** `apps/dashboard/out`, `apps/dashboard/.next`, `apps/dashboard/tsconfig.tsbuildinfo`.
 
 **Fast jump:** `apps/dashboard/app/org/settlement/page.tsx` · `apps/dashboard/components/app-shell.tsx` · `apps/dashboard/lib/api.ts` · `apps/dashboard/lib/format.ts` · `docs/founder-journey-settlement-screen.md` · `AUDIT.md` (A-061 new and open, A-062 new) · `PLAN.md` (this entry)
+
+**Close-out note (push + CI verdict, workflow step 8; residue, step 13):** main pushed `3a57262..1f12408` — the feature head is `1f12408` (one commit: the screen, the nav link, the wire types, the formatter, the journey, and the PLAN + AUDIT records). **CI verdict of the pushed head `1f12408`: GREEN — [run 45822383779](https://github.com/Phat1911/Tributary/actions/runs/45822383779), all five jobs:** Rust (fmt, clippy, test — including the pool SBF suite and the gateway binaries) ✓ · Dashboard (lint, typecheck, build) ✓ · Dashboard E2E (Playwright — J6 + F1) ✓ · OpenAI SDK contract ✓ · Supply chain (cargo-deny) ✓. Residue removed as listed above; the checkout is left on `main`, clean. `m11/doctrine-suite` was never checked out (read once with `git show`, only to pick unused AUDIT ids). **Still open after this session: A-061 (high) — it needs a ruling.**
 
 ### 2026-11-26 — CI-GREEN CHORE: dependency patch (RUSTSEC-2026-0592) + a deterministic A-052 pin
 
