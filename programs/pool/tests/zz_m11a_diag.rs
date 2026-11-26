@@ -8,7 +8,8 @@
 //! and that the constraint refusals fire where the contract says.
 mod common;
 
-use anchor_lang::{AccountSerialize, Discriminator};
+use anchor_lang::Discriminator;
+use borsh::BorshSerialize;
 use common::{addrs, ixs, merkle};
 use solana_account::{Account, AccountSharedData};
 use solana_keypair::Keypair;
@@ -20,9 +21,12 @@ use solana_signer::Signer;
 const USDC: u64 = 1_000_000;
 const WINDOW: u64 = 1;
 
-fn seeded<T: AccountSerialize + Discriminator>(value: &T) -> Account {
+fn seeded<T: BorshSerialize + Discriminator>(value: &T) -> Account {
     let mut data = T::DISCRIMINATOR.to_vec();
-    value.try_serialize(&mut data).expect("serializes");
+    // Borsh fields only: `#[account]`'s own `try_serialize` prepends the
+    // discriminator AGAIN — the first run of this diagnostic read the
+    // discriminator back as the `amount`.
+    value.serialize(&mut data).expect("serializes");
     Account {
         lamports: Rent::default().minimum_balance(data.len()),
         data,
