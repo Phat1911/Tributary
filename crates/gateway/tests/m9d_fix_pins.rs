@@ -719,11 +719,16 @@ async fn a_zero_usage_report_burns_the_reserve_estimate() {
 
 /// A-052 (founder-ruled in-doctrine): when the weighted pick cannot hold
 /// the estimate, the request FALLS BACK to a sibling depositor's capacity
-/// — members are served while any candidate can hold the estimate. The
-/// fixture drives traffic (weight ∝ contributed, so exhaustion of the
-/// small depositor arrives by CHANCE — the loop hunts it, capped well
-/// above the expected ~60 requests), then pins the post-exhaustion
-/// behavior: every request still served, by B.
+/// — members are served while any candidate can hold the estimate.
+///
+/// The setup is DETERMINISTIC (2026-11-26 — this pin used to flake on
+/// CI): A is deposited ALONE and drained to exhaustion first, so every
+/// hunt request is A's — exactly 10, no weighted pick involved — and B
+/// is deposited only AFTER the hunt, holding its full 200,000. While B
+/// rode the hunt too, the weighted pick drained it as well (5/6 of the
+/// requests), and a long hunt left B under the estimate as well: the
+/// fallback requests then had nothing left to serve with (≈19% per DB
+/// leg, `P(NB(10, 1/6) ≥ 65)`).
 #[tokio::test]
 async fn a_refused_pick_falls_back_to_sibling_capacity() {
     for td in test_dbs().await {
@@ -743,16 +748,6 @@ async fn a_refused_pick_falls_back_to_sibling_capacity() {
             &mock_a.base_url,
         )
         .await;
-        let (_dep_b, _kb) = deposit(
-            &app,
-            &token,
-            &pool,
-            "openai",
-            "m-test",
-            200_000,
-            &mock_b.base_url,
-        )
-        .await;
         let raw = member_key(&app, &token, &org, &pool).await;
 
         // max_tokens 100 ⇒ estimate 15,150; the honest mock meters
@@ -762,7 +757,8 @@ async fn a_refused_pick_falls_back_to_sibling_capacity() {
         const ESTIMATE: i64 = 15_150;
 
         // Hunt A's exhaustion: drive until A's remaining < ESTIMATE.
-        // Every one of these requests must be OK (A or B holds it).
+        // Every one of these requests must be OK (A holds it — it is the
+        // pool's only depositor until the hunt ends).
         let mut exhausted = false;
         for _ in 0..400 {
             let (status, resp) = call(&app, chat_req(&raw, &body)).await;
@@ -784,8 +780,23 @@ async fn a_refused_pick_falls_back_to_sibling_capacity() {
             "[{td_name}] A served while it could"
         );
 
-        // THE PIN: A is exhausted, B holds 200,000-ish — five more
-        // requests, ALL served via fallback, zero premature 429s.
+        // B enters ONLY NOW, with nothing spent — the sibling capacity
+        // the pin needs is guaranteed by construction instead of by the
+        // luck of the draws (setup fix, 2026-11-26).
+        let (_dep_b, _kb) = deposit(
+            &app,
+            &token,
+            &pool,
+            "openai",
+            "m-test",
+            200_000,
+            &mock_b.base_url,
+        )
+        .await;
+
+        // THE PIN: A is exhausted, B holds its full 200,000 — five more
+        // requests, ALL served, zero premature 429s. A pick on A is
+        // refused and falls back to B; a pick on B is served directly.
         for _ in 0..5 {
             let (status, resp) = call(&app, chat_req(&raw, &body)).await;
             assert_eq!(
