@@ -68,7 +68,20 @@ async fn diag_clock_warp_and_the_revised_account_lists() {
         &common::program_id(),
     );
     assert_eq!(root_addr, addrs::root(1));
+    let (bond_addr, bond_bump) =
+        Pubkey::find_program_address(&[pool::SEED_POOL, pool::SEED_BOND], &common::program_id());
+    assert_eq!(bond_addr, addrs::bond());
     let mut pt = common::boot();
+    // `post_root` needs an existing bond record (the suite gets it from
+    // `fund_bond`; the first run of this diagnostic forgot to seed it and
+    // stopped at 3012 AccountNotInitialized).
+    pt.add_account(
+        addrs::bond(),
+        seeded(&pool::OperatorBond {
+            amount: 10 * USDC,
+            bump: bond_bump,
+        }),
+    );
     pt.add_account(
         addrs::root(1),
         seeded(&pool::SettlementRoot {
