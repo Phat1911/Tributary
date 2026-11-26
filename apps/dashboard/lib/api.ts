@@ -267,6 +267,48 @@ export interface ClassifierConfig {
   shadow_distinct_members: number;
 }
 
+// ---- M9: depositor mode (SPEC D43) — the settlement screen's wire types ----
+
+/** One depositor × bucket position, from GET /pools/{id}/bucket-positions.
+ *  The bucket is (provider, model family); every amount is whole
+ *  micro-USD. Root pools only — the endpoint refuses org (V1) pools. */
+export interface BucketPosition {
+  depositor_id: string;
+  provider: string;
+  model_family: string;
+  contributed_micros: number;
+  burned_micros: number;
+  earned_micros: number;
+}
+
+/** POST /pools/{id}/settle body. The window is the run's identity: the
+ *  same (from_ms, to_ms) on the same pool replays its first answer
+ *  verbatim, so a retry after a lost response can never settle twice. */
+export interface SettleRequest {
+  from_ms: number;
+  to_ms: number;
+  /** Basis points. The server enforces rule 8's 5–10% band. */
+  fee_bps: number;
+}
+
+/** One payout row: depositor × bucket × amount (an M11 Merkle leaf). */
+export interface SettlePayout {
+  depositor_id: string;
+  provider: string;
+  model_family: string;
+  amount_micros: number;
+}
+
+/** POST /pools/{id}/settle response. Conserved to the micro-unit:
+ *  fee_micros + Σ payouts[].amount_micros + undistributed_micros ==
+ *  distributable_micros. */
+export interface SettleResponse {
+  distributable_micros: number;
+  fee_micros: number;
+  undistributed_micros: number;
+  payouts: SettlePayout[];
+}
+
 /** PUT body for the classifier config. */
 export interface ClassifierConfigInput {
   base_url: string;

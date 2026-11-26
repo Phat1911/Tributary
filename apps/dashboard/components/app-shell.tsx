@@ -7,6 +7,7 @@ import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useEffect, type ReactNode } from "react";
 import { Settings2,
+  HandCoins,
   KeyRound,
   LogOut,
   Scale,
@@ -39,6 +40,12 @@ const NAV: NavItem[] = [
     href: "/org",
     label: "Organization",
     icon: <Users className="size-4" aria-hidden />,
+    roles: ["org_admin"],
+  },
+  {
+    href: "/org/settlement",
+    label: "Settlement",
+    icon: <HandCoins className="size-4" aria-hidden />,
     roles: ["org_admin"],
   },
   {
