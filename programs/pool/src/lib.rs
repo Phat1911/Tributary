@@ -612,8 +612,8 @@ pub mod pool_program {
     // until Session B implements these — without editing a test. The
     // account lists, constraints, events and the Merkle contract live in
     // `settlement.rs`; the doc comment on each handler says what Session B
-    // owes it (the check order is Session B's to choose — only the
-    // OUTCOME each test pins is fixed here).
+    // owes it (the check order is Session B's to choose EXCEPT where a doc
+    // comment fixes it — only the OUTCOME each test pins is fixed here).
     //
     // `todo!()` reads none of its parameters, and the parameter NAMES are
     // part of the contract (Anchor names the argument-struct fields after
@@ -640,7 +640,8 @@ pub mod pool_program {
     /// `RootExceedsVault` and NOTHING is created or moved; invariant 7 — a
     /// second root for the same window dies at account creation (the
     /// `SettlementRoot` PDA is plain `init`), so roots are append-only.
-    /// Emits `RootPosted`.
+    /// A fresh root starts `Active` with `stands_ruled = false` and
+    /// `paid_out = 0` (invariants 11 and 12 read both). Emits `RootPosted`.
     #[allow(unused_variables)] // stub: see the section note above
     pub fn post_root(
         ctx: Context<PostRoot>,
@@ -653,15 +654,27 @@ pub mod pool_program {
 
     /// Claim one leaf: verify the inclusion proof against the published
     /// root, pay `amount` USDC from the vault to the leaf's named
-    /// `depositor`, and write the leaf's claim marker.
+    /// `depositor`, write the leaf's claim marker, and add `amount` to the
+    /// root's `paid_out`.
     ///
     /// Doctrine: invariant 2 — a proof that does not hash up to the root
     /// refuses with `InvalidProof`; invariant 3 — the marker is plain
-    /// `init`, so a replayed leaf dies at account creation; invariant 4 —
-    /// THE TWO DOORS (the backend, or `depositor`'s own key — anything
-    /// else is `ExitAuthority`) and the destination must be owned by
-    /// `depositor`; invariant 5 — a root that is not `Active` refuses with
-    /// `RootFrozen`. Emits `ClaimPaid`.
+    /// `init`, so a replayed leaf dies at account creation, and the proof
+    /// is bound to its index; invariant 4 — THE TWO DOORS (the backend, or
+    /// `depositor`'s own key — anything else is `ExitAuthority`) and the
+    /// destination must be owned by `depositor`; invariant 5 — a root that
+    /// is not `Active` refuses with `RootFrozen`; invariant 11 — a root
+    /// whose challenge window is still open refuses with
+    /// `ChallengeWindowOpen`, unless the multisig ruled it stands; invariant
+    /// 12 — a claim that would push `paid_out` past `total_payout` refuses
+    /// with `PayoutExceedsTotal`. Emits `ClaimPaid`.
+    ///
+    /// Session B owes the FIRST TWO of these IN THIS ORDER — the suite pins
+    /// which refusal a shape gets: (1) the status, else `RootFrozen`;
+    /// (2) the window, else `ChallengeWindowOpen`. A root challenged while
+    /// still INSIDE its window is frozen, not merely delayed. After those:
+    /// the proof, the door, the declared total, then the transfer, the
+    /// marker and `paid_out += amount`.
     #[allow(unused_variables)] // stub: see the section note above
     pub fn claim(
         ctx: Context<Claim>,
@@ -679,16 +692,19 @@ pub mod pool_program {
     ///
     /// Doctrine: invariant 5 — `clock.slot` must be inside
     /// `posted_at + CHALLENGE_WINDOW_SLOTS`, or the challenge refuses with
-    /// `ChallengeWindowClosed`; the root turns `Challenged` and its claims
-    /// freeze until the multisig rules. Emits `RootChallenged`.
+    /// `ChallengeWindowClosed`; the root turns `Challenged`, its claims
+    /// freeze until the multisig rules, and `stands_ruled` is cleared (a new
+    /// challenge outranks an earlier "stands"). Emits `RootChallenged`.
     #[allow(unused_variables)] // stub: see the section note above
     pub fn challenge(ctx: Context<Challenge>, window: u64, evidence: [u8; 32]) -> Result<()> {
         todo!("Session B: challenge")
     }
 
     /// The multisig rules on a challenge. `Ruling::RootStands` returns the
-    /// root to `Active`; `Ruling::RootFalse { slash_amount, victim }`
-    /// marks it `ProvenFalse` and records the exact slash and the victim.
+    /// root to `Active` and sets `stands_ruled` — the ruling waives the rest
+    /// of the challenge window (invariant 11); `Ruling::RootFalse {
+    /// slash_amount, victim }` marks it `ProvenFalse` and records the exact
+    /// slash and the victim.
     ///
     /// Doctrine: invariant 6 — a ruling may not exceed the bond that backs
     /// the root (`SlashExceedsBond`); a ruling that the root stands

@@ -11,7 +11,7 @@
 //! lamport or token unit moves — that abort IS the "expected RED" the
 //! doctrine suite (`tests/m11_doctrine.rs`) pins, test by test.
 //!
-//! # The doctrine this module encodes (ten sentences — the test names)
+//! # The doctrine this module encodes (twelve sentences — the test names)
 //!
 //! 1. A root whose total payout exceeds the vault's USDC fails closed and
 //!    moves nothing.
@@ -28,18 +28,37 @@
 //! 9. Settlement mints no transferable receipt.
 //! 10. No single key and no upgrade authority can move vault funds; only a
 //!     satisfied program instruction can.
+//! 11. No payout leaves the vault before the challenge window has passed.
+//! 12. A root never pays out more than its declared total.
+//!
+//! Sentences 11 and 12 come from the GO-gate ruling of 2026-11-26, and so
+//! does the claim rule below.
 //!
 //! # The shape, in one paragraph
 //!
 //! The operator posts one Merkle root per settlement WINDOW. Every leaf names
 //! one depositor and a micro-USDC amount. The vault (renter prepaid USDC —
 //! the only on-chain money, D40) pays each leaf ONCE, to a wallet the leaf's
-//! named depositor owns. Anyone may challenge a root while its challenge
-//! window is open; a challenge FREEZES that root's payouts until the
-//! multisig rules. A ruling that the root stands unfreezes it; a ruling that
-//! the root is false records the exact slash and the victim, and the slash
-//! then executes as that exact number — never more, never less, never
-//! without such a ruling.
+//! named depositor owns — but NOT YET: a root pays nothing until its
+//! challenge window has passed, unless the multisig has ruled the root
+//! stands (invariant 11), and it never pays more than the total it declared
+//! (invariant 12). Anyone may challenge a root while its challenge window is
+//! open; a challenge FREEZES that root's payouts until the multisig rules.
+//! A ruling that the root stands unfreezes it and waives the rest of its
+//! window; a ruling that the root is false records the exact slash and the
+//! victim, and the slash then executes as that exact number — never more,
+//! never less, never without such a ruling.
+//!
+//! # The claim rule, in one line (invariants 5 and 11)
+//!
+//! A claim succeeds iff the root is `Active` AND (the challenge window has
+//! passed OR the multisig ruled the root stands). The handler therefore
+//! checks, IN THIS ORDER: (1) the status, else `RootFrozen`; (2) the window,
+//! else `ChallengeWindowOpen`. The order is load-bearing: a root challenged
+//! while still INSIDE its window must refuse with `RootFrozen` (the suite
+//! pins it) — a freeze is not a delay. `challenge` clears `stands_ruled`,
+//! so "the multisig ruled it stands" always means the LATEST challenge, if
+//! any.
 //!
 //! # Why each invariant is STRUCTURAL where it can be
 //!
@@ -53,6 +72,8 @@
 //! | 4 (named depositor only) | `destination.owner == depositor` as an account constraint | which door the signer opens |
 //! | 10 (no key moves the vault) | the vault's token authority is the pool PDA (M8) — no key can sign for it | nothing |
 //! | 6 (nothing without a ruling) | the ruled amount and victim come from the ROOT account — `slash_bond` takes neither as an argument | refuse unless `ProvenFalse`; check the destination's owner AFTER that (so the refusal names its reason) |
+//! | 11 (no payout before the window passes) | a check, not an address | `claim`: refuse `ChallengeWindowOpen` unless the window has passed or the multisig ruled the root stands |
+//! | 12 (never more than the declared total) | a check, not an address | `claim`: refuse `PayoutExceedsTotal` unless `paid_out + amount ≤ total_payout`; then add `amount` to `paid_out` |
 //!
 //! `init` (not `init_if_needed`) is a deliberate choice on both markers: a
 //! refused replay surfaces as an account-creation failure rather than a
@@ -139,7 +160,9 @@ pub const CHALLENGE_WINDOW_SLOTS: i64 = 100;
 /// variant ordinal) — mirrors the way `Pool` stores `paused`.
 #[derive(InitSpace, AnchorSerialize, AnchorDeserialize, Clone, PartialEq, Eq, Debug)]
 pub enum RootStatus {
-    /// Posted and unchallenged (or the challenge was overruled): leaves pay.
+    /// Posted, or challenged and then ruled to stand. Leaves pay once the
+    /// challenge window has passed — or at once, if the multisig ruled the
+    /// root stands (`stands_ruled`).
     Active,
     /// Challenged inside the window, awaiting the multisig: payouts frozen.
     Challenged,
@@ -154,7 +177,8 @@ pub enum RootStatus {
 /// so the derive below is what puts it on the wire.
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, PartialEq, Eq, Debug)]
 pub enum Ruling {
-    /// The root stands: it returns to `Active`, nothing is slashed.
+    /// The root stands: it returns to `Active`, nothing is slashed, and the
+    /// ruling waives the rest of its challenge window (`stands_ruled`).
     RootStands,
     /// The root is proven false: EXACTLY `slash_amount` micro-USDC of the
     /// bond goes to `victim`. No amount, no victim, no ruling.
@@ -166,8 +190,9 @@ pub enum Ruling {
 // ---------------------------------------------------------------------------
 
 /// One posted root. Created once per window by `post_root` and never
-/// rewritten: only `status` and the ruling fields ever change after birth
-/// (invariant 7 — roots are append-only).
+/// rewritten: only `status`, `stands_ruled`, `challenger`, `evidence`,
+/// `ruled_slash`, `victim` and `paid_out` ever change after birth — every
+/// other field is write-once (invariant 7 — roots are append-only).
 #[account] // generates the 8-byte discriminator + Owner impl (owner = this program)
 #[derive(InitSpace)] // const INIT_SPACE: the exact borsh size, for `space = 8 + INIT_SPACE`
 pub struct SettlementRoot {
@@ -196,6 +221,13 @@ pub struct SettlementRoot {
     pub ruled_slash: u64,
     /// Whom the ruled slash pays (default pubkey until ruled).
     pub victim: Pubkey,
+    /// True once the multisig has ruled the LATEST challenge (if any) to
+    /// stand: that ruling waives the rest of the challenge window for this
+    /// root (invariant 11). `challenge` clears it.
+    pub stands_ruled: bool,
+    /// Micro-USDC this root has paid out so far. A claim requires
+    /// `paid_out + amount <= total_payout` (invariant 12).
+    pub paid_out: u64,
     /// Bump of this PDA.
     pub bump: u8,
 }
@@ -340,7 +372,9 @@ pub struct PostRoot<'info> {
 
 /// Accounts for `claim` — THE TWO DOORS (D41) for payouts. `authority` is
 /// the backend (assisted) or the leaf's depositor (direct); the handler
-/// decides which, exactly like `burn_claims` and `refund_renter`.
+/// decides which, exactly like `burn_claims` and `refund_renter`. The claim
+/// rule itself (Active, and the window passed or ruled stands) is the
+/// handler's — see "The claim rule, in one line" in the module docs.
 #[derive(Accounts)]
 // `#[instruction(...)]` lists the handler's arguments IN DECLARATION ORDER
 // (Anchor type-checks the two against each other at compile time); the
@@ -399,6 +433,11 @@ pub struct Claim<'info> {
     /// funded key (the transaction's fee payer, a relayer) can pay.
     #[account(mut)]
     pub payer: Signer<'info>,
+
+    /// The clock, DECLARED like in `post_root` and `challenge`: the handler
+    /// reads the slot from it to apply the challenge-window rule
+    /// (invariant 11).
+    pub clock: Sysvar<'info, Clock>,
 
     /// Token v3 ONLY. No Token-2022 program and no mint account appear in
     /// this list: a claim moves USDC and cannot mint anything
@@ -576,18 +615,22 @@ pub struct BondSlashed {
 /// WHY THIS IS A STUB AND NOT A DEPENDENCY: the kickoff forbids new
 /// dependencies, and the Anchor cohort this program builds on re-exports NO
 /// hashing primitive (`anchor_lang::solana_program` has no `hash` module),
-/// so a Merkle proof cannot be verified through an existing dependency.
-/// Session B picks ONE of two sanctioned roads and records the choice in
-/// PLAN (workflow step 10):
-/// (a) a pure-Rust SHA-256 written into this module — no `unsafe`, no
-///     dependency, pinned to the FIPS 180-4 test vectors; or
-/// (b) the `sol_sha256` syscall, declared in this module — that needs
-///     `unsafe`, which AGENTS.md allows only with an AUDIT.md entry.
+/// so a Merkle proof cannot be verified through an existing dependency
+/// (AUDIT A-058). The GO gate RULED the road (2026-11-26, ruling R1):
 ///
-/// Both satisfy the contract above; nothing else about the stub depends on
-/// the choice.
+/// * **(b) THE RULING — the `sol_sha256` syscall**, declared in this module
+///   as an `extern "C"` function. It needs `unsafe`, which AGENTS.md admits
+///   only with an AUDIT.md entry — **Session B files that entry with the
+///   implementation** (what the `unsafe` covers and why it is sound).
+/// * **(c) The fallback — `sha2`**, the harness's own hasher, as a program
+///   dependency: only if the syscall road turns out to be blocked. It is a
+///   new `[dependencies]` line, so it still needs workflow step 10 and the
+///   director's approval, and it must not move the A-033 lattice.
+///
+/// Either satisfies the contract above; nothing else about the stub depends
+/// on the choice.
 pub fn sha256(_data: &[u8]) -> [u8; 32] {
-    todo!("Session B: SHA-256 (FIPS 180-4) — see the doc comment for the two sanctioned roads")
+    todo!("Session B: SHA-256 (FIPS 180-4) by the sol_sha256 syscall — see the doc comment")
 }
 
 /// `SHA-256(depositor ‖ amount_le_u64)` — a leaf of the payout tree.

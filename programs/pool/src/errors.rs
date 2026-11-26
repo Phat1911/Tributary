@@ -94,4 +94,14 @@ pub enum PoolError {
     /// over-issuing, so the ruling itself refuses.
     #[msg("Ruled slash exceeds the bond backing this root")]
     SlashExceedsBond,
+    // ---- added by the M11-A GO-gate ruling (2026-11-26) --------------------
+    /// Invariant 11 — the root is `Active` but its challenge window is still
+    /// open and the multisig has not ruled it stands: no payout leaves the
+    /// vault yet.
+    #[msg("Challenge window still open — no payout leaves the vault yet")]
+    ChallengeWindowOpen,
+    /// Invariant 12 — this claim would push the root's `paid_out` past its
+    /// declared `total_payout`.
+    #[msg("Claim would pay out more than the root's declared total")]
+    PayoutExceedsTotal,
 }
