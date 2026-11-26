@@ -58,4 +58,40 @@ pub enum PoolError {
     /// declaration order, and the suites pin existing indices.
     #[msg("Initializer is not this deployment's upgrade authority")]
     DeploymentAuthority,
+    // ---- M11 settlement (doctrine-suite Session A, 2026-11-26) ------------
+    // Appended after DeploymentAuthority for the same reason it was appended
+    // last: Anchor numbers variants from 6000 in declaration order, and
+    // every suite pins codes by index. Each name below IS one doctrine
+    // sentence; the M11 suite (`tests/m11_doctrine.rs`) pins each code.
+    /// Invariant 1 — a root whose total payout exceeds the vault's USDC is
+    /// refused at `post_root`, atomically: no root, no movement.
+    #[msg("Root total payout exceeds the vault's USDC — refused, nothing moved")]
+    RootExceedsVault,
+    /// Invariant 2 — the claim's inclusion proof does not hash up to the
+    /// published root (wrong sibling, tampered leaf, foreign tree).
+    #[msg("Claim inclusion proof does not verify against the published root")]
+    InvalidProof,
+    /// Invariant 4 — the payout destination is not owned by the leaf's NAMED
+    /// depositor (the operator, or anyone else, cannot route a payout away
+    /// from the leaf's identity).
+    #[msg("Payout destination is not owned by the leaf's named depositor")]
+    WrongPayoutDestination,
+    /// Invariant 5 — the root is not `Active` (challenged or proven false):
+    /// its payouts are frozen until the multisig rules.
+    #[msg("Root payouts are frozen — the root is not Active")]
+    RootFrozen,
+    /// Invariant 5 (complement) — the challenge window has closed; a late
+    /// challenge cannot freeze a root.
+    #[msg("Challenge window for this root has closed")]
+    ChallengeWindowClosed,
+    /// Invariant 6 — `slash_bond` on a root that is not `ProvenFalse`
+    /// (never challenged, still challenged, ruling "stands", or already
+    /// slashed): nothing is slashed.
+    #[msg("Bond slash refused — the root is not proven false")]
+    RootNotProvenFalse,
+    /// Invariant 6 — the ruling's `slash_amount` exceeds the bond that backs
+    /// the root. "Exactly the ruled amount" forbids both clamping and
+    /// over-issuing, so the ruling itself refuses.
+    #[msg("Ruled slash exceeds the bond backing this root")]
+    SlashExceedsBond,
 }

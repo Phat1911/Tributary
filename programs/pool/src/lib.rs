@@ -9,8 +9,17 @@
 //! (rule 1, Path B); the claim mint merely records its micro-USD valuation.
 //! USDC enters exclusively as renter prepayment (the M10 rail, shipped
 //! here as `prepay_renter`) and leaves as refunds (`refund_renter`) or,
-//! from M11, settle payouts. It deliberately does NOT settle — Merkle
-//! batches, ceilings, challenges and bonds are M11 (SPEC §14 V2).
+//! from M11, settle payouts.
+//!
+//! # M11 settlement — DECLARED, not implemented (M11-A, 2026-11-26)
+//!
+//! The settlement layer (Merkle roots, claims, challenges, bonds — SPEC
+//! §12) is declared in `settlement.rs` and dispatched from the six handlers
+//! at the bottom of this file. Every one of their bodies is `todo!()`: on
+//! this branch a call to any settlement instruction aborts before a single
+//! token unit moves. That abort is the expected RED of the doctrine suite
+//! `tests/m11_doctrine.rs`, which Session B implements to green without
+//! editing a test (workflow step 14).
 //!
 //! # Why the vault never holds depositor principal (D40 teaching story)
 //!
@@ -115,9 +124,15 @@ use anchor_spl::token_interface::{self, Mint, TokenAccount as InterfaceTokenAcco
 declare_id!("9pEmyxftdRUZV2iw6ZzCNgZz9QygG53i7APNaWcEHvjX");
 
 pub mod errors;
+pub mod settlement;
 pub mod state;
 
 pub use errors::PoolError;
+// GLOB re-export, deliberately: `#[derive(Accounts)]` defines the
+// `__client_accounts_*` macros WHERE the struct lives, and `#[program]`
+// imports them by CRATE-ROOT path — a named re-export carries the types
+// but not the macros (the compiler says only "unresolved import `crate`").
+pub use settlement::*;
 pub use state::{
     DECIMALS, Pool, RenterPrepaid, SEED_CLAIM, SEED_CLAIM_MINT, SEED_POOL, SEED_PREPAID, SEED_VAULT,
 };
@@ -156,11 +171,13 @@ fn require_exit_authority(
 
 /// # Instructions
 ///
-/// Nine instructions, no more: initialize, record_contribution,
+/// Nine implemented instructions: initialize, record_contribution,
 /// burn_claims, prepay_renter, refund_renter, pause, resume, and two
-/// authority rotations. There is intentionally no `transfer_claim`, no
-/// `close_claim`, no instruction that moves depositor USDC — the absence
-/// of an instruction IS a security property here (rules 1, 9 and 10).
+/// authority rotations — plus six M11 settlement handlers that are
+/// DECLARED with `todo!()` bodies (M11-A stubs, at the bottom of this
+/// module). There is intentionally no `transfer_claim`, no `close_claim`,
+/// no instruction that takes depositor USDC as principal — the absence of
+/// an instruction IS a security property here (rules 1, 9 and 10).
 #[program]
 pub mod pool_program {
     use super::*;
@@ -250,7 +267,8 @@ pub mod pool_program {
         // storing it lets later instructions re-derive the PDA signer
         // without recomputing (and without trusting a passed-in bump).
         pool.bump = ctx.bumps.pool;
-        // Reserved bytes start zeroed; M11 settlement params land there.
+        // Reserved bytes start zeroed. Still unused: M11-A keeps settlement
+        // state in its own PDA family (`settlement.rs`), not in this field.
         pool.reserved = [0u8; 64];
 
         // ---- Claim mint bootstrap: Token-2022 + NonTransferable ----
@@ -583,6 +601,126 @@ pub mod pool_program {
         ctx.accounts.pool.admin_authority = new;
         emit!(AdminAuthorityRotated { old, new });
         Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // M11 SETTLEMENT — six instructions DECLARED, none implemented
+    // (doctrine-suite mode, Session A, 2026-11-26; workflow step 14).
+    //
+    // Each body is `todo!()`: the instruction aborts, atomically, before
+    // anything moves. The doctrine suite `tests/m11_doctrine.rs` is RED
+    // until Session B implements these — without editing a test. The
+    // account lists, constraints, events and the Merkle contract live in
+    // `settlement.rs`; the doc comment on each handler says what Session B
+    // owes it (the check order is Session B's to choose — only the
+    // OUTCOME each test pins is fixed here).
+    //
+    // `todo!()` reads none of its parameters, and the parameter NAMES are
+    // part of the contract (Anchor names the argument-struct fields after
+    // them), so each stub carries `#[allow(unused_variables)]`. The allow
+    // goes away with the `todo!()` it belongs to.
+    // -----------------------------------------------------------------------
+
+    /// Bond the operator: move `amount` USDC from the operator's OWN wallet
+    /// into the bond vault and grow the bond record. Backend-signed (the
+    /// operator bonds its own money); emits `BondFunded`.
+    ///
+    /// Session B owes: the transfer, the record increment, the event, and
+    /// the usual refusals (paused pool, zero amount).
+    #[allow(unused_variables)] // stub: see the section note above
+    pub fn fund_bond(ctx: Context<FundBond>, amount: u64) -> Result<()> {
+        todo!("Session B: fund_bond")
+    }
+
+    /// Post a settlement root: record, for `window`, the Merkle root and
+    /// the total it pays, backed by the operator's current bond and stamped
+    /// with the slot (the challenge window starts here).
+    ///
+    /// Doctrine: invariant 1 — `total_payout > vault.amount` refuses with
+    /// `RootExceedsVault` and NOTHING is created or moved; invariant 7 — a
+    /// second root for the same window dies at account creation (the
+    /// `SettlementRoot` PDA is plain `init`), so roots are append-only.
+    /// Emits `RootPosted`.
+    #[allow(unused_variables)] // stub: see the section note above
+    pub fn post_root(
+        ctx: Context<PostRoot>,
+        window: u64,
+        merkle_root: [u8; 32],
+        total_payout: u64,
+    ) -> Result<()> {
+        todo!("Session B: post_root")
+    }
+
+    /// Claim one leaf: verify the inclusion proof against the published
+    /// root, pay `amount` USDC from the vault to the leaf's named
+    /// `depositor`, and write the leaf's claim marker.
+    ///
+    /// Doctrine: invariant 2 — a proof that does not hash up to the root
+    /// refuses with `InvalidProof`; invariant 3 — the marker is plain
+    /// `init`, so a replayed leaf dies at account creation; invariant 4 —
+    /// THE TWO DOORS (the backend, or `depositor`'s own key — anything
+    /// else is `ExitAuthority`) and the destination must be owned by
+    /// `depositor`; invariant 5 — a root that is not `Active` refuses with
+    /// `RootFrozen`. Emits `ClaimPaid`.
+    #[allow(unused_variables)] // stub: see the section note above
+    pub fn claim(
+        ctx: Context<Claim>,
+        window: u64,
+        leaf_index: u32,
+        depositor: Pubkey,
+        amount: u64,
+        proof: Vec<[u8; 32]>,
+    ) -> Result<()> {
+        todo!("Session B: claim")
+    }
+
+    /// Challenge a root: freeze its payouts. Permissionless — any key may
+    /// challenge, inside the window (SPEC §10).
+    ///
+    /// Doctrine: invariant 5 — `clock.slot` must be inside
+    /// `posted_at + CHALLENGE_WINDOW_SLOTS`, or the challenge refuses with
+    /// `ChallengeWindowClosed`; the root turns `Challenged` and its claims
+    /// freeze until the multisig rules. Emits `RootChallenged`.
+    #[allow(unused_variables)] // stub: see the section note above
+    pub fn challenge(ctx: Context<Challenge>, window: u64, evidence: [u8; 32]) -> Result<()> {
+        todo!("Session B: challenge")
+    }
+
+    /// The multisig rules on a challenge. `Ruling::RootStands` returns the
+    /// root to `Active`; `Ruling::RootFalse { slash_amount, victim }`
+    /// marks it `ProvenFalse` and records the exact slash and the victim.
+    ///
+    /// Doctrine: invariant 6 — a ruling may not exceed the bond that backs
+    /// the root (`SlashExceedsBond`); a ruling that the root stands
+    /// slashes nothing, ever. Emits `ChallengeResolved`.
+    #[allow(unused_variables)] // stub: see the section note above
+    pub fn resolve_challenge(
+        ctx: Context<ResolveChallenge>,
+        window: u64,
+        ruling: Ruling,
+    ) -> Result<()> {
+        todo!("Session B: resolve_challenge")
+    }
+
+    /// Execute a ruled slash: move EXACTLY the recorded `ruled_slash` from
+    /// the bond vault to the recorded victim. Permissionless to crank — the
+    /// ruling was the multisig's act, and the amount and the destination
+    /// come from the root account, never from arguments.
+    ///
+    /// Doctrine: invariant 6 — anything but a `ProvenFalse` root refuses
+    /// with `RootNotProvenFalse` (never challenged, still challenged, ruled
+    /// to stand, or already slashed); a second slash is therefore
+    /// impossible.
+    ///
+    /// Session B owes these checks IN THIS ORDER, because the suite pins
+    /// which refusal a shape gets: (1) `RootNotProvenFalse` unless the
+    /// root is `ProvenFalse`; (2) `WrongDestinationOwner` unless
+    /// `destination.owner == settlement_root.victim` (a handler check, not
+    /// an account constraint — see `SlashBond`); (3) move EXACTLY
+    /// `ruled_slash`, mark the root `Slashed`, emit `BondSlashed`.
+    #[allow(unused_variables)] // stub: see the section note above
+    pub fn slash_bond(ctx: Context<SlashBond>, window: u64) -> Result<()> {
+        todo!("Session B: slash_bond")
     }
 }
 
