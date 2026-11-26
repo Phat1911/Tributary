@@ -435,6 +435,19 @@ pub async fn start_with_context() -> ProgramTestContext {
     boot().start_with_context().await
 }
 
+/// Moves the clock PAST the challenge window of a root posted in `posted_at`
+/// (invariant 11: no payout leaves the vault before the window has passed) —
+/// one slot past `posted_at + CHALLENGE_WINDOW_SLOTS`, inclusive. Returns
+/// the slot warped to. A root posted AFTER this call starts its own window
+/// at the warped slot, so it can still be challenged.
+pub fn warp_past_window(ctx: &mut ProgramTestContext, posted_at: i64) -> u64 {
+    let target = u64::try_from(posted_at + pool::CHALLENGE_WINDOW_SLOTS + 1)
+        .expect("a slot past the challenge window is a positive number");
+    ctx.warp_to_slot(target)
+        .unwrap_or_else(|e| panic!("the clock must warp past the challenge window: {e}"));
+    target
+}
+
 /// Anchor instruction discriminator: sha256("global:<snake_name>")
 /// truncated to 8 bytes. Anchor 1.2 namespaces EVERY instruction under the
 /// literal "global" (anchor-syn `SIGHASH_GLOBAL_NAMESPACE` — the #[program]
@@ -751,6 +764,11 @@ pub mod merkle {
             self.leaves[index]
         }
 
+        /// How many leaves the tree was built from.
+        pub fn leaf_count(&self) -> usize {
+            self.leaves.len()
+        }
+
         /// The sum of the leaf amounts — the `total_payout` a root over this
         /// tree attests to.
         pub fn total(&self) -> u64 {
@@ -963,6 +981,12 @@ pub mod events {
         pub evidence: [u8; 32],
         pub ruled_slash: u64,
         pub victim: Pubkey,
+        /// True once the multisig ruled the latest challenge to stand — the
+        /// ruling that waives the rest of the window (invariant 11).
+        pub stands_ruled: bool,
+        /// Micro-USDC this root has paid out: the running sum of its claims
+        /// (invariant 12).
+        pub paid_out: u64,
     }
 
     /// How a subscriber that reads ONLY events sees one paid leaf.
@@ -1027,13 +1051,16 @@ pub mod events {
                 }
                 "ClaimPaid" => {
                     // window(8) leaf_index(4) depositor(32) amount(8) vault_balance_after(8)
+                    let window = u64_at(b, 0);
+                    let amount = u64_at(b, 44);
                     self.markers.insert(
-                        (u64_at(b, 0), u32_at(b, 8)),
+                        (window, u32_at(b, 8)),
                         MarkerMirror {
                             depositor: pubkey_at(b, 12),
-                            amount: u64_at(b, 44),
+                            amount,
                         },
                     );
+                    self.roots.entry(window).or_default().paid_out += amount;
                     self.vault = u64_at(b, 52);
                 }
                 "RootChallenged" => {
@@ -1042,6 +1069,8 @@ pub mod events {
                     let root = self.roots.entry(window).or_default();
                     root.challenger = pubkey_at(b, 8);
                     root.evidence = bytes32_at(b, 40);
+                    // A new challenge outranks an earlier "stands".
+                    root.stands_ruled = false;
                     self.status.insert(window, pool::RootStatus::Challenged);
                 }
                 "ChallengeResolved" => {
@@ -1049,6 +1078,7 @@ pub mod events {
                     let window = u64_at(b, 0);
                     let stands = bool_at(b, 8);
                     let root = self.roots.entry(window).or_default();
+                    root.stands_ruled = stands;
                     root.ruled_slash = if stands { 0 } else { u64_at(b, 9) };
                     root.victim = if stands {
                         Pubkey::default()
@@ -1312,7 +1342,8 @@ pub mod ixs {
 
     /// `claim(window, leaf_index, depositor, amount, proof)` — THE TWO
     /// DOORS: `authority` is the backend (assisted) or the leaf's depositor
-    /// (direct); `payer` pays the marker's rent (any funded key).
+    /// (direct); `payer` pays the marker's rent (any funded key); the clock
+    /// is where the handler reads the slot for the challenge-window rule.
     #[allow(clippy::too_many_arguments)]
     pub fn claim(
         pool: &Pubkey,
@@ -1339,6 +1370,7 @@ pub mod ixs {
                 AccountMeta::new(*vault, false),
                 AccountMeta::new(*claim_marker, false),
                 AccountMeta::new(*payer, true), // rent payer
+                AccountMeta::new_readonly(CLOCK_SYSVAR, false),
                 AccountMeta::new_readonly(TOKEN_V3, false),
                 AccountMeta::new_readonly(solana_system_interface::program::ID, false),
             ],

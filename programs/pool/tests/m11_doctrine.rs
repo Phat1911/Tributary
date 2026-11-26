@@ -1,6 +1,7 @@
 //! M11 DOCTRINE SUITE — Session A (doctrine-suite mode, workflow step 14),
-//! 2026-11-26. TEN tests, one per doctrine sentence, each NAMED as its
-//! sentence: the test names ARE the spec the founder and director read at
+//! 2026-11-26; revised at the GO gate the same day (rulings R1–R4, which
+//! added sentences 11 and 12). TWELVE tests, one per doctrine sentence, each
+//! NAMED as its sentence: the test names ARE the spec the founder and director read at
 //! the GO gate, and Session B implements the stubs to green WITHOUT editing
 //! a line of this file (a test that must change is a doctrine question and
 //! routes back through the user — rule 6, extended).
@@ -19,6 +20,17 @@
 //! | 8 | Every state change is reconstructible from emitted events alone. | A subscriber fed ONLY decoded `Program data:` events ends with a mirror equal to the chain: vault, bond, every root field, every marker. |
 //! | 9 | Settlement mints no transferable receipt. | Through the whole lifecycle: registry supply, the depositor's claim row and the USDC supply do not move; the claim mint stays NonTransferable; the payout is USDC, exactly. |
 //! | 10 | No single key and no upgrade authority can move vault funds; only a satisfied program instruction can. | Raw transfers signed by the backend, the admin and the deployment (upgrade) authority key all refuse; no sweep instruction exists; a VALID claim is what moves the vault. |
+//! | 11 | No payout leaves the vault before the challenge window has passed. | A claim succeeds iff the root is `Active` AND (the window has passed OR the multisig ruled it stands); inside the window on an Active root ⇒ `ChallengeWindowOpen`, nothing moves. *(GO-gate ruling.)* |
+//! | 12 | A root never pays out more than its declared total. | The root carries `paid_out`; a claim needs `paid_out + amount ≤ total_payout`, else `PayoutExceedsTotal`. *(GO-gate ruling.)* |
+//!
+//! # Sentence 11 shapes the other tests too
+//!
+//! Before its first successful claim, each of tests 2, 3, 4, 7, 8, 9 and 10
+//! moves the clock past the challenge window (one Fixture helper). Tests 5
+//! and 8 also use the other door through the window: the multisig's "stands"
+//! ruling, which waives the rest of it. Test 5's opening control IS the
+//! refusal. Tests 1 and 6 make no claims. A root posted AFTER a clock move
+//! starts a window of its own, so it can still be challenged.
 //!
 //! # RED for the right reason
 //!
@@ -48,7 +60,7 @@
 //! |---|---|---|
 //! | `fund_bond(amount)` | backend | — |
 //! | `post_root(window, merkle_root, total_payout)` | backend | `RootExceedsVault` (6012) |
-//! | `claim(window, leaf_index, depositor, amount, proof)` | backend OR `depositor` | `WrongPayoutDestination` (6014, account constraint), `ExitAuthority` (6009), `InvalidProof` (6013), `RootFrozen` (6015) |
+//! | `claim(window, leaf_index, depositor, amount, proof)` | backend OR `depositor` | `WrongPayoutDestination` (6014, account constraint), `ExitAuthority` (6009), `InvalidProof` (6013), `RootFrozen` (6015), `ChallengeWindowOpen` (6019), `PayoutExceedsTotal` (6020) |
 //! | `challenge(window, evidence)` | ANY key | `ChallengeWindowClosed` (6016) |
 //! | `resolve_challenge(window, ruling)` | admin (multisig) | `SlashExceedsBond` (6018) |
 //! | `slash_bond(window)` | none (cranks a ruling) | `RootNotProvenFalse` (6017) |
@@ -86,8 +98,10 @@ const ROOT_FROZEN: u32 = 6015;
 const CHALLENGE_WINDOW_CLOSED: u32 = 6016;
 const ROOT_NOT_PROVEN_FALSE: u32 = 6017;
 const SLASH_EXCEEDS_BOND: u32 = 6018;
+const CHALLENGE_WINDOW_OPEN: u32 = 6019;
+const PAYOUT_EXCEEDS_TOTAL: u32 = 6020;
 /// The highest `PoolError` code this branch declares.
-const LAST_POOL_ERROR: u32 = SLASH_EXCEEDS_BOND;
+const LAST_POOL_ERROR: u32 = PAYOUT_EXCEEDS_TOTAL;
 
 /// Anchor's framework code for an instruction name the dispatcher does not
 /// know — a public constant of the `ErrorCode` enum.
@@ -107,6 +121,8 @@ const _: () = {
     assert!(E::ChallengeWindowClosed as u32 + 6000 == CHALLENGE_WINDOW_CLOSED);
     assert!(E::RootNotProvenFalse as u32 + 6000 == ROOT_NOT_PROVEN_FALSE);
     assert!(E::SlashExceedsBond as u32 + 6000 == SLASH_EXCEEDS_BOND);
+    assert!(E::ChallengeWindowOpen as u32 + 6000 == CHALLENGE_WINDOW_OPEN);
+    assert!(E::PayoutExceedsTotal as u32 + 6000 == PAYOUT_EXCEEDS_TOTAL);
 };
 
 // ---------------------------------------------------------------------------
@@ -261,7 +277,10 @@ impl Fixture {
         )
     }
 
-    fn post_root_ix(&self, window: u64, tree: &merkle::Tree) -> Instruction {
+    /// `post_root` carrying `declared_total` — what the OPERATOR attests the
+    /// root pays. The honest figure is `tree.total()` (invariant 12 makes
+    /// the declared total, not the leaves, the ceiling).
+    fn post_root_ix(&self, window: u64, tree: &merkle::Tree, declared_total: u64) -> Instruction {
         ixs::post_root(
             &addrs::pool(),
             &self.backend.pubkey(),
@@ -270,7 +289,7 @@ impl Fixture {
             &addrs::bond(),
             window,
             tree.root(),
-            tree.total(),
+            declared_total,
         )
     }
 
@@ -422,21 +441,49 @@ impl Fixture {
         .await;
     }
 
-    /// Builds the tree over `leaves` and posts its root for `window`; the
-    /// returned tree is where proofs come from.
+    /// Builds the tree over `leaves` and posts its root for `window`,
+    /// declaring the honest sum as the total; the returned tree is where
+    /// proofs come from.
     async fn post(&self, label: &str, window: u64, leaves: &[merkle::Leaf]) -> merkle::Tree {
         let tree = merkle::Tree::new(leaves);
+        self.post_declaring(label, window, &tree, tree.total())
+            .await;
+        tree
+    }
+
+    /// Posts `tree`'s root for `window` while DECLARING `declared_total` as
+    /// what it pays — for a root whose leaves sum past its own total
+    /// (invariant 12).
+    async fn post_declaring(
+        &self,
+        label: &str,
+        window: u64,
+        tree: &merkle::Tree,
+        declared_total: u64,
+    ) {
         lands(
             label,
             &format!(
-                "post_root for window {window} ({} leaves, total {} micro-USDC)",
-                leaves.len(),
-                tree.total()
+                "post_root for window {window} ({} leaves summing to {} micro-USDC, declaring {})",
+                tree.leaf_count(),
+                tree.total(),
+                declared_total
             ),
-            self.send(self.post_root_ix(window, &tree), &[&self.backend]),
+            self.send(
+                self.post_root_ix(window, tree, declared_total),
+                &[&self.backend],
+            ),
         )
         .await;
-        tree
+    }
+
+    /// Moves the clock PAST the challenge window of `window`'s root
+    /// (invariant 11): from here on a claim against a root posted BEFORE
+    /// this call may pay. Not a program instruction — a clock move the rig
+    /// performs between steps.
+    async fn pass_challenge_window(&mut self, window: u64) {
+        let posted_at = self.root(window).await.posted_at;
+        common::warp_past_window(&mut self.ctx, posted_at);
     }
 
     /// `challenge(window)` by ANY key, with a commitment to a fraud proof.
@@ -551,7 +598,12 @@ async fn root_whose_total_payout_exceeds_the_vaults_usdc_fails_closed_and_moves_
     // Over by one micro-unit.
     let over = merkle::Tree::new(&[f.leaf(0, 5 * USDC + 1)]);
     let step = "post_root whose total payout is 1 micro-USDC over the vault";
-    let err = refused(LABEL, step, f.send(f.post_root_ix(1, &over), &[&f.backend])).await;
+    let err = refused(
+        LABEL,
+        step,
+        f.send(f.post_root_ix(1, &over, 5 * USDC + 1), &[&f.backend]),
+    )
+    .await;
     assert_code(LABEL, step, &err, ROOT_EXCEEDS_VAULT);
 
     // "fails closed and moves nothing".
@@ -577,7 +629,7 @@ async fn root_whose_total_payout_exceeds_the_vaults_usdc_fails_closed_and_moves_
     lands(
         LABEL,
         step,
-        f.send(f.post_root_ix(1, &exact), &[&f.backend]),
+        f.send(f.post_root_ix(1, &exact, 5 * USDC), &[&f.backend]),
     )
     .await;
     let root = f.root(1).await;
@@ -618,7 +670,7 @@ async fn root_whose_total_payout_exceeds_the_vaults_usdc_fails_closed_and_moves_
 #[tokio::test]
 async fn claim_whose_inclusion_proof_does_not_verify_against_the_published_root_is_rejected() {
     const LABEL: &str = "invariant 2";
-    let f = fixture().await;
+    let mut f = fixture().await;
     f.prepay(LABEL, 10 * USDC).await;
     f.fund_bond(LABEL, 10 * USDC).await;
     let tree = f
@@ -633,6 +685,8 @@ async fn claim_whose_inclusion_proof_does_not_verify_against_the_published_root_
             ],
         )
         .await;
+    // Invariant 11: nothing pays inside the window — the clock moves first.
+    f.pass_challenge_window(1).await;
     let a = &f.depositors[0];
     let b = &f.depositors[1];
     let c = &f.depositors[2];
@@ -761,12 +815,14 @@ async fn claim_whose_inclusion_proof_does_not_verify_against_the_published_root_
 #[tokio::test]
 async fn one_leaf_funds_exactly_one_claim_a_replayed_claim_is_refused() {
     const LABEL: &str = "invariant 3";
-    let f = fixture().await;
+    let mut f = fixture().await;
     f.prepay(LABEL, 7 * USDC).await;
     f.fund_bond(LABEL, 10 * USDC).await;
     let tree = f
         .post(LABEL, 1, &[f.leaf(0, 3 * USDC), f.leaf(1, 2 * USDC)])
         .await;
+    // Invariant 11: nothing pays inside the window — the clock moves first.
+    f.pass_challenge_window(1).await;
     let a = &f.depositors[0];
     let b = &f.depositors[1];
 
@@ -893,7 +949,7 @@ async fn one_leaf_funds_exactly_one_claim_a_replayed_claim_is_refused() {
 #[tokio::test]
 async fn payout_reaches_only_the_leafs_named_depositor_through_either_door() {
     const LABEL: &str = "invariant 4";
-    let f = fixture().await;
+    let mut f = fixture().await;
     f.prepay(LABEL, 10 * USDC).await;
     f.fund_bond(LABEL, 10 * USDC).await;
     let tree = f
@@ -903,6 +959,8 @@ async fn payout_reaches_only_the_leafs_named_depositor_through_either_door() {
             &[f.leaf(0, 3 * USDC), f.leaf(1, 2 * USDC), f.leaf(2, USDC)],
         )
         .await;
+    // Invariant 11: nothing pays inside the window — the clock moves first.
+    f.pass_challenge_window(1).await;
     let a = &f.depositors[0];
     let c = &f.depositors[2];
     let operator_before = f.wallet(&f.backend_wallet).await;
@@ -1033,13 +1091,15 @@ async fn payout_reaches_only_the_leafs_named_depositor_through_either_door() {
 /// **A challenge inside the window freezes that root's payouts until the
 /// multisig rules.**
 ///
-/// Payouts are live: A is paid. Then ANY key challenges inside the window
-/// and the root turns `Challenged` — B's claim is `RootFrozen` through both
-/// doors, and neither the challenger nor the operator can lift the freeze.
-/// The admin's "stands" ruling returns the root to `Active`, and B is paid.
-/// "Inside the window" means something only next to its complement: on a
-/// second root the clock is warped PAST the window, a challenge is
-/// `ChallengeWindowClosed`, and that root stays `Active` and pays.
+/// The opening control is now invariant 11's refusal: inside the window
+/// nothing pays at all. Then ANY key challenges and the root turns
+/// `Challenged` — B's claim is `RootFrozen` through both doors (a freeze,
+/// not merely the window's delay), and neither the challenger nor the
+/// operator can lift it. The admin's "stands" ruling returns the root to
+/// `Active` AND puts the ruling on record — and that ruling waives the rest
+/// of the window, so B is paid while the clock has not moved. The
+/// complement closes it: on a second root the clock is warped PAST the
+/// window, a challenge is `ChallengeWindowClosed`, and that root pays.
 #[tokio::test]
 async fn challenge_inside_the_window_freezes_that_roots_payouts_until_the_multisig_rules() {
     const LABEL: &str = "invariant 5";
@@ -1052,13 +1112,21 @@ async fn challenge_inside_the_window_freezes_that_roots_payouts_until_the_multis
     let a = &f.depositors[0];
     let b = &f.depositors[1];
 
-    // Payouts are live before any challenge.
-    lands(
-        LABEL,
-        "control: A claims leaf 0 (payouts are live)",
-        f.claim(a, 1, &tree, 0, &f.dep_wallets[0]),
-    )
-    .await;
+    // The opening control (invariant 11): inside the window nothing pays —
+    // so every payment below is the freeze and the ruling at work, not time.
+    let step = "control: A claims leaf 0 INSIDE the challenge window";
+    let err = refused(LABEL, step, f.claim(a, 1, &tree, 0, &f.dep_wallets[0])).await;
+    assert_code(LABEL, step, &err, CHALLENGE_WINDOW_OPEN);
+    assert_eq!(
+        f.wallet(&f.dep_wallets[0]).await,
+        0,
+        "{LABEL} — nothing was paid inside the window"
+    );
+    assert_eq!(
+        f.vault().await,
+        20 * USDC,
+        "{LABEL} — nothing left the vault inside the window"
+    );
 
     // Any key challenges, inside the window.
     f.challenge(LABEL, &f.rogue, 1).await;
@@ -1068,7 +1136,7 @@ async fn challenge_inside_the_window_freezes_that_roots_payouts_until_the_multis
         "{LABEL} — a challenge freezes the root"
     );
 
-    // Frozen through BOTH doors.
+    // Frozen through BOTH doors — a freeze, not merely the window's delay.
     for (door, authority) in [("direct", b), ("assisted", &f.backend)] {
         let step = format!("B claims leaf 1 through the {door} door while the root is challenged");
         let err = refused(
@@ -1086,7 +1154,7 @@ async fn challenge_inside_the_window_freezes_that_roots_payouts_until_the_multis
     );
     assert_eq!(
         f.vault().await,
-        17 * USDC,
+        20 * USDC,
         "{LABEL} — the vault did not move while frozen"
     );
 
@@ -1108,7 +1176,8 @@ async fn challenge_inside_the_window_freezes_that_roots_payouts_until_the_multis
         );
     }
 
-    // The multisig rules: the root stands.
+    // The multisig rules: the root stands. The ruling is ON RECORD, and it
+    // waives the rest of the window (invariant 11) — the clock has not moved.
     f.resolve(
         LABEL,
         "the multisig rules the root STANDS",
@@ -1116,14 +1185,19 @@ async fn challenge_inside_the_window_freezes_that_roots_payouts_until_the_multis
         ixs::Ruling::Stands,
     )
     .await;
+    let root = f.root(1).await;
     assert_eq!(
-        f.root(1).await.status,
+        root.status,
         pool::RootStatus::Active,
         "{LABEL} — the ruling unfroze the root"
     );
+    assert!(
+        root.stands_ruled,
+        "{LABEL} — the ruling is on record: it waives the rest of the window"
+    );
     lands(
         LABEL,
-        "B claims leaf 1 after the ruling (payouts resumed)",
+        "B claims leaf 1 after the ruling, still INSIDE the window (payouts resumed)",
         f.claim(b, 1, &tree, 1, &f.dep_wallets[1]),
     )
     .await;
@@ -1135,12 +1209,7 @@ async fn challenge_inside_the_window_freezes_that_roots_payouts_until_the_multis
 
     // The complement: AFTER the window, a challenge is refused.
     let later = f.post(LABEL, 2, &[f.leaf(3, 4 * USDC)]).await;
-    let posted_at = f.root(2).await.posted_at;
-    let outside = u64::try_from(posted_at + pool::CHALLENGE_WINDOW_SLOTS + 1)
-        .expect("a slot past the window is a positive number");
-    f.ctx
-        .warp_to_slot(outside)
-        .unwrap_or_else(|e| panic!("{LABEL} — the clock must warp past the window: {e}"));
+    f.pass_challenge_window(2).await;
     let step = "challenge window 2 AFTER its challenge window closed";
     let err = refused(
         LABEL,
@@ -1369,36 +1438,42 @@ async fn bond_slashes_by_exactly_the_ruled_amount_for_a_root_proven_false_and_by
 
 /// Every field of one root account, as one value — "append-only" means
 /// every field, so every field is compared.
-type RootSnapshot = (
-    Pubkey,
-    u64,
-    [u8; 32],
-    u64,
-    pool::RootStatus,
-    i64,
-    u64,
-    Pubkey,
-    [u8; 32],
-    u64,
-    Pubkey,
-    u8,
-);
+#[derive(Debug, PartialEq)]
+struct RootSnapshot {
+    pool: Pubkey,
+    window: u64,
+    merkle_root: [u8; 32],
+    total_payout: u64,
+    status: pool::RootStatus,
+    posted_at: i64,
+    bond: u64,
+    challenger: Pubkey,
+    evidence: [u8; 32],
+    ruled_slash: u64,
+    victim: Pubkey,
+    stands_ruled: bool,
+    paid_out: u64,
+    bump: u8,
+}
 
+/// Reads a root, every field.
 fn snapshot(root: &pool::SettlementRoot) -> RootSnapshot {
-    (
-        root.pool,
-        root.window,
-        root.merkle_root,
-        root.total_payout,
-        root.status.clone(),
-        root.posted_at,
-        root.bond,
-        root.challenger,
-        root.evidence,
-        root.ruled_slash,
-        root.victim,
-        root.bump,
-    )
+    RootSnapshot {
+        pool: root.pool,
+        window: root.window,
+        merkle_root: root.merkle_root,
+        total_payout: root.total_payout,
+        status: root.status.clone(),
+        posted_at: root.posted_at,
+        bond: root.bond,
+        challenger: root.challenger,
+        evidence: root.evidence,
+        ruled_slash: root.ruled_slash,
+        victim: root.victim,
+        stands_ruled: root.stands_ruled,
+        paid_out: root.paid_out,
+        bump: root.bump,
+    }
 }
 
 /// **A second root for the same window is refused; roots are append-only.**
@@ -1411,7 +1486,7 @@ fn snapshot(root: &pool::SettlementRoot) -> RootSnapshot {
 #[tokio::test]
 async fn second_root_for_the_same_window_is_refused_roots_are_append_only() {
     const LABEL: &str = "invariant 7";
-    let f = fixture().await;
+    let mut f = fixture().await;
     f.prepay(LABEL, 20 * USDC).await;
     f.fund_bond(LABEL, 10 * USDC).await;
 
@@ -1424,7 +1499,7 @@ async fn second_root_for_the_same_window_is_refused_roots_are_append_only() {
     let err = refused(
         LABEL,
         step,
-        f.send(f.post_root_ix(7, &replacement), &[&f.backend]),
+        f.send(f.post_root_ix(7, &replacement, 4 * USDC), &[&f.backend]),
     )
     .await;
     assert_structural_refusal(LABEL, step, &err);
@@ -1439,7 +1514,7 @@ async fn second_root_for_the_same_window_is_refused_roots_are_append_only() {
     let err = refused(
         LABEL,
         step,
-        f.send(f.post_root_ix(7, &first), &[&f.backend]),
+        f.send(f.post_root_ix(7, &first, 3 * USDC), &[&f.backend]),
     )
     .await;
     assert_structural_refusal(LABEL, step, &err);
@@ -1473,7 +1548,10 @@ async fn second_root_for_the_same_window_is_refused_roots_are_append_only() {
         "{LABEL} — posting window 8 left window 7 identical"
     );
 
-    // The first root is still LIVE: its proofs still pay.
+    // The first root is still LIVE: its proofs still pay — once its window
+    // has passed (invariant 11). Window 8 was posted in the same slot, so
+    // one clock move passes both.
+    f.pass_challenge_window(7).await;
     let a = &f.depositors[0];
     lands(
         LABEL,
@@ -1522,8 +1600,9 @@ async fn observed(
 /// **Every state change is reconstructible from emitted events alone.**
 ///
 /// The whole settlement lifecycle runs one state change per step: bond
-/// funded twice, vault funded, two roots posted, two leaves paid (one per
-/// door), two challenges, two rulings (one each way), one slash. A
+/// funded twice, vault funded, a root posted, challenged and ruled to
+/// stand, the clock past its window, two leaves paid (one per door), a
+/// second root posted, challenged, ruled false and slashed. A
 /// subscriber that reads ONLY decoded `Program data:` events — never an
 /// account — ends with a mirror that must equal the chain: the vault, the
 /// bond (record and vault), every field of both roots, and every marker,
@@ -1532,7 +1611,7 @@ async fn observed(
 #[tokio::test]
 async fn every_state_change_is_reconstructible_from_emitted_events_alone() {
     const LABEL: &str = "invariant 8";
-    let f = fixture().await; // nothing has happened yet
+    let mut f = fixture().await; // nothing has happened yet
     let mut subscriber = events::Subscriber::default();
     let mut seen: Vec<&'static str> = Vec::new();
 
@@ -1572,12 +1651,38 @@ async fn every_state_change_is_reconstructible_from_emitted_events_alone() {
         &f,
         LABEL,
         "post_root window 1",
-        f.post_root_ix(1, &tree),
+        f.post_root_ix(1, &tree, tree.total()),
         &[&f.backend],
         &mut subscriber,
         &mut seen,
     )
     .await;
+
+    // Invariant 11: nothing pays inside the window. The lifecycle takes the
+    // challenge-and-ruling path FIRST, then moves the clock.
+    observed(
+        &f,
+        LABEL,
+        "challenge window 1",
+        f.challenge_ix(&f.rogue.pubkey(), 1, EVIDENCE),
+        &[&f.rogue],
+        &mut subscriber,
+        &mut seen,
+    )
+    .await;
+    observed(
+        &f,
+        LABEL,
+        "resolve window 1: the root stands",
+        f.resolve_ix(1, ixs::Ruling::Stands),
+        &[&f.admin],
+        &mut subscriber,
+        &mut seen,
+    )
+    .await;
+
+    // The clock passes the window. Not a program instruction: no event.
+    f.pass_challenge_window(1).await;
 
     let a = &f.depositors[0];
     let b = &f.depositors[1];
@@ -1618,33 +1723,13 @@ async fn every_state_change_is_reconstructible_from_emitted_events_alone() {
     )
     .await;
 
-    observed(
-        &f,
-        LABEL,
-        "challenge window 1",
-        f.challenge_ix(&f.rogue.pubkey(), 1, EVIDENCE),
-        &[&f.rogue],
-        &mut subscriber,
-        &mut seen,
-    )
-    .await;
-    observed(
-        &f,
-        LABEL,
-        "resolve window 1: the root stands",
-        f.resolve_ix(1, ixs::Ruling::Stands),
-        &[&f.admin],
-        &mut subscriber,
-        &mut seen,
-    )
-    .await;
-
+    // Window 2 is posted AT the warped slot: a challenge window of its own.
     let later = merkle::Tree::new(&[f.leaf(3, USDC)]);
     observed(
         &f,
         LABEL,
         "post_root window 2",
-        f.post_root_ix(2, &later),
+        f.post_root_ix(2, &later, later.total()),
         &[&f.backend],
         &mut subscriber,
         &mut seen,
@@ -1739,6 +1824,14 @@ async fn every_state_change_is_reconstructible_from_emitted_events_alone() {
         assert_eq!(
             mirror.victim, chain.victim,
             "{LABEL} — window {window}: victim"
+        );
+        assert_eq!(
+            mirror.stands_ruled, chain.stands_ruled,
+            "{LABEL} — window {window}: stands_ruled"
+        );
+        assert_eq!(
+            mirror.paid_out, chain.paid_out,
+            "{LABEL} — window {window}: paid_out"
         );
         assert_eq!(
             subscriber.status[&window], chain.status,
@@ -1868,11 +1961,14 @@ async fn registry(f: &Fixture) -> Registry {
 /// and slash, the registry's supply, the depositor's claim row and the
 /// USDC supply do not move by a micro-unit, and the claim mint — the one
 /// mint the pool controls — keeps its NonTransferable extension and its
-/// authority. What the depositor receives is exactly the leaf's USDC.
+/// authority. What the depositor receives is exactly the leaf's USDC. Two
+/// roots carry the two paths: window 1 is claimed past its challenge window
+/// (invariant 11); window 2 is posted at the warped slot, so it has a
+/// window of its own to be challenged in, then ruled false and slashed.
 #[tokio::test]
 async fn settlement_mints_no_transferable_receipt() {
     const LABEL: &str = "invariant 9";
-    let f = fixture().await;
+    let mut f = fixture().await;
     let a = &f.depositors[0];
 
     // A's registry row: a non-zero record whose survival is the point.
@@ -1915,16 +2011,19 @@ async fn settlement_mints_no_transferable_receipt() {
         before,
         "{LABEL} — bonding minted nothing"
     );
+
+    // Window 1 — the CLAIM path: nothing pays before its window passes.
     let tree = f.post(LABEL, 1, &[f.leaf(0, 3 * USDC)]).await;
     assert_eq!(
         registry(&f).await,
         before,
         "{LABEL} — posting a root minted nothing"
     );
+    f.pass_challenge_window(1).await;
     lands(
         LABEL,
         "A claims leaf 0",
-        f.claim(a, 1, &tree, 0, &f.dep_wallets[0]),
+        f.claim(&f.depositors[0], 1, &tree, 0, &f.dep_wallets[0]),
     )
     .await;
     assert_eq!(
@@ -1937,7 +2036,16 @@ async fn settlement_mints_no_transferable_receipt() {
         3 * USDC,
         "{LABEL} — the payout is USDC, exactly the leaf's amount"
     );
-    f.challenge(LABEL, &f.rogue, 1).await;
+
+    // Window 2 — the CHALLENGE path: posted at the warped slot, so it sits
+    // inside a challenge window of its own.
+    f.post(LABEL, 2, &[f.leaf(1, USDC)]).await;
+    assert_eq!(
+        registry(&f).await,
+        before,
+        "{LABEL} — posting a second root minted nothing"
+    );
+    f.challenge(LABEL, &f.rogue, 2).await;
     assert_eq!(
         registry(&f).await,
         before,
@@ -1945,8 +2053,8 @@ async fn settlement_mints_no_transferable_receipt() {
     );
     f.resolve(
         LABEL,
-        "the multisig rules the root FALSE: 1 USDC to the victim",
-        1,
+        "the multisig rules window 2 FALSE: 1 USDC to the victim",
+        2,
         ixs::Ruling::False {
             slash_amount: USDC,
             victim: &f.victim.pubkey(),
@@ -1958,7 +2066,7 @@ async fn settlement_mints_no_transferable_receipt() {
         before,
         "{LABEL} — a ruling minted nothing"
     );
-    lands(LABEL, "slash_bond window 1", f.slash(1, &f.victim_wallet)).await;
+    lands(LABEL, "slash_bond window 2", f.slash(2, &f.victim_wallet)).await;
     assert_eq!(
         registry(&f).await,
         before,
@@ -1984,7 +2092,7 @@ async fn settlement_mints_no_transferable_receipt() {
 async fn no_single_key_and_no_upgrade_authority_can_move_vault_funds_only_a_satisfied_program_instruction_can()
  {
     const LABEL: &str = "invariant 10";
-    let f = fixture().await;
+    let mut f = fixture().await;
     f.prepay(LABEL, 10 * USDC).await;
 
     // The structural fact: no key signs for the vault.
@@ -2056,6 +2164,8 @@ async fn no_single_key_and_no_upgrade_authority_can_move_vault_funds_only_a_sati
         10 * USDC,
         "{LABEL} — bonding and posting moved nothing"
     );
+    // Invariant 11: nothing pays inside the window — the clock moves first.
+    f.pass_challenge_window(1).await;
     let a = &f.depositors[0];
     lands(
         LABEL,
@@ -2077,5 +2187,200 @@ async fn no_single_key_and_no_upgrade_authority_can_move_vault_funds_only_a_sati
         f.wallet(&f.rogue_wallet).await,
         0,
         "{LABEL} — nothing reached anyone else"
+    );
+}
+
+// ===========================================================================
+// INVARIANT 11  (GO-gate ruling, 2026-11-26)
+// ===========================================================================
+
+/// **No payout leaves the vault before the challenge window has passed.**
+///
+/// A root's payouts used to be live from posting. The GO gate closed that
+/// door, and the reason is the rest of the design: the backend key posts
+/// roots AND opens the assisted door, a leaf may name any pubkey, the only
+/// ceiling is the vault, and the bond is unrelated to the vault — a
+/// compromised backend could drain the vault before anyone could challenge.
+/// So inside the window the claim refuses through BOTH doors with
+/// `ChallengeWindowOpen` and moves nothing: no wallet, not the vault, no
+/// marker, `paid_out` still zero. After the clock passes the window, the
+/// SAME claim — same leaf, same proof, same door — pays. (The other way
+/// through the window, the multisig ruling the root stands, is test 5.)
+#[tokio::test]
+async fn no_payout_leaves_the_vault_before_the_challenge_window_has_passed() {
+    const LABEL: &str = "invariant 11";
+    let mut f = fixture().await;
+    f.prepay(LABEL, 5 * USDC).await;
+    f.fund_bond(LABEL, 10 * USDC).await;
+    let tree = f.post(LABEL, 1, &[f.leaf(0, 3 * USDC)]).await;
+
+    // Inside the window: both doors refuse, and nothing moves.
+    for (door, authority) in [("direct", &f.depositors[0]), ("assisted", &f.backend)] {
+        let step = format!("A claims leaf 0 through the {door} door INSIDE the challenge window");
+        let err = refused(
+            LABEL,
+            &step,
+            f.claim(authority, 1, &tree, 0, &f.dep_wallets[0]),
+        )
+        .await;
+        assert_code(LABEL, &step, &err, CHALLENGE_WINDOW_OPEN);
+    }
+    assert_eq!(
+        f.wallet(&f.dep_wallets[0]).await,
+        0,
+        "{LABEL} — nothing reached the depositor inside the window"
+    );
+    assert_eq!(
+        f.vault().await,
+        5 * USDC,
+        "{LABEL} — nothing left the vault inside the window"
+    );
+    assert!(
+        common::claim_marker(f.banks(), &addrs::root(1), 0)
+            .await
+            .is_none(),
+        "{LABEL} — a refused claim writes no marker"
+    );
+    let root = f.root(1).await;
+    assert_eq!(
+        (root.status, root.paid_out),
+        (pool::RootStatus::Active, 0),
+        "{LABEL} — the root is merely waiting; nothing was paid out"
+    );
+
+    // The clock passes the window: the SAME claim pays.
+    f.pass_challenge_window(1).await;
+    lands(
+        LABEL,
+        "the SAME claim after the challenge window has passed",
+        f.claim(&f.depositors[0], 1, &tree, 0, &f.dep_wallets[0]),
+    )
+    .await;
+    assert_eq!(
+        f.wallet(&f.dep_wallets[0]).await,
+        3 * USDC,
+        "{LABEL} — once the window has passed, the claim pays"
+    );
+    assert_eq!(
+        f.vault().await,
+        2 * USDC,
+        "{LABEL} — the vault paid exactly the leaf, and only now"
+    );
+    assert_eq!(
+        f.root(1).await.paid_out,
+        3 * USDC,
+        "{LABEL} — the payout is on the root's record (invariant 12)"
+    );
+}
+
+// ===========================================================================
+// INVARIANT 12  (GO-gate ruling, 2026-11-26)
+// ===========================================================================
+
+/// **A root never pays out more than its declared total.**
+///
+/// The declared total is the operator's ATTESTATION; the leaves are what
+/// claimants present, and only claims reveal any gap between them. A tree
+/// whose leaves sum to 6 USDC is posted DECLARING 4 USDC: claims are valid
+/// (right proof, right door, window passed) one by one until the root has
+/// paid exactly its declared 4 — the leaf that would overshoot refuses with
+/// `PayoutExceedsTotal` and moves nothing, a smaller leaf that fits still
+/// pays, and once the total is reached every leaf refuses. The vault gave 4,
+/// never 6.
+#[tokio::test]
+async fn a_root_never_pays_out_more_than_its_declared_total() {
+    const LABEL: &str = "invariant 12";
+    let mut f = fixture().await;
+    f.prepay(LABEL, 10 * USDC).await;
+    f.fund_bond(LABEL, 10 * USDC).await;
+
+    // Leaves sum to 6 USDC; the root DECLARES 4 USDC.
+    let tree = merkle::Tree::new(&[f.leaf(0, 3 * USDC), f.leaf(1, 2 * USDC), f.leaf(2, USDC)]);
+    f.post_declaring(LABEL, 1, &tree, 4 * USDC).await;
+    let root = f.root(1).await;
+    assert_eq!(
+        (root.total_payout, root.paid_out),
+        (4 * USDC, 0),
+        "{LABEL} — the root declares 4 USDC and has paid nothing"
+    );
+    f.pass_challenge_window(1).await;
+
+    // 3 USDC fits (3 ≤ 4).
+    lands(
+        LABEL,
+        "A claims leaf 0: 3 USDC of a declared 4",
+        f.claim(&f.depositors[0], 1, &tree, 0, &f.dep_wallets[0]),
+    )
+    .await;
+    assert_eq!(
+        f.root(1).await.paid_out,
+        3 * USDC,
+        "{LABEL} — the payout is counted on the root"
+    );
+
+    // B's 2 USDC does NOT fit (3 + 2 > 4) — although B's leaf is in the
+    // tree and B's proof is valid.
+    let step = "B claims leaf 1: 2 USDC on top of 3 would pass the declared 4";
+    let err = refused(
+        LABEL,
+        step,
+        f.claim(&f.depositors[1], 1, &tree, 1, &f.dep_wallets[1]),
+    )
+    .await;
+    assert_code(LABEL, step, &err, PAYOUT_EXCEEDS_TOTAL);
+    assert_eq!(
+        f.wallet(&f.dep_wallets[1]).await,
+        0,
+        "{LABEL} — the overshooting claim paid nothing"
+    );
+    assert!(
+        common::claim_marker(f.banks(), &addrs::root(1), 1)
+            .await
+            .is_none(),
+        "{LABEL} — the overshooting claim wrote no marker"
+    );
+    assert_eq!(
+        f.vault().await,
+        7 * USDC,
+        "{LABEL} — the refused claim moved nothing"
+    );
+
+    // C's 1 USDC fits exactly (3 + 1 = 4): the root has now paid EXACTLY
+    // its declared total.
+    lands(
+        LABEL,
+        "C claims leaf 2: 1 USDC completes the declared 4 exactly",
+        f.claim(&f.depositors[2], 1, &tree, 2, &f.dep_wallets[2]),
+    )
+    .await;
+    let root = f.root(1).await;
+    assert_eq!(
+        root.paid_out, root.total_payout,
+        "{LABEL} — the root paid out EXACTLY its declared total"
+    );
+    assert_eq!(
+        f.vault().await,
+        6 * USDC,
+        "{LABEL} — the vault gave exactly the declared total, although the leaves sum to 6"
+    );
+
+    // Past the total, every remaining leaf refuses.
+    let step = "B claims leaf 1 again, on a root that has paid its declared total";
+    let err = refused(
+        LABEL,
+        step,
+        f.claim(&f.depositors[1], 1, &tree, 1, &f.dep_wallets[1]),
+    )
+    .await;
+    assert_code(LABEL, step, &err, PAYOUT_EXCEEDS_TOTAL);
+    assert_eq!(
+        f.wallet(&f.dep_wallets[1]).await,
+        0,
+        "{LABEL} — B was never paid"
+    );
+    assert_eq!(
+        f.wallet(&f.dep_wallets[2]).await,
+        USDC,
+        "{LABEL} — C was paid once"
     );
 }
