@@ -5,16 +5,19 @@
 [![License: FSL-1.1-ALv2](https://img.shields.io/badge/license-FSL--1.1--ALv2-blue)](LICENSE)
 
 **Governed AI capacity: your team shares one AI key, everyone gets their
-own, and spare credits can earn, with Solana payouts in progress on devnet.**
+own, and surplus credits can earn, with escrow and payouts on a Solana program.**
 
-Tributary is a self-hosted gateway for teams that share AI capacity. Each
-member gets a personal key. Every request is metered and checked before it
-reaches the provider. Every admin action that changes state lands in an append-only audit log.
-Depositors can put spare keys and credits into a pool; what their credits
-earn is kept in a double-entry ledger. Paying those earnings out through a
-Solana program is the part being built now. The software is free and
-source-available (FSL-1.1-ALv2, which converts to Apache-2.0 after two
-years) and runs in one container on your own machine.
+Solana carries the money side. A program on devnet holds the escrow,
+records deposits and takes renter prepayments today; its payout
+instructions (Merkle roots, claims with a proof, a challenge window) are
+being built this weekend, tests first. The rest runs on your own machine:
+Tributary is also a self-hosted gateway for teams that share AI capacity.
+Each member gets a personal key. Every request is metered and checked
+before it reaches the provider. Every admin action that changes state lands
+in an append-only audit log. Depositors put spare keys and credits into a
+pool; what their credits earn is kept in a double-entry ledger, to the
+micro-unit. The software is free and source-available (FSL-1.1-ALv2, which
+converts to Apache-2.0 after two years) and runs in one container.
 
 **Landing page:** <https://phat1911.github.io/Tributary/>. There is no hosted
 demo: run it locally with the Quickstart below.
@@ -23,25 +26,55 @@ demo: run it locally with the Quickstart below.
 
 ## At a glance
 
+- **A Solana program on devnet, governed by a 2-of-2 multisig** (2-of-3 is
+  the planned production posture). A USDC escrow that no single key can
+  move, deposits and renter prepayments have been live since 1 November
+  2026, and the program can be upgraded only by a multisig vote. Merkle-settled
+  payouts are this event's build, tests first: see [What exists today](#what-exists-today).
+- **Surplus credits can earn.** A pool of kind `root` accepts depositor
+  credits. Each request's cost is metered to the micro-unit against the
+  depositor whose credits burned, and posted to the books when the window
+  is settled. A settle run pays each depositor what their credits earned,
+  minus an 8% operator fee, once per window.
 - **Per-member keys over pooled capacity.** Quotas and rate limits run at
   the gateway before any upstream call. Provider keys are envelope-encrypted
   at rest and shown afterwards only as a prefix and a last four.
 - **Governance that leaves a record.** Leak signals (for example one key
   seen from two networks) raise review flags. An audit log, enforced
   append-only by the database, records every control-plane action.
-- **Depositor pools with real books.** A pool of kind `root` accepts
-  depositor credits. Each request's cost is metered to the micro-unit
-  against the depositor whose credits burned, and posted to the books when
-  the window is settled. A settle run pays each depositor what their
-  credits earned, minus an 8% operator fee, once per window.
-- **A Solana program on devnet, governed by a 2-of-2 multisig** (2-of-3 is
-  the planned production posture). A USDC escrow, deposits and renter
-  prepayments are live. Merkle-settled payouts
-  are being built tests-first: see [What exists today](#what-exists-today).
 - **Tests before code, in public.** Security-critical features are written
   as failing tests first and then implemented to green. CI runs on every
   push to `main` and on every pull request. The security findings log,
   [`AUDIT.md`](AUDIT.md), is public.
+
+## Why Solana
+
+The off-chain part of Tributary, the gateway and its ledger, exists to
+answer one question exactly: who earned what, to the micro-unit. The
+on-chain part exists for the moment that answer turns into money between
+people who do not trust each other.
+
+- **Neither side holds the books or the money.** An operator who runs the
+  gateway controls its database, so it could alter what it owes. The escrow
+  and the payout records therefore live in a Solana program, not in the
+  operator's database.
+- **No single key can move the vault or upgrade the program.** The escrow is
+  a program-controlled account, and the upgrade authority is the vault of a
+  2-of-2 multisig. An upgrade needs two signatures; the one that put today's
+  program in place is
+  [on-chain](https://explorer.solana.com/tx/576QrbHPxvDB3P63nHedFA5hDqVBXJchzkauEvrpAJzHUyyDCnfd6KhXaRw2gePS7RF2NQh2eM5qsgj6wwCdeaP5?cluster=devnet).
+- **The chain does money; servers do speed.** No AI request ever routes
+  on-chain. Metering, quotas and leak detection stay off-chain, where they
+  are fast and keep usage data private; Solana carries only the money and
+  its receipts.
+- **Payouts are settled, not negotiated.** Earnings are merkleized into one
+  root; a depositor claims with a proof; payouts wait for a challenge
+  window; a root can never pay more than it declares (SPEC D45). These rules
+  exist today as twelve failing tests, written before the code.
+
+Live on devnet since 1 November 2026: the escrow, deposits, renter
+prepayments, and upgrades by multisig vote. Added by this event: the payout
+rules above. Addresses and evidence: [What exists today](#what-exists-today).
 
 ## The problem it solves
 
@@ -52,6 +85,10 @@ earns nothing. Hosted API routers solve the first three problems by taking
 your keys, your credits and your usage data. Tributary takes the other
 road: the team keeps its own keys, on its own machine. It was built by a
 student developer who kept running into exactly this trade.
+
+When the people holding credits and the people needing them are strangers,
+neither side should hold the money or the books. That is the part a
+blockchain is for.
 
 - **No middleman, no markup.** You pay provider prices directly.
 - **Your keys and usage stay in the building by default.** One optional
@@ -65,11 +102,15 @@ expiry date, and one person rarely uses them up in time. For their
 holders, selling what they cannot use, below face value, is salvage rather
 than a price war; for a buyer, it is capacity at a discount. Hackathon
 credits are the clearest case. Tributary's settlement layer is being built
-for exactly that supply, wherever the provider's terms allow it.
+for exactly that supply, wherever the provider's terms allow it. AI agents
+feel both problems most: a pool of several keys spreads their requests
+across several rate limits, and agents are commonly run on granted credits.
 
 ## How it works
 
 ![Architecture: governance on your machine, settlement on Solana devnet; the dashed Merkle payout path is tests only](docs/images/architecture.png)
+
+### Off the chain
 
 1. A member or an agent calls the gateway with **their own pool key**, using
    the OpenAI-compatible API.
@@ -82,11 +123,15 @@ for exactly that supply, wherever the provider's terms allow it.
    ledger**, and the books say exactly what each depositor earned: the burn
    minus an 8% operator fee. A window is settled once and cannot be paid
    twice.
-5. The payouts are merkleized and the **root is posted to the Solana
+5. Every admin action that changes state is written to the **append-only
+   audit log**.
+
+### On the chain
+
+1. The payouts are merkleized and the **root is posted to the Solana
    program**. A depositor claims with a proof after a challenge window.
    *This step is being built now: its twelve rules already exist as failing
    tests (see [What exists today](#what-exists-today)).*
-6. Every control-plane action is written to the **append-only audit log**.
 
 A reproducible run, from the no-key walkthrough
 ([`docs/founder-journey-settlement-screen.md`](docs/founder-journey-settlement-screen.md),
@@ -106,12 +151,12 @@ run (distributable $0.0378, fee $0.003024, paid out $0.034776):
 
 | Part | State | Evidence |
 |---|---|---|
+| Solana program: escrow vault, deposits, renter prepayment | Live on devnet since 2026-11-01 | [Program account](https://explorer.solana.com/address/9pEmyxftdRUZV2iw6ZzCNgZz9QygG53i7APNaWcEHvjX?cluster=devnet), [2-of-2 upgrade transaction](https://explorer.solana.com/tx/576QrbHPxvDB3P63nHedFA5hDqVBXJchzkauEvrpAJzHUyyDCnfd6KhXaRw2gePS7RF2NQh2eM5qsgj6wwCdeaP5?cluster=devnet), [soak report](docs/devnet-soak-m8.md) |
+| Adversarial audits | The escrow program was audited on 2026-11-02 and depositor mode on 2026-11-18 (eight findings); their findings were fixed or formally accepted (2026-11-02 and 2026-11-19); one residual raised since is open (A-061) | [`AUDIT.md`](AUDIT.md), [threat model](docs/threat-model.md) |
 | Gateway, organisation pools, dashboard (V1) | Released as v0.1.4 | [Release](https://github.com/Phat1911/Tributary/releases), [CI](https://github.com/Phat1911/Tributary/actions/workflows/ci.yml), the [Quickstart](#try-it) below |
 | Depositor pools, double-entry ledger, settle API | Experimental. In v0.1.4 in a pre-audit form; the audited settle (idempotent, posting to the books) is on `main` only, not yet in the release image | `crates/gateway`, `crates/ledger`; the [settlement journey](docs/founder-journey-settlement-screen.md) walks through the public API; the audit and fix log is in [`PLAN.md`](PLAN.md) (2026-11-18 and 2026-11-19) |
 | Settlement screen | On `main` after v0.1.4; ships in the next release | Screenshot above; `apps/dashboard/app/org/settlement` |
-| Solana program: escrow vault, deposits, renter prepayment | Live on devnet since 2026-11-01 | [Program account](https://explorer.solana.com/address/9pEmyxftdRUZV2iw6ZzCNgZz9QygG53i7APNaWcEHvjX?cluster=devnet), [2-of-2 upgrade transaction](https://explorer.solana.com/tx/576QrbHPxvDB3P63nHedFA5hDqVBXJchzkauEvrpAJzHUyyDCnfd6KhXaRw2gePS7RF2NQh2eM5qsgj6wwCdeaP5?cluster=devnet), [soak report](docs/devnet-soak-m8.md) |
 | Merkle-settled payouts: root, claim, challenge window, payout cap | In progress: twelve rules written as failing tests, implementation next | [The tests](https://github.com/Phat1911/Tributary/blob/m11/doctrine-suite/programs/pool/tests/m11_doctrine.rs) on branch `m11/doctrine-suite`, and [their CI run, red by design](https://github.com/Phat1911/Tributary/actions/runs/45791887787) |
-| Adversarial audits | The escrow program was audited on 2026-11-02 and depositor mode on 2026-11-18 (eight findings); their findings were fixed or formally accepted (2026-11-02 and 2026-11-19); one residual raised since is open (A-061) | [`AUDIT.md`](AUDIT.md), [threat model](docs/threat-model.md) |
 
 ![Review queue: leak signals with a severity and an action for each](docs/images/review-queue.png)
 
@@ -223,8 +268,8 @@ is [`docs/founder-journey-settlement-screen.md`](docs/founder-journey-settlement
 ## Built at Dev3pack × DSUC (Da Nang, 27–29 November 2026)
 
 Tributary is a submitted project at the Dev3pack × DSUC Build Station
-hackathon. The event's work is Merkle-settled payouts on Solana, built
-tests-first. Receipts are listed here as they land: commits, CI runs and
+hackathon. The event's work is on Solana: Merkle-settled payouts for AI
+credit pools, built tests-first. Receipts are listed here as they land: commits, CI runs and
 devnet transactions.
 
 - **Before the event (26 November):** the settlement screen
@@ -287,10 +332,9 @@ members. In V1 the operator is the team that runs the instance; the 8%
 is a parameter of the settle run and today it moves no money, it only
 splits two ledger accounts. That marketplace opens only behind provider and
 reseller agreements for credit transfer; no such agreement exists today.
-Until that gate opens, Tributary is exactly
-what you see: a free, self-hosted governance tool. No dollar is planned from
-terms-of-service-gray flows, and if the marketplace never opens, V1 stands
-on its own.
+Until that gate opens, Tributary is exactly what you see: a free,
+self-hosted governance tool with its settlement layer on devnet. No dollar
+is planned from terms-of-service-gray flows.
 
 Self-hosted *and* a marketplace? The boundary: V1 is governance inside one
 trust domain, with no blockchain, and your keys and usage data stay in your
