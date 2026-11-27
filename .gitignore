@@ -20,6 +20,8 @@ programs/pool/target/
 programs/pool/.anchor/
 # Standalone soak client's build dir (its Cargo.lock IS committed — pin it)
 scripts/devnet-soak/target/
+# Standalone M11 settlement GLUE's build dir (its Cargo.lock IS committed too)
+scripts/devnet-m11/target/
 # Devnet operational keypairs — pubkeys live in deploy/devnet-m8.json;
 # the keypairs themselves are NEVER committed (AGENTS secrets rule).
 target/m8-keys/
