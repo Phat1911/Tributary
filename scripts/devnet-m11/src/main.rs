@@ -192,13 +192,24 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let sig = send(
         &rpc,
         &[fund_bond_ix(
-            &program, &pool, &backend, &backend_ata, &usdc_mint, &bond_vault, &bond, bond_amount,
+            &program,
+            &pool,
+            &backend,
+            &backend_ata,
+            &usdc_mint,
+            &bond_vault,
+            &bond,
+            bond_amount,
         )],
         &backend.pubkey(),
         &[&backend],
     )
     .await?;
-    report("1/3 fund_bond", &sig, &format!("bonded {bond_amount} micro-USDC"));
+    report(
+        "1/3 fund_bond",
+        &sig,
+        &format!("bonded {bond_amount} micro-USDC"),
+    );
 
     // ---- Phase 2: post_root — one Merkle root for this window.
     let (vault, _) = find_pda(&[SEED_POOL, SEED_VAULT], &program);
@@ -220,7 +231,11 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         &[&backend],
     )
     .await?;
-    report("2/3 post_root", &sig, &format!("posted root for window {window}"));
+    report(
+        "2/3 post_root",
+        &sig,
+        &format!("posted root for window {window}"),
+    );
 
     // ---- Wait out the challenge window (invariant 11): no payout leaves the
     // vault until `posted_at + CHALLENGE_WINDOW_SLOTS`. posted_at is read
@@ -237,7 +252,10 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
         tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
     }
-    println!("[m11] challenge window passed — claiming {} leaves…", leaves.len());
+    println!(
+        "[m11] challenge window passed — claiming {} leaves…",
+        leaves.len()
+    );
 
     // ---- Phase 3: claim — one assisted-door claim per leaf, to the
     // depositor's USDC ATA (created idempotently if it does not exist).
@@ -247,7 +265,11 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         let depositor = Pubkey::new_from_array(leaf.depositor);
         let destination = ata(&depositor, &usdc_mint);
         let (marker, _) = find_pda(
-            &[SEED_CLAIM_MARKER, claim_marker_seed_root.as_ref(), &(index as u32).to_le_bytes()],
+            &[
+                SEED_CLAIM_MARKER,
+                claim_marker_seed_root.as_ref(),
+                &(index as u32).to_le_bytes(),
+            ],
             &program,
         );
         let mut ixs = vec![create_ata_idempotent_ix(
@@ -279,7 +301,10 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
-    println!("[m11] ALL {} PAYOUTS SETTLED — archive this output as the run evidence.", leaves.len());
+    println!(
+        "[m11] ALL {} PAYOUTS SETTLED — archive this output as the run evidence.",
+        leaves.len()
+    );
     Ok(())
 }
 
@@ -318,7 +343,12 @@ fn disc(name: &str) -> [u8; 8] {
 /// A pool-program instruction: discriminator + hand-serialized borsh args.
 /// (Hand-rolled so this crate needs no borsh dependency; the layouts are the
 /// same fixed-width LE fields the harness and the program's wire pin use.)
-fn pool_ix(program: &Pubkey, name: &str, mut args: Vec<u8>, accounts: Vec<AccountMeta>) -> Instruction {
+fn pool_ix(
+    program: &Pubkey,
+    name: &str,
+    mut args: Vec<u8>,
+    accounts: Vec<AccountMeta>,
+) -> Instruction {
     let mut data = disc(name).to_vec();
     data.append(&mut args);
     Instruction {
@@ -459,7 +489,12 @@ fn claim_ix(
 /// Associated-token-program `CreateIdempotent`: creates the depositor's USDC
 /// ATA if it does not exist, no-ops if it does — so the GLUE is safe to
 /// re-run. Accounts per the ATA program's create layout.
-fn create_ata_idempotent_ix(payer: &Pubkey, ata: &Pubkey, owner: &Pubkey, mint: &Pubkey) -> Instruction {
+fn create_ata_idempotent_ix(
+    payer: &Pubkey,
+    ata: &Pubkey,
+    owner: &Pubkey,
+    mint: &Pubkey,
+) -> Instruction {
     Instruction {
         program_id: Pubkey::new_from_array(ATA_PROGRAM_BYTES),
         accounts: vec![
