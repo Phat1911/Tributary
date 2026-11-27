@@ -374,8 +374,8 @@ education allocations, expiring promotions, and committed spend a team has
 paid for but will not consume. For that supply, selling below face value is
 salvage, not a price war. Where strangers
 exchange value, and nowhere else, the chain carries the receipts:
-append-only books, escrow no single person can move, every money moment a
-public record. Credits bought at face value never enter that market; the
+append-only books, an escrow that only the program's own instructions can
+move, every money moment a public record. Credits bought at face value never enter that market; the
 official provider is the right answer for those.
 
 ## Where to go next
