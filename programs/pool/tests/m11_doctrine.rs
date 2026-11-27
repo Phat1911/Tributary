@@ -1161,14 +1161,22 @@ async fn challenge_inside_the_window_freezes_that_roots_payouts_until_the_multis
     // Nobody but the multisig rules — not the challenger, not the operator.
     // (No code is pinned here: the refusal is Anchor's `has_one` gate on the
     // admin — a framework constant — and the state proof below is the pin.)
+    //
+    // The instruction names the ATTEMPTING key as `admin_authority` and that
+    // key signs — otherwise the transaction needs the real admin's signature
+    // and dies host-side at `Transaction::sign` before `has_one` can fire
+    // (founder ruling 2026-11-27, AUDIT A-063).
     for who in [&f.rogue, &f.backend] {
         let step = "a non-multisig key tries to resolve the challenge";
-        refused(
-            LABEL,
-            step,
-            f.send(f.resolve_ix(1, ixs::Ruling::Stands), &[who]),
-        )
-        .await;
+        let ix = ixs::resolve_challenge(
+            &addrs::pool(),
+            &who.pubkey(), // not the admin: `has_one = admin_authority` must refuse this
+            &addrs::root(1),
+            &addrs::bond(),
+            1,
+            ixs::Ruling::Stands,
+        );
+        refused(LABEL, step, f.send(ix, &[who])).await;
         assert_eq!(
             f.root(1).await.status,
             pool::RootStatus::Challenged,

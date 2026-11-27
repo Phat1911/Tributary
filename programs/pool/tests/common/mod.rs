@@ -1365,7 +1365,11 @@ pub mod ixs {
             vec![
                 AccountMeta::new_readonly(*pool, false),
                 AccountMeta::new_readonly(*authority, true), // the one signer (either door)
-                AccountMeta::new_readonly(*settlement_root, false),
+                // Writable: `claim` counts the payout on the root (`paid_out`,
+                // invariant 12) — the M11-A GO gate added `paid_out` without
+                // flipping this meta; ruled writable by the founder 2026-11-27
+                // (AUDIT A-062). Without it Anchor cannot serialize the update.
+                AccountMeta::new(*settlement_root, false),
                 AccountMeta::new(*destination, false),
                 AccountMeta::new(*vault, false),
                 AccountMeta::new(*claim_marker, false),
