@@ -22,7 +22,7 @@ pool; what their credits earn is kept in a double-entry ledger, to the
 micro-unit. The software is free and source-available (FSL-1.1-ALv2, which
 converts to Apache-2.0 after two years) and runs in one container.
 
-**Landing page:** <https://phat1911.github.io/Tributary/>. There is no hosted
+**Landing page:** <https://tributary-landing-woad.vercel.app/>. There is no hosted
 demo: run it locally with the Quickstart below.
 
 ![Dashboard: an organisation's members and its pools; keys are issued from a pool's page](docs/images/dashboard-org.png)
