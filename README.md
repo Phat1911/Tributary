@@ -5,12 +5,14 @@
 [![License: FSL-1.1-ALv2](https://img.shields.io/badge/license-FSL--1.1--ALv2-blue)](LICENSE)
 
 **Governed AI capacity: your team shares one AI key, everyone gets their
-own, and surplus credits can earn, with escrow and payouts on a Solana program.**
+own, and surplus credits can earn, with the money side on a Solana program.**
 
-Solana carries the money side. A program on devnet holds the escrow,
-records deposits and takes renter prepayments today; its payout
+Solana is where the money side goes. A program has been live on devnet
+since 1 November 2026. It holds a USDC escrow, takes and refunds renter
+prepayments, and records deposits as claims minted on the operator's word.
+It holds no funds today, and nothing draws on it yet. Its payout
 instructions (Merkle roots, claims with a proof, a challenge window) are
-being built this weekend, tests first. The rest runs on your own machine:
+this weekend's build, tests first. The rest runs on your own machine:
 Tributary is also a self-hosted gateway for teams that share AI capacity.
 Each member gets a personal key. Every request is metered and checked
 before it reaches the provider. Every admin action that changes state lands
@@ -27,10 +29,11 @@ demo: run it locally with the Quickstart below.
 ## At a glance
 
 - **A Solana program on devnet, governed by a 2-of-2 multisig** (2-of-3 is
-  the planned production posture). A USDC escrow that no single key can
-  move, deposits and renter prepayments have been live since 1 November
-  2026, and the program can be upgraded only by a multisig vote. Merkle-settled
-  payouts are this event's build, tests first: see [What exists today](#what-exists-today).
+  the planned production posture). A USDC escrow controlled by the program,
+  renter prepayments and refunds, and deposits recorded as claims have been
+  live since 1 November 2026. The program can be upgraded only by a 2-of-2
+  multisig vote. Merkle-settled payouts are this event's build, tests first:
+  see [What exists today](#what-exists-today).
 - **Surplus credits can earn.** A pool of kind `root` accepts depositor
   credits. Each request's cost is metered to the micro-unit against the
   depositor whose credits burned, and posted to the books when the window
@@ -54,14 +57,18 @@ answer one question exactly: who earned what, to the micro-unit. The
 on-chain part exists for the moment that answer turns into money between
 people who do not trust each other.
 
-- **Neither side holds the books or the money.** An operator who runs the
-  gateway controls its database, so it could alter what it owes. The escrow
-  and the payout records therefore live in a Solana program, not in the
-  operator's database.
-- **No single key can move the vault or upgrade the program.** The escrow is
-  a program-controlled account, and the upgrade authority is the vault of a
-  2-of-2 multisig. An upgrade needs two signatures; the one that put today's
-  program in place is
+- **Neither side should hold the books or the money.** An operator who runs
+  the gateway controls its database, so it could alter what it owes. That is
+  why the money, and with this weekend's build the payout records, belong in
+  a Solana program rather than in the operator's database. Today the escrow
+  is there; the payout records are not yet.
+- **Nobody can move another person's funds, and no single key can upgrade
+  the program.** The escrow is a token account controlled by the program. A
+  prepayment needs the renter's signature together with the operator's; a
+  refund goes only to the renter who prepaid, up to what that renter's
+  on-chain record allows. The upgrade authority is the vault of a 2-of-2
+  multisig: two approvals are needed to change the program, and the upgrade
+  that put today's code in place is
   [on-chain](https://explorer.solana.com/tx/576QrbHPxvDB3P63nHedFA5hDqVBXJchzkauEvrpAJzHUyyDCnfd6KhXaRw2gePS7RF2NQh2eM5qsgj6wwCdeaP5?cluster=devnet).
 - **The chain does money; servers do speed.** No AI request ever routes
   on-chain. Metering, quotas and leak detection stay off-chain, where they
@@ -72,9 +79,29 @@ people who do not trust each other.
   window; a root can never pay more than it declares (SPEC D45). These rules
   exist today as twelve failing tests, written before the code.
 
-Live on devnet since 1 November 2026: the escrow, deposits, renter
-prepayments, and upgrades by multisig vote. Added by this event: the payout
-rules above. Addresses and evidence: [What exists today](#what-exists-today).
+### The program, precisely
+
+Nine instructions, in `programs/pool/src/lib.rs`, each with its own tests in
+`programs/pool/tests`:
+
+| Instruction | Who signs | What it does |
+|---|---|---|
+| `initialize` | the deployment authority, the multisig's vault | creates the pool, its USDC escrow and a non-transferable claim mint, all program-derived accounts |
+| `record_contribution` | the operator's backend key | mints claim records for a depositor: an attestation from the books. The chain checks the signer and the caps, not a deposit's value |
+| `burn_claims` | the depositor, or the backend key | burns a depositor's claim records |
+| `prepay_renter` | the renter **and** the backend key | USDC into the escrow, recorded per renter |
+| `refund_renter` | the renter, or the backend key; the program signs the transfer | USDC back to that renter only, capped by the renter's record |
+| `pause`, `resume` | the admin authority, the multisig's vault | halts or restores the pool's state changes |
+| `set_backend_authority`, `set_admin_authority` | the admin authority | rotates the operator and admin keys |
+
+Two facts a reader should not have to dig for. The escrow currently holds
+**0 USDC**, and nothing yet draws on it: wiring prepaid escrow funds to
+served requests is the milestone after this one. And a deposit on-chain is a
+claim record the operator attests to; the chain verifies who signed, not
+what the deposit is worth. What removes that trust is this weekend's build:
+a payout root that can be checked against the published payouts, and a
+challenge window before anything is paid. Addresses and evidence:
+[What exists today](#what-exists-today).
 
 ## The problem it solves
 
@@ -103,8 +130,9 @@ holders, selling what they cannot use, below face value, is salvage rather
 than a price war; for a buyer, it is capacity at a discount. Hackathon
 credits are the clearest case. Tributary's settlement layer is being built
 for exactly that supply, wherever the provider's terms allow it. AI agents
-feel both problems most: a pool of several keys spreads their requests
-across several rate limits, and agents are commonly run on granted credits.
+feel both problems most: they are commonly run on granted credits, and in
+Tributary an agent is simply a member, with its own key and quota, calling
+the OpenAI-compatible API without a wallet.
 
 ## How it works
 
