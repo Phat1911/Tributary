@@ -59,6 +59,14 @@ student developer who kept running into exactly this trade.
   classifier is off by default and disclosed to members.
 - **A router is something you rent; this is a building you own.**
 
+**The other side of the same key.** Granted credits, such as hackathon
+prizes, education allocations and promotional credit, often come with an
+expiry date, and one person rarely uses them up in time. For their
+holders, selling what they cannot use, below face value, is salvage rather
+than a price war; for a buyer, it is capacity at a discount. Hackathon
+credits are the clearest case. Tributary's settlement layer is being built
+for exactly that supply, wherever the provider's terms allow it.
+
 ## How it works
 
 ![Architecture: governance on your machine, settlement on Solana devnet; the dashed Merkle payout path is tests only](docs/images/architecture.png)
@@ -288,7 +296,11 @@ Self-hosted *and* a marketplace? The boundary: V1 is governance inside one
 trust domain, with no blockchain, and your keys and usage data stay in your
 building. The marketplace is opt-in, pool by pool, built for teams and
 individuals holding surplus AI credits (students, startups, labs) supplying
-them, and cost-conscious builders drawing from them. Where strangers
+them, and cost-conscious builders drawing from them. That market lives on
+supply whose cost is already paid: granted credits, hackathon prizes,
+education allocations, expiring promotions, and committed spend a team has
+paid for but will not consume. For that supply, selling below face value is
+salvage, not a price war. Where strangers
 exchange value, and nowhere else, the chain carries the receipts:
 append-only books, escrow no single person can move, every money moment a
 public record. Credits bought at face value never enter that market; the
