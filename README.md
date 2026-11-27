@@ -5,7 +5,8 @@
 [![License: FSL-1.1-ALv2](https://img.shields.io/badge/license-FSL--1.1--ALv2-blue)](LICENSE)
 
 **Governed AI capacity: your team shares one AI key, everyone gets their
-own, and surplus credits can earn, with the money side on a Solana program.**
+own, and surplus credits can earn, with the money side being built on a Solana
+program.**
 
 Solana is where the money side goes. A program has been live on devnet
 since 1 November 2026. It holds a USDC escrow, takes and refunds renter
@@ -64,9 +65,11 @@ people who do not trust each other.
   is there; the payout records are not yet.
 - **Nobody can move another person's funds, and no single key can upgrade
   the program.** The escrow is a token account controlled by the program. A
-  prepayment needs the renter's signature together with the operator's; a
-  refund goes only to the renter who prepaid, up to what that renter's
-  on-chain record allows. The upgrade authority is the vault of a 2-of-2
+  prepayment is signed by the paying key together with the operator's backend
+  key. The paying key is normally the renter's own; an operator may also fund
+  a wallet-free renter this way (SPEC D44), a gap the audit tracks as A-043
+  until M10. A refund goes only to the renter who prepaid, up to what that
+  renter's on-chain record allows. The upgrade authority is the vault of a 2-of-2
   multisig: two approvals are needed to change the program, and the upgrade
   that put today's code in place is
   [on-chain](https://explorer.solana.com/tx/576QrbHPxvDB3P63nHedFA5hDqVBXJchzkauEvrpAJzHUyyDCnfd6KhXaRw2gePS7RF2NQh2eM5qsgj6wwCdeaP5?cluster=devnet).
@@ -86,21 +89,21 @@ Nine instructions, in `programs/pool/src/lib.rs`, each with its own tests in
 
 | Instruction | Who signs | What it does |
 |---|---|---|
-| `initialize` | the deployment authority, the multisig's vault | creates the pool, its USDC escrow and a non-transferable claim mint, all program-derived accounts |
-| `record_contribution` | the operator's backend key | mints claim records for a depositor: an attestation from the books. The chain checks the signer and the caps, not a deposit's value |
+| `initialize` | the deployment authority (the multisig's vault) and a fee payer | creates the pool, its USDC escrow and a non-transferable claim mint, all program-derived accounts |
+| `record_contribution` | the operator's backend key | mints claim records for a depositor: an attestation from the books. The chain checks the signer and the arithmetic, not a deposit's value |
 | `burn_claims` | the depositor, or the backend key | burns a depositor's claim records |
 | `prepay_renter` | the renter **and** the backend key | USDC into the escrow, recorded per renter |
 | `refund_renter` | the renter, or the backend key; the program signs the transfer | USDC back to that renter only, capped by the renter's record |
-| `pause`, `resume` | the admin authority, the multisig's vault | halts or restores the pool's state changes |
+| `pause`, `resume` | the admin authority, the multisig's vault | halt or restore every movement of funds |
 | `set_backend_authority`, `set_admin_authority` | the admin authority | rotates the operator and admin keys |
 
 Two facts a reader should not have to dig for. The escrow currently holds
 **0 USDC**, and nothing yet draws on it: wiring prepaid escrow funds to
-served requests is the milestone after this one. And a deposit on-chain is a
+served requests is an open earlier milestone, M10. And a deposit on-chain is a
 claim record the operator attests to; the chain verifies who signed, not
-what the deposit is worth. What removes that trust is this weekend's build:
-a payout root that can be checked against the published payouts, and a
-challenge window before anything is paid. Addresses and evidence:
+what the deposit is worth. What this weekend's build gives a depositor is a
+check on it: a payout root that can be checked against the published payouts,
+and a challenge window before anything is paid. Addresses and evidence:
 [What exists today](#what-exists-today).
 
 ## The problem it solves
