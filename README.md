@@ -242,7 +242,7 @@ Stated limits, as of this writing:
   **A-061**: the order in which depositors serve a model family can be
   steered by a depositor-supplied provider name. It is present in the
   v0.1.4 image; it cannot fire while every deposit in a pool uses the same
-  `provider` string, as the walkthrough and the demo data do. It has been
+  `provider` string, as the walkthrough does. It has been
   ruled (the order will depend on contributed weight and deposit age,
   never on a supplied string) and is scheduled for the next fix session.
 - **Failed upstream calls that answer with an HTTP error still burn the
@@ -250,12 +250,14 @@ Stated limits, as of this writing:
   answer must not burn the depositor's credits; the floor stays for
   successful answers that report no usage. The fix is scheduled with A-061.
 - **Money today is off-chain.** Deposits and earnings are micro-USD book
-  entries. On devnet a deposit is a claim record (SPEC D40), the vault
-  holds renter prepayments only, and no rate from micro-USD to USDC exists
-  yet.
-- **The challenge design is fixed, but it is tests only.** SPEC D45: a
+  entries. On devnet a deposit is a claim record (SPEC D40) and the vault
+  holds renter prepayments only; nothing yet funds it for payouts. The
+  program fixes the unit, one micro-USD is one USDC base unit, with no
+  conversion.
+- **The challenge design is settled, but it is tests only.** SPEC D45: a
   challenge freezes a root's payouts until the multisig rules, and a root
-  can never pay more than it declares.
+  can never pay more than it declares. The window length is still a
+  constant that must become a parameter before any mainnet use.
 - **The Merkle payout rules are tests, not code,** until the implementation
   lands on `main`.
 - **The program is on devnet only.** It has no on-chain `security.txt` and
