@@ -120,7 +120,7 @@ mod tests {
     fn apply_proof(leaf_index: u32, mut h: [u8; 32], proof: &[[u8; 32]]) -> [u8; 32] {
         let mut at = leaf_index;
         for sibling in proof {
-            h = if at % 2 == 0 {
+            h = if at.is_multiple_of(2) {
                 node_hash(h, *sibling)
             } else {
                 node_hash(*sibling, h)
@@ -141,10 +141,10 @@ mod tests {
                 })
                 .collect();
             let tree = Tree::new(&leaves);
-            for i in 0..n {
+            for (i, leaf) in leaves.iter().enumerate() {
                 let proof = tree.proof(i);
                 assert_eq!(
-                    apply_proof(i as u32, leaf_hash(&leaves[i]), &proof),
+                    apply_proof(i as u32, leaf_hash(leaf), &proof),
                     tree.root(),
                     "leaf {i} of a {n}-leaf tree must verify against the root"
                 );
