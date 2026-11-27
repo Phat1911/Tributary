@@ -60,8 +60,9 @@ findings A-019…A-029 ruled in and fixed in M5), the M5 hardening batch
 (trusted-proxy XFF spoofing A-019, quota atomicity A-020, dedupe A-021,
 sensitive-action gates A-026), the M8 Solana program's Session C
 (deployment-authority front-run A-041 and event-mirror truth A-042 fixed;
-A-043 accepted-until-M10 with a standing regression pin), and the advisory
-triage trail (e.g. A-045).
+A-043 accepted-until-M10 with a standing regression pin), M9 depositor
+mode's Session C (2026-11-18: eight findings, A-047…A-054, closed or
+formally accepted on 2026-11-19), and the advisory triage trail (e.g. A-045).
 
 ## What is NOT independently reviewed yet
 
@@ -75,10 +76,10 @@ Stated plainly, because strangers should know where the walls are thin:
   member-key verification (login throttling, cookie flags, key hashing) is
   journey-tested and CI-pinned but has not had an independent end-to-end
   audit. **Flagged as seeking external review.**
-- **Depositor mode** (M9, root pools — experimental): adversarially
-  audited on 2026-11-18 (eight findings, A-047…A-054) and fixed on
-  2026-11-19. One residual found since, A-061, is open. Until it closes,
-  treat `kind:"root"` as exactly what the README says: experimental.
+- **Depositor mode's residual** (M9, root pools — experimental): the audit
+  closed on 2026-11-19, but one high-severity finding raised since, A-061,
+  is open (ruled; fix scheduled). Until it closes, treat `kind:"root"` as
+  exactly what the README says: experimental.
 
 If you review either of the flagged areas and find something: disclosure
 path below, finder credit in AUDIT.md, PoC-or-no-finding applies to us too.
@@ -87,7 +88,7 @@ path below, finder credit in AUDIT.md, PoC-or-no-finding applies to us too.
 
 One maintainer builds this today. That is a real risk and it is mitigated
 the only way a small project honestly can: everything a successor needs is
-in the repo — SPEC.md (decisions D1–D43 with rationale), PLAN.md (what
+in the repo — SPEC.md (decisions D1–D45 with rationale), PLAN.md (what
 happened and why), AUDIT.md (what is broken or accepted, with PoCs),
 teaching comments through the code, dual-engine CI that enforces the
 invariants, and a license (FSL-1.1-ALv2) that converts every version to

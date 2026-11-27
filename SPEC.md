@@ -16,7 +16,7 @@
 
 Premium AI capacity is bought monthly and wasted monthly. Most plans and prepaid
 API credits go partially unused; most students and small teams cannot afford
-their own. **Tributary** is an open-source platform that turns surplus AI
+their own. **Tributary** is a source-available platform that turns surplus AI
 capacity into shared, governed, rentable pools — packaged as simply as Docker
 packaged containers:
 
@@ -125,7 +125,7 @@ per-org, off by default.
 3. **Not "trustless."** All marketing/docs describe *minimally trusted with
    verifiable accounting*. The chain settles payments; it cannot verify
    off-chain routing truth (see §10).
-4. **No token sale.** The protocol is open source; no ICO/token launch. Shares
+4. **No token sale.** The protocol is source-available; no ICO/token launch. Shares
    are ledger claims, not investments sold to the public. (Regulatory posture;
    revisit with counsel before V2 public launch.)
 5. **Chain-optional UX.** Renters and org members never *need* a wallet in V1/V2.
@@ -443,7 +443,7 @@ for any hosted demo (Hetzner-class, student budget); English docs first.
 | Risk | Severity | Mitigation |
 |---|---|---|
 | Provider ToS on key pooling | High | V1 is BYOK (orgs' own keys — normal gateway use); root pool = consented depositors; pursue reseller agreements as OpenRouter did |
-| Root pool ≈ investment scheme (regulatory) | High | No token sale; open-source protocol; jurisdiction review before V2 public launch; custodial prepaid only |
+| Root pool ≈ investment scheme (regulatory) | High | No token sale; source-available protocol; jurisdiction review before V2 public launch; custodial prepaid only |
 | Trust asymmetry (operator holds truth) | Medium | Merkle settlement + challenges + bonds (V2); self-host option always available |
 | Solo-founder scope death | Medium | Milestone discipline; ship-fast posture; libraries over NIH except core value |
 | Competition (LiteLLM et al.) | Medium | Wedge = leak prevention; unique = pool economics + Solana settlement |

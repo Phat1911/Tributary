@@ -9,7 +9,7 @@ own, and spare credits can earn, with Solana payouts in progress on devnet.**
 
 Tributary is a self-hosted gateway for teams that share AI capacity. Each
 member gets a personal key. Every request is metered and checked before it
-reaches the provider. Every admin action lands in an append-only audit log.
+reaches the provider. Every admin action that changes state lands in an append-only audit log.
 Depositors can put spare keys and credits into a pool; what their credits
 earn is kept in a double-entry ledger. Paying those earnings out through a
 Solana program is the part being built now. The software is free and
@@ -103,7 +103,7 @@ run (distributable $0.0378, fee $0.003024, paid out $0.034776):
 | Settlement screen | On `main` after v0.1.4; ships in the next release | Screenshot above; `apps/dashboard/app/org/settlement` |
 | Solana program: escrow vault, deposits, renter prepayment | Live on devnet since 2026-11-01 | [Program account](https://explorer.solana.com/address/9pEmyxftdRUZV2iw6ZzCNgZz9QygG53i7APNaWcEHvjX?cluster=devnet), [2-of-2 upgrade transaction](https://explorer.solana.com/tx/576QrbHPxvDB3P63nHedFA5hDqVBXJchzkauEvrpAJzHUyyDCnfd6KhXaRw2gePS7RF2NQh2eM5qsgj6wwCdeaP5?cluster=devnet), [soak report](docs/devnet-soak-m8.md) |
 | Merkle-settled payouts: root, claim, challenge window, payout cap | In progress: twelve rules written as failing tests, implementation next | [The tests](https://github.com/Phat1911/Tributary/blob/m11/doctrine-suite/programs/pool/tests/m11_doctrine.rs) on branch `m11/doctrine-suite`, and [their CI run, red by design](https://github.com/Phat1911/Tributary/actions/runs/45791887787) |
-| Adversarial audits | The escrow program was audited and fixed (2026-11-02); depositor mode was audited on 2026-11-18 (eight findings) and fixed on 2026-11-19; one residual found since is open (A-061) | [`AUDIT.md`](AUDIT.md), [threat model](docs/threat-model.md) |
+| Adversarial audits | The escrow program was audited on 2026-11-02 and depositor mode on 2026-11-18 (eight findings); their findings were fixed or formally accepted (2026-11-02 and 2026-11-19); one residual raised since is open (A-061) | [`AUDIT.md`](AUDIT.md), [threat model](docs/threat-model.md) |
 
 ![Review queue: leak signals with a severity and an action for each](docs/images/review-queue.png)
 
@@ -207,7 +207,8 @@ is [`docs/founder-journey-settlement-screen.md`](docs/founder-journey-settlement
 - Open the [upgrade transaction](https://explorer.solana.com/tx/576QrbHPxvDB3P63nHedFA5hDqVBXJchzkauEvrpAJzHUyyDCnfd6KhXaRw2gePS7RF2NQh2eM5qsgj6wwCdeaP5?cluster=devnet):
   the Squads program executes it, and the vault signs the inner *Upgrade*.
 - Run the settlement rules yourself. On branch `m11/doctrine-suite`, with
-  the toolchain pinned in CI (Agave v4.1.2):
+  the toolchain pinned in CI (Agave v4.1.2; a cold build takes well over two
+  minutes):
   `cd programs/pool && cargo-build-sbf --arch v3 && cd ../.. && cargo test -p pool`.
   Until the implementation lands, the twelve rule-named tests fail.
 
@@ -236,15 +237,25 @@ evidence, in public).
 Stated limits, as of this writing:
 
 - **Depositor mode is experimental.** It was adversarially audited on
-  2026-11-18 and fixed on 2026-11-19. One high-severity finding has been
-  raised since and is open, **A-061**: the order in which
-  depositors serve a model family can be steered by a depositor-supplied
-  provider name. It has been ruled (the order will depend on contributed
-  weight and deposit age, never on a supplied string) and is scheduled for
-  the next fix session.
+  2026-11-18; its eight findings were fixed or formally accepted on
+  2026-11-19. One high-severity finding has been raised since and is open,
+  **A-061**: the order in which depositors serve a model family can be
+  steered by a depositor-supplied provider name. It is present in the
+  v0.1.4 image; it cannot fire while every deposit in a pool uses the same
+  `provider` string, as the walkthrough and the demo data do. It has been
+  ruled (the order will depend on contributed weight and deposit age,
+  never on a supplied string) and is scheduled for the next fix session.
 - **Failed upstream calls that answer with an HTTP error still burn the
-  reserve estimate** (A-062). The founder has ruled that a failed answer
-  must not burn the depositor's credits; the fix is scheduled with A-061.
+  reserve estimate** (A-062). The founder has ruled that an HTTP-error
+  answer must not burn the depositor's credits; the floor stays for
+  successful answers that report no usage. The fix is scheduled with A-061.
+- **Money today is off-chain.** Deposits and earnings are micro-USD book
+  entries. On devnet a deposit is a claim record (SPEC D40), the vault
+  holds renter prepayments only, and no rate from micro-USD to USDC exists
+  yet.
+- **The challenge design is fixed, but it is tests only.** SPEC D45: a
+  challenge freezes a root's payouts until the multisig rules, and a root
+  can never pay more than it declares.
 - **The Merkle payout rules are tests, not code,** until the implementation
   lands on `main`.
 - **The program is on devnet only.** It has no on-chain `security.txt` and
@@ -262,8 +273,11 @@ rate-limit checks always run at the gateway before any upstream call.
 V1 is free forever, by strategy: adoption first, zero recurring cost. The
 first dollar Tributary plans to earn is an operator's settlement fee (a
 fixed 5–10% band) on marketplace volume, paid by operators, never by
-members. That marketplace opens only behind provider and reseller
-agreements for credit transfer. Until that gate opens, Tributary is exactly
+members. In V1 the operator is the team that runs the instance; the 8%
+is a parameter of the settle run and today it moves no money, it only
+splits two ledger accounts. That marketplace opens only behind provider and
+reseller agreements for credit transfer; no such agreement exists today.
+Until that gate opens, Tributary is exactly
 what you see: a free, self-hosted governance tool. No dollar is planned from
 terms-of-service-gray flows, and if the marketplace never opens, V1 stands
 on its own.
