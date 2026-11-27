@@ -1,15 +1,14 @@
-//! M11 SETTLEMENT — declarations and the Session-B stub contract
-//! (doctrine-suite mode, Session A, 2026-11-26; workflow step 14).
+//! M11 SETTLEMENT — the settlement layer, implemented
+//! (doctrine-suite mode: Session A, 2026-11-26, declarations; Session B,
+//! 2026-11-27, implementation to green; workflow step 14).
 //!
-//! This module DECLARES the settlement layer: seeds, state accounts, the
-//! typed account lists, the events and three Merkle helpers. The six
-//! INSTRUCTION HANDLERS live in `lib.rs`'s dispatcher
-//! (`#[program] mod pool_program` — Anchor 1.2 registers only handlers
-//! written directly inside that module) and every one of them is `todo!()`.
-//! The helper functions at the bottom of this file are `todo!()` too. So on
-//! this branch a call to any settlement instruction aborts before a single
-//! lamport or token unit moves — that abort IS the "expected RED" the
-//! doctrine suite (`tests/m11_doctrine.rs`) pins, test by test.
+//! This module carries the settlement layer: seeds, state accounts, the
+//! typed account lists, the events and the four Merkle helpers (`sha256`,
+//! `leaf_hash`, `node_hash`, `verify_proof`). The six INSTRUCTION HANDLERS
+//! live in `lib.rs`'s dispatcher (`#[program] mod pool_program` — Anchor 1.2
+//! registers only handlers written directly inside that module). Session A
+//! shipped these as `todo!()` stubs; Session B implemented them, and the
+//! twelve-test doctrine suite (`tests/m11_doctrine.rs`) is green.
 //!
 //! # The doctrine this module encodes (twelve sentences — the test names)
 //!
@@ -388,8 +387,10 @@ pub struct Claim<'info> {
     /// The one signer — WHICH door it opens is decided in the handler.
     pub authority: Signer<'info>,
 
-    /// The root the proof must verify against.
-    #[account(seeds = [SEED_ROOT, window.to_le_bytes().as_ref()], bump)]
+    /// The root the proof must verify against. `mut`: the handler counts the
+    /// payout on it (`paid_out`, invariant 12) — without `mut` Anchor never
+    /// serializes the update back, so the write is silently dropped.
+    #[account(mut, seeds = [SEED_ROOT, window.to_le_bytes().as_ref()], bump)]
     pub settlement_root: Account<'info, SettlementRoot>,
 
     /// Where the payout lands. `owner == depositor` is an ACCOUNT
@@ -605,56 +606,156 @@ pub struct BondSlashed {
 }
 
 // ---------------------------------------------------------------------------
-// Merkle helpers — Session B implements these four. Their BODIES are
-// `todo!()` like the handlers; the recipe each must follow is fixed above.
+// Merkle helpers — implemented by Session B against the recipe fixed above.
+// `sha256` is the `sol_sha256` syscall (GO-gate R1, road (b); AUDIT A-061);
+// the other three build on it and match the harness's off-chain tree.
 // ---------------------------------------------------------------------------
+
+/// The MURMUR3_32 hash of a syscall name, computed at compile time. This is
+/// the "static syscalls" calling convention the SBF toolchain uses: a
+/// syscall is invoked by CALLING this hash as an address, because the VM
+/// keeps its syscall registry keyed by exactly that hash — no `extern "C"`
+/// symbol and no load-time relocation is involved. (`extern "C"` is the
+/// WRONG road here: in a static-syscalls build the symbol is never bound,
+/// so the call lands as a BPF-to-BPF jump to an unmapped address and the VM
+/// dies with `exceeded max BPF to BPF call depth` — found the hard way.)
+///
+/// This is a verbatim, dependency-free copy of the const fn inside
+/// `solana_define_syscall::define_syscall!` (the macro every on-chain crate
+/// uses), re-declared because the kickoff forbids new dependencies and the
+/// Anchor cohort re-exports no hashing primitive (AUDIT A-058).
+#[cfg(target_os = "solana")]
+const fn murmur3_32(buf: &[u8], seed: u32) -> u32 {
+    const fn pre_mix(buf: [u8; 4]) -> u32 {
+        u32::from_le_bytes(buf)
+            .wrapping_mul(0xcc9e2d51)
+            .rotate_left(15)
+            .wrapping_mul(0x1b873593)
+    }
+    let mut hash = seed;
+    let mut i = 0;
+    while i < buf.len() / 4 {
+        let buf = [buf[i * 4], buf[i * 4 + 1], buf[i * 4 + 2], buf[i * 4 + 3]];
+        hash ^= pre_mix(buf);
+        hash = hash.rotate_left(13);
+        hash = hash.wrapping_mul(5).wrapping_add(0xe6546b64);
+        i += 1;
+    }
+    match buf.len() % 4 {
+        0 => {}
+        1 => hash ^= pre_mix([buf[i * 4], 0, 0, 0]),
+        2 => hash ^= pre_mix([buf[i * 4], buf[i * 4 + 1], 0, 0]),
+        3 => hash ^= pre_mix([buf[i * 4], buf[i * 4 + 1], buf[i * 4 + 2], 0]),
+        _ => {}
+    }
+    hash ^= buf.len() as u32;
+    hash ^= hash.wrapping_shr(16);
+    hash = hash.wrapping_mul(0x85ebca6b);
+    hash ^= hash.wrapping_shr(13);
+    hash = hash.wrapping_mul(0xc2b2ae35);
+    hash ^= hash.wrapping_shr(16);
+    hash
+}
+
+/// The address of the VM's SHA-256 syscall: `murmur3_32("sol_sha256")`.
+#[cfg(target_os = "solana")]
+const SOL_SHA256: usize = murmur3_32(b"sol_sha256", 0) as usize;
+
+/// One (address, length) input slice for the SHA-256 syscall — the VM's
+/// `SolBytes` record. `#[repr(C)]` pins the two fields to the exact 16-byte
+/// layout the syscall reads (an 8-byte pointer, then an 8-byte length), so
+/// no padding or reordering can corrupt what the VM sees.
+#[cfg(target_os = "solana")]
+#[repr(C)]
+struct SolBytes {
+    addr: *const u8,
+    len: u64,
+}
 
 /// SHA-256, FIPS 180-4. The suite hashes on the host with the `sha2` crate,
 /// so a correct implementation agrees with it bit for bit.
 ///
-/// WHY THIS IS A STUB AND NOT A DEPENDENCY: the kickoff forbids new
-/// dependencies, and the Anchor cohort this program builds on re-exports NO
-/// hashing primitive (`anchor_lang::solana_program` has no `hash` module),
-/// so a Merkle proof cannot be verified through an existing dependency
-/// (AUDIT A-058). The GO gate RULED the road (2026-11-26, ruling R1):
-///
-/// * **(b) THE RULING — the `sol_sha256` syscall**, declared in this module
-///   as an `extern "C"` function. It needs `unsafe`, which AGENTS.md admits
-///   only with an AUDIT.md entry — **Session B files that entry with the
-///   implementation** (what the `unsafe` covers and why it is sound).
-/// * **(c) The fallback — `sha2`**, the harness's own hasher, as a program
-///   dependency: only if the syscall road turns out to be blocked. It is a
-///   new `[dependencies]` line, so it still needs workflow step 10 and the
-///   director's approval, and it must not move the A-033 lattice.
-///
-/// Either satisfies the contract above; nothing else about the stub depends
-/// on the choice.
-pub fn sha256(_data: &[u8]) -> [u8; 32] {
-    todo!("Session B: SHA-256 (FIPS 180-4) by the sol_sha256 syscall — see the doc comment")
+/// Implemented with the `sol_sha256` SYSCALL (GO-gate ruling R1, road (b)):
+/// no dependency, and the on-chain hasher is the VM's own audited one. The
+/// syscall ABI: it reads `vals_len` `SolBytes` records at `vals`, hashes
+/// their concatenation, writes the 32-byte digest at `result`, returns 0.
+/// The `unsafe` this needs is covered by AUDIT.md A-061; the soundness
+/// argument is the SAFETY comment at the call site below.
+pub fn sha256(data: &[u8]) -> [u8; 32] {
+    #[cfg(target_os = "solana")]
+    {
+        // One input slice covering all of `data`; the digest lands in `out`.
+        let input = [SolBytes {
+            addr: data.as_ptr(),
+            len: data.len() as u64,
+        }];
+        let mut out = [0u8; 32];
+        // SAFETY: `SOL_SHA256` is the murmur3 hash of "sol_sha256", which IS
+        // the address of the VM's registered SHA-256 syscall (the registry is
+        // keyed by that hash), so transmuting it to the documented 3-argument
+        // function-pointer type yields a valid callee with the exact ABI the
+        // syscall expects. For the duration of the call `input` is a live,
+        // aligned one-element `SolBytes` array (16 bytes) and `data` outlives
+        // it, so the VM reads only initialized memory we own; `out` is a
+        // writable 32-byte stack buffer, exactly the digest size written;
+        // `vals_len` is 1, matching the array length. No pointer escapes the
+        // call, so nothing dangles afterwards.
+        unsafe {
+            let syscall: unsafe extern "C" fn(*const u8, u64, *mut u8) -> u64 =
+                core::mem::transmute(SOL_SHA256);
+            syscall(input.as_ptr() as *const u8, 1, out.as_mut_ptr());
+        }
+        out
+    }
+    #[cfg(not(target_os = "solana"))]
+    {
+        // Never executed: the helpers run only inside the compiled program
+        // (the SBF .so), and the host-side unit tests pin wire shapes, not
+        // hashes. The syscall has no host equivalent without a new
+        // dependency, which the kickoff forbids.
+        let _ = data;
+        unimplemented!("sol_sha256 exists only inside the SBF VM; host builds never hash")
+    }
 }
 
-/// `SHA-256(depositor ‖ amount_le_u64)` — a leaf of the payout tree.
-pub fn leaf_hash(_depositor: &Pubkey, _amount: u64) -> [u8; 32] {
-    todo!("Session B: leaf_hash — SHA-256(depositor pubkey ‖ amount as LE u64)")
+/// `SHA-256(depositor ‖ amount_le_u64)` — a leaf of the payout tree. The
+/// preimage is exactly 40 bytes (32 + 8) on the stack: no heap allocation
+/// on-chain, and a length no interior node can share (64), so a leaf can
+/// never pose as a node.
+pub fn leaf_hash(depositor: &Pubkey, amount: u64) -> [u8; 32] {
+    let mut preimage = [0u8; 40];
+    preimage[..32].copy_from_slice(depositor.as_ref());
+    preimage[32..].copy_from_slice(&amount.to_le_bytes());
+    sha256(&preimage)
 }
 
 /// `SHA-256(left ‖ right)` — an interior node of the payout tree. Order
 /// matters: this is NOT a sorted-pair tree (see "Why the proof is bound to
-/// the leaf's INDEX" in the module docs).
-pub fn node_hash(_left: [u8; 32], _right: [u8; 32]) -> [u8; 32] {
-    todo!("Session B: node_hash — SHA-256(left ‖ right)")
+/// the leaf's INDEX" in the module docs). The 64-byte preimage is built in
+/// one stack buffer.
+pub fn node_hash(left: [u8; 32], right: [u8; 32]) -> [u8; 32] {
+    let mut preimage = [0u8; 64];
+    preimage[..32].copy_from_slice(&left);
+    preimage[32..].copy_from_slice(&right);
+    sha256(&preimage)
 }
 
 /// True iff `leaf`, hashed up through `proof` while walking the bits of
-/// `leaf_index` (even index: the node is on the left), reaches `root`.
-/// Pure: reads nothing but its arguments.
-pub fn verify_proof(
-    _root: [u8; 32],
-    _leaf_index: u32,
-    _leaf: [u8; 32],
-    _proof: &[[u8; 32]],
-) -> bool {
-    todo!("Session B: verify_proof — walk the index bits, one node_hash per sibling")
+/// `leaf_index` (even index: the running hash goes on the LEFT of its
+/// sibling), reaches `root`. Pure: reads nothing but its arguments. One
+/// `node_hash` per sibling, exactly the off-chain builder's `apply_proof`.
+pub fn verify_proof(root: [u8; 32], leaf_index: u32, leaf: [u8; 32], proof: &[[u8; 32]]) -> bool {
+    let mut h = leaf;
+    let mut at = leaf_index;
+    for sibling in proof {
+        h = if at.is_multiple_of(2) {
+            node_hash(h, *sibling)
+        } else {
+            node_hash(*sibling, h)
+        };
+        at >>= 1;
+    }
+    h == root
 }
 
 // ---------------------------------------------------------------------------
