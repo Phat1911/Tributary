@@ -75,10 +75,10 @@ Stated plainly, because strangers should know where the walls are thin:
   member-key verification (login throttling, cookie flags, key hashing) is
   journey-tested and CI-pinned but has not had an independent end-to-end
   audit. **Flagged as seeking external review.**
-- **Depositor mode** (M9, root pools — experimental): the adversarial
-  audit session is scheduled for this week; until it runs and its findings
-  close, treat `kind:"root"` as exactly what the README says:
-  experimental.
+- **Depositor mode** (M9, root pools — experimental): adversarially
+  audited on 2026-11-18 (eight findings, A-047…A-054) and fixed on
+  2026-11-19. One residual found since, A-061, is open. Until it closes,
+  treat `kind:"root"` as exactly what the README says: experimental.
 
 If you review either of the flagged areas and find something: disclosure
 path below, finder credit in AUDIT.md, PoC-or-no-finding applies to us too.

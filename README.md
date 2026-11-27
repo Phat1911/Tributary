@@ -5,18 +5,21 @@
 [![License: FSL-1.1-ALv2](https://img.shields.io/badge/license-FSL--1.1--ALv2-blue)](LICENSE)
 
 **Governed AI capacity: your team shares one AI key, everyone gets their
-own, and spare credits can earn, settled on Solana.**
+own, and spare credits can earn, with Solana payouts in progress on devnet.**
 
 Tributary is a self-hosted gateway for teams that share AI capacity. Each
 member gets a personal key. Every request is metered and checked before it
-reaches the provider. Every action lands in an append-only audit log.
+reaches the provider. Every admin action lands in an append-only audit log.
 Depositors can put spare keys and credits into a pool; what their credits
 earn is kept in a double-entry ledger. Paying those earnings out through a
 Solana program is the part being built now. The software is free and
 source-available (FSL-1.1-ALv2, which converts to Apache-2.0 after two
 years) and runs in one container on your own machine.
 
-![Dashboard: every member has their own key](docs/images/dashboard-org.png)
+**Landing page:** <https://phat1911.github.io/Tributary/>. There is no hosted
+demo: run it locally with the Quickstart below.
+
+![Dashboard: an organisation's members and its pools; keys are issued from a pool's page](docs/images/dashboard-org.png)
 
 ## At a glance
 
@@ -27,15 +30,18 @@ years) and runs in one container on your own machine.
   seen from two networks) raise review flags. An audit log, enforced
   append-only by the database, records every control-plane action.
 - **Depositor pools with real books.** A pool of kind `root` accepts
-  depositor credits. Each request's cost is a book entry. A settle run pays
-  each depositor what their credits earned, minus an 8% operator fee, and
-  posts the run to the ledger once.
-- **A Solana program on devnet, governed by a 2-of-2 multisig.** A USDC
-  escrow, deposits and renter prepayments are live. Merkle-settled payouts
+  depositor credits. Each request's cost is metered to the micro-unit
+  against the depositor whose credits burned, and posted to the books when
+  the window is settled. A settle run pays each depositor what their
+  credits earned, minus an 8% operator fee, once per window.
+- **A Solana program on devnet, governed by a 2-of-2 multisig** (2-of-3 is
+  the planned production posture). A USDC escrow, deposits and renter
+  prepayments are live. Merkle-settled payouts
   are being built tests-first: see [What exists today](#what-exists-today).
 - **Tests before code, in public.** Security-critical features are written
   as failing tests first and then implemented to green. CI runs on every
-  push. The audit log is public.
+  push to `main` and on every pull request. The security findings log,
+  [`AUDIT.md`](AUDIT.md), is public.
 
 ## The problem it solves
 
@@ -55,43 +61,49 @@ student developer who kept running into exactly this trade.
 
 ## How it works
 
-![Architecture: governance on your machine, settlement on Solana devnet](docs/images/architecture.png)
+![Architecture: governance on your machine, settlement on Solana devnet; the dashed Merkle payout path is tests only](docs/images/architecture.png)
 
 1. A member or an agent calls the gateway with **their own pool key**, using
    the OpenAI-compatible API.
 2. The gateway **meters the request, checks quotas and watches for leaks**
    before any upstream call. It then forwards to the provider with a
    depositor's key.
-3. The cost of the request is recorded in the **double-entry ledger**, to
-   the micro-unit, against the depositor whose credits burned.
-4. At **settle**, the books say exactly what each depositor earned: the burn
-   minus an 8% operator fee. The run is posted once and cannot pay the same
-   window twice.
+3. The cost of the request is **metered to the micro-unit** against the
+   depositor whose credits burned.
+4. At **settle**, the consumed capacity is posted to the **double-entry
+   ledger**, and the books say exactly what each depositor earned: the burn
+   minus an 8% operator fee. A window is settled once and cannot be paid
+   twice.
 5. The payouts are merkleized and the **root is posted to the Solana
    program**. A depositor claims with a proof after a challenge window.
    *This step is being built now: its twelve rules already exist as failing
    tests (see [What exists today](#what-exists-today)).*
 6. Every control-plane action is written to the **append-only audit log**.
 
-One real request, end to end, from the depositor-mode trial with a Gemini
-upstream: it burned **2,850 micro-USD** of a depositor's credit. At settle,
-the books recorded an operator fee of **228** and a payout of **2,622**. The
-same three numbers appear in the settle result, the ledger rows and the
-settlement screen. (Prices are a flat estimate in this version, not the
-provider's real price table yet.)
+A reproducible run, from the no-key walkthrough
+([`docs/founder-journey-settlement-screen.md`](docs/founder-journey-settlement-screen.md),
+Part B): two requests against the repository's mock upstream burn **2,700
+micro-USD** each, **5,400** in total. The settle run returns an operator fee
+of **432** and pays out **4,968**, and the same two figures appear on the
+settlement screen and in the ledger rows. (This version prices every token
+at a flat 150 micro-USD; the provider's real price table is not wired in
+yet.)
 
-![The settlement screen: each depositor's contributed, burned and earned](docs/images/settlement-screen.png)
+The settlement screen, with a five-depositor root pool after one 8% settle
+run (distributable $0.0378, fee $0.003024, paid out $0.034776):
+
+![The settlement screen: each depositor's contributed, burned and earned, and the result of a settle run](docs/images/settlement-screen.png)
 
 ## What exists today
 
 | Part | State | Evidence |
 |---|---|---|
 | Gateway, organisation pools, dashboard (V1) | Released as v0.1.4 | [Release](https://github.com/Phat1911/Tributary/releases), [CI](https://github.com/Phat1911/Tributary/actions/workflows/ci.yml), the [Quickstart](#try-it) below |
-| Depositor pools, double-entry ledger, settle API | On `main`, experimental | `crates/gateway`, `crates/ledger`; the [settlement journey](docs/founder-journey-settlement-screen.md) walks through the public API |
+| Depositor pools, double-entry ledger, settle API | Experimental. In v0.1.4 in a pre-audit form; the audited settle (idempotent, posting to the books) is on `main` only, not yet in the release image | `crates/gateway`, `crates/ledger`; the [settlement journey](docs/founder-journey-settlement-screen.md) walks through the public API; the audit and fix log is in [`PLAN.md`](PLAN.md) (2026-11-18 and 2026-11-19) |
 | Settlement screen | On `main` after v0.1.4; ships in the next release | Screenshot above; `apps/dashboard/app/org/settlement` |
 | Solana program: escrow vault, deposits, renter prepayment | Live on devnet since 2026-11-01 | [Program account](https://explorer.solana.com/address/9pEmyxftdRUZV2iw6ZzCNgZz9QygG53i7APNaWcEHvjX?cluster=devnet), [2-of-2 upgrade transaction](https://explorer.solana.com/tx/576QrbHPxvDB3P63nHedFA5hDqVBXJchzkauEvrpAJzHUyyDCnfd6KhXaRw2gePS7RF2NQh2eM5qsgj6wwCdeaP5?cluster=devnet), [soak report](docs/devnet-soak-m8.md) |
 | Merkle-settled payouts: root, claim, challenge window, payout cap | In progress: twelve rules written as failing tests, implementation next | [The tests](https://github.com/Phat1911/Tributary/blob/m11/doctrine-suite/programs/pool/tests/m11_doctrine.rs) on branch `m11/doctrine-suite`, and [their CI run, red by design](https://github.com/Phat1911/Tributary/actions/runs/45791887787) |
-| Adversarial audits | The escrow program was audited and fixed; depositor mode is scheduled | [`AUDIT.md`](AUDIT.md), [threat model](docs/threat-model.md) |
+| Adversarial audits | The escrow program was audited and fixed (2026-11-02); depositor mode was audited on 2026-11-18 (eight findings) and fixed on 2026-11-19; one residual found since is open (A-061) | [`AUDIT.md`](AUDIT.md), [threat model](docs/threat-model.md) |
 
 ![Review queue: leak signals with a severity and an action for each](docs/images/review-queue.png)
 
@@ -130,9 +142,13 @@ docker run -d --name tributary -p 8111:8080 --env-file .env \
 ```
 
 **Sign in at http://localhost:8111.** Time to first login is about **2
-minutes with the prebuilt image** (the first `up` pulls ~110 MB), or
+minutes with the prebuilt image** (the first `up` pulls about 40 MB), or
 **10–15 minutes if it builds from source** (a cold Rust and dashboard
 compile).
+
+**The `:latest` image is release v0.1.4.** It contains depositor pools in
+their pre-audit form, but not the audited settle or the settlement screen;
+those are on `main` and need an image built from it.
 
 > **If `docker compose up -d` says `unknown shorthand flag: 'd'`:** the
 > compose plugin is missing. Fix: Docker Desktop → Settings → Resources →
@@ -159,9 +175,12 @@ compile).
 > shape is not translated. The free tier of AI Studio is rate-limited: fine
 > for demos and pilots, but expect upstream 429s under load.
 
-### See the settlement in two minutes
+### See the settlement
 
-With the stack up and `TOKEN` set to an organisation admin's session token:
+Sign in with any admin account, including the one `create-admin` made
+(`POST /api/v1/auth/login`), keep the returned token in `TOKEN`, create an
+organisation (`POST /api/v1/orgs` with `{"name":"…","slug":"…"}`) and use
+its `id` below:
 
 ```sh
 API=http://localhost:8111/api/v1
@@ -172,16 +191,16 @@ curl -s -X POST $API/pools/<pool id>/deposits -H "Authorization: Bearer $TOKEN" 
   -d '{"provider":"openai","key":"<a provider key>","base_url":"https://api.openai.com/v1","model_families":["gpt-4o-mini"],"contributed_micros":5000000}'
 # 2. send a request with a member key (the dashboard issues one), then read the books
 curl -s $API/pools/<pool id>/bucket-positions -H "Authorization: Bearer $TOKEN"
-# 3. settle the last hour with an 8% fee
+# 3. settle a window (here: the last hour) with an 8% fee
 curl -s -X POST $API/pools/<pool id>/settle -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
   -d "{\"from_ms\":$(( ($(date +%s) - 3600) * 1000 )),\"to_ms\":$(date +%s)000,\"fee_bps\":800}"
 ```
 
-The dashboard shows the same books under **Settlement**. A complete
-walkthrough that needs no real key (it uses the repository's mock upstream)
+On an image built from `main`, the dashboard shows the same books under
+**Settlement**. A complete walkthrough that needs no real key (it uses the repository's mock upstream)
 is [`docs/founder-journey-settlement-screen.md`](docs/founder-journey-settlement-screen.md).
 
-### Verify the on-chain part in two minutes
+### Verify the on-chain part yourself
 
 - Open the [program account on devnet](https://explorer.solana.com/address/9pEmyxftdRUZV2iw6ZzCNgZz9QygG53i7APNaWcEHvjX?cluster=devnet):
   *Upgradeable: yes*, and *Upgrade authority* `BhLQqw…`, the multisig's vault.
@@ -192,7 +211,7 @@ is [`docs/founder-journey-settlement-screen.md`](docs/founder-journey-settlement
   `cd programs/pool && cargo-build-sbf --arch v3 && cd ../.. && cargo test -p pool`.
   Until the implementation lands, the twelve rule-named tests fail.
 
-## Built at Dev3pack x DSUC (Da Nang, 27–29 November 2026)
+## Built at Dev3pack × DSUC (Da Nang, 27–29 November 2026)
 
 Tributary is a submitted project at the Dev3pack × DSUC Build Station
 hackathon. The event's work is Merkle-settled payouts on Solana, built
@@ -203,7 +222,9 @@ devnet transactions.
   ([`1f12408`](https://github.com/Phat1911/Tributary/commit/1f12408)) and
   the twelve settlement rules as failing tests
   ([`2bcd448`](https://github.com/Phat1911/Tributary/commit/2bcd448)).
-- **During the event:** updated as each part lands.
+- **During the event (27–29 November):** in progress. No Merkle root has
+  been posted on devnet yet; receipts (commits, CI runs, transactions) will
+  be listed here as each part lands.
 
 ## Security and known limits
 
@@ -214,14 +235,16 @@ evidence, in public).
 
 Stated limits, as of this writing:
 
-- **Depositor mode is experimental.** Its adversarial audit is scheduled.
-  One high-severity finding is open, **A-061**: the order in which
+- **Depositor mode is experimental.** It was adversarially audited on
+  2026-11-18 and fixed on 2026-11-19. One high-severity finding has been
+  raised since and is open, **A-061**: the order in which
   depositors serve a model family can be steered by a depositor-supplied
   provider name. It has been ruled (the order will depend on contributed
   weight and deposit age, never on a supplied string) and is scheduled for
   the next fix session.
 - **Failed upstream calls that answer with an HTTP error still burn the
-  reserve estimate** (A-062). The fix is scheduled with A-061.
+  reserve estimate** (A-062). The founder has ruled that a failed answer
+  must not burn the depositor's credits; the fix is scheduled with A-061.
 - **The Merkle payout rules are tests, not code,** until the implementation
   lands on `main`.
 - **The program is on devnet only.** It has no on-chain `security.txt` and
@@ -279,7 +302,7 @@ apps/dashboard/    Next.js + TypeScript dashboard (pnpm workspace), baked into t
 programs/pool/     Solana program (Anchor): escrow vault, deposits, renter prepayment;
                    Merkle settlement (in progress)
 migrations/        sqlx migrations, run on SQLite and Postgres
-scripts/           demo seed, mock upstreams, devnet soak tool, price-table import
+scripts/           demo seed, mock upstreams, OpenAI-SDK contract test, devnet soak tool
 deploy/            Dockerfile, entrypoint, .env.example: single-container deployment
 docker-compose.yml the Quickstart deployment (reads a gitignored .env)
 landing/           the landing page, published on GitHub Pages
@@ -314,7 +337,7 @@ cd programs/pool && cargo-build-sbf --arch v3 && cd ../.. && cargo test -p pool
 ```
 
 CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs five jobs
-on every push: **rust** (fmt, clippy with warnings denied, the test suite on
+on every push to `main` and on every pull request: **rust** (fmt, clippy with warnings denied, the test suite on
 SQLite and Postgres), **dashboard** (lint, typecheck, build), **e2e**
 (Playwright journeys against a real stack), **sdk-contract** (the official
 OpenAI SDKs against OpenAI- and Gemini-compatible upstreams) and **deny**
@@ -323,7 +346,8 @@ OpenAI SDKs against OpenAI- and Gemini-compatible upstreams) and **deny**
 ## Author and license
 
 Built by Tran Dinh Hong Phat (Hong Phat), a second-year IT student in Da
-Nang, Vietnam.
+Nang, Vietnam. One maintainer builds Tributary today; the
+[threat model](docs/threat-model.md) says so plainly.
 
 Copyright 2026 Tran Dinh Hong Phat. Licensed under the
 [Functional Source License, Version 1.1, ALv2 Future License](LICENSE)
