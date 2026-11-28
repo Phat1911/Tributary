@@ -45,8 +45,13 @@ demo: run it locally with the Quickstart below.
   provider accounts or capacity it holds under an agreement. Each request's cost is metered to the micro-unit against the
   depositor whose credits burned, and posted to the books when the window
   is settled. A settle run pays each depositor what their credits earned,
-  minus an 8% operator fee, once per window. No key or granted credit is
-  ever shared or resold: a grant is used by the team it was given to.
+  minus an 8% operator fee, once per window. The roles, in the code's own
+  words: the supplier is the pool's depositor, the buyer its renter, and
+  the operator whoever runs the gateway, which today is the supplier
+  itself, so the supplier's own key posts the payout root; no buyer has
+  yet been served against a prepayment (M10). By policy, not by code: no
+  key or granted credit is shared or resold, and a grant is used by the
+  team it was given to.
 - **Per-member keys over pooled capacity.** Quotas and rate limits run at
   the gateway before any upstream call. Provider keys are envelope-encrypted
   at rest and shown afterwards only as a prefix and a last four.
@@ -156,12 +161,15 @@ it from anyone but the provider means paying first and trusting a stranger
 to hold your money. Tributary's settlement layer is built for that
 problem: a supplier runs a pool on its own provider accounts, so its keys
 never leave it; buyers prepay into an escrow only the program can move;
-at settle, the supplier is paid by rule. Where that stands on provider
-terms is said plainly: no key or granted credit is ever shared or resold.
-A granted credit is used by the team it was given to; a pool's supply is
-its owner's own capacity; and serving buyers a supplier has never met
-opens only behind the provider and reseller agreements that make it
-lawful, which do not exist today. AI agents feel the problem most: an
+at settle, the supplier is paid by rule. On devnet, so far, one key of
+ours has played both roles, and no buyer has yet been served against a
+prepayment (M10). Where that stands on provider terms is a policy of the
+project, not something the code enforces: no key or granted credit is
+shared or resold (the software does not check whose key a deposit
+carries); a granted credit is used by the team it was given to; a pool's
+supply is its owner's own capacity; and serving buyers a supplier has
+never met waits for provider and reseller agreements, which do not exist
+today. AI agents feel the problem most: an
 agent is simply a member, with its own key and quota, calling the
 OpenAI-compatible API without a wallet.
 
@@ -203,7 +211,7 @@ settlement screen and in the ledger rows. (This version prices every token
 at a flat 150 micro-USD; the provider's real price table is not wired in
 yet.)
 
-The settlement screen, with a five-depositor root pool after one 8% settle
+The settlement screen, with a root pool of four depositors in five positions after one 8% settle
 run (distributable $0.0378, fee $0.003024, paid out $0.034776):
 
 ![The settlement screen: each depositor's contributed, burned and earned, and the result of a settle run](docs/images/settlement-screen.png)
@@ -341,7 +349,7 @@ is [`docs/founder-journey-settlement-screen.md`](docs/founder-journey-settlement
 
 Tributary is a submitted project at the Dev3pack × DSUC Build Station
 hackathon. The event's work is on Solana: Merkle-settled payouts for AI
-credit pools, built tests-first. Receipts are listed here as they land: commits, CI runs and
+capacity pools, built tests-first. Receipts are listed here as they land: commits, CI runs and
 devnet transactions.
 
 **Five minutes, as a judge.** Four transactions to open, in this order:
@@ -466,7 +474,7 @@ first dollar Tributary plans to earn is an operator's settlement fee (a
 fixed 5–10% band) on marketplace volume, paid by operators, never by
 members. In V1 the operator is the team that runs the instance; the 8%
 is a parameter of the settle run and today it moves no money, it only
-splits two ledger accounts. That marketplace opens only behind provider and
+splits two ledger accounts. By policy, that marketplace opens only behind provider and
 reseller agreements for credit transfer; no such agreement exists today.
 Until that gate opens, Tributary is exactly what you see: a free,
 self-hosted governance tool with its settlement layer on devnet. No dollar
@@ -476,14 +484,13 @@ Self-hosted *and* a marketplace? The boundary: V1 is governance inside one
 trust domain, with no blockchain, and your keys and usage data stay in your
 building. The marketplace is opt-in, pool by pool: a supplier with capacity
 of its own (a team, a lab, a company with committed spend) serves builders
-and agents who prepay for it, at a pool price set by supply rather than
-list price. That supply is never a grant: a hackathon or education credit
+and agents who prepay for it, at the pool's price, today a flat 150
+micro-USD per token. That supply is never a grant: a hackathon or education credit
 is used by the team it was given to, through that team's own gateway, and
 never enters the market. Where strangers
 exchange value, and nowhere else, the chain carries the receipts:
 append-only books, an escrow that only the program's own instructions can
-move, every money moment a public record. Credits bought at face value never enter that market; the
-official provider is the right answer for those.
+move, every money moment a public record.
 
 ## Where to go next
 
