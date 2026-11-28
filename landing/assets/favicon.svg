@@ -1,10 +1,22 @@
-<!-- Tributary mark: three small streams joining one river (the metaphor,
-     drawn small). Kept as an inline <symbol> so index.html can reuse it
-     for the header brand via <use href="assets/favicon.svg#mark">. -->
+<!-- Tributary mark: three streams flowing into one pool (a tributary), drawn
+     for a 24x24 box. The file is both the browser-tab icon (the first group)
+     and an inline <symbol> that index.html reuses in its header via
+     <use href="assets/favicon.svg#mark"> (the second group). -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+  <g fill="none" stroke="#2dd4bf" stroke-width="1.9" stroke-linecap="round">
+    <path d="M5 3 C5 8, 12 8.5, 12 12"/>
+    <path d="M12 3 L12 12"/>
+    <path d="M19 3 C19 8, 12 8.5, 12 12"/>
+    <circle cx="12" cy="16.5" r="4.6"/>
+    <path d="M12 16.5 L12 16.5" stroke-width="3.6"/>
+  </g>
   <symbol id="mark" viewBox="0 0 24 24">
-    <path d="M3 5c2.5 0 2.5 2 5 2s2.5-2 5-2 2.5 2 5 2"/>
-    <path d="M3 11c2.5 0 2.5 2 5 2s2.5-2 5-2 2.5 2 5 2"/>
-    <path d="M8 20c1.7-2.2 3.3-3.3 5-3.3s3.3 1.1 5 3.3"/>
+    <g fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round">
+      <path d="M5 3 C5 8, 12 8.5, 12 12"/>
+      <path d="M12 3 L12 12"/>
+      <path d="M19 3 C19 8, 12 8.5, 12 12"/>
+      <circle cx="12" cy="16.5" r="4.6"/>
+      <path d="M12 16.5 L12 16.5" stroke-width="3.6"/>
+    </g>
   </symbol>
 </svg>
