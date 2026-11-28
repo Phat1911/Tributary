@@ -30,6 +30,10 @@
 //!   resume                   if the pool is paused, `resume` via 2-of-2.
 //!   prepay <micro_usdc>      renter prepay into the escrow vault so a claim
 //!                            can pay (backend gate + renter key sign).
+//!   post_root / challenge    SAT-2b's second root + permissionless freeze.
+//!   claim_frozen             simulate RootFrozen, then land that refusal.
+//!   resolve_stands           RootStands through the live next 2-of-2 index.
+//!   direct_claim             depositor signs and pays the marker rent.
 //!   verify                   re-read authority / pool / slot after the run.
 //!
 //! Env: M11_KEYS_DIR (default ../../target/m8-keys), M11_RPC (default
@@ -38,11 +42,13 @@
 
 use sha2::{Digest, Sha256};
 use solana_client::nonblocking::rpc_client::RpcClient;
+use solana_client::rpc_config::{RpcSendTransactionConfig, RpcTransactionConfig};
 use solana_sdk::bpf_loader_upgradeable;
+use solana_sdk::commitment_config::CommitmentConfig;
 use solana_sdk::instruction::{AccountMeta, Instruction};
 use solana_sdk::message::Message;
 use solana_sdk::pubkey::Pubkey;
-use solana_sdk::signature::{Keypair, Signer};
+use solana_sdk::signature::{Keypair, Signature, Signer};
 use solana_sdk::transaction::Transaction;
 use squads_multisig::anchor_lang::AnchorSerialize;
 use squads_multisig::client as squads;
@@ -76,6 +82,15 @@ const RENTER_USDC_ATA_STR: &str = "3GuSWoYUdyu3PHHs7M7FijfUGih4ySo2w76puJW9Y2xs"
 /// The multisig configuration account (members + threshold + live
 /// transaction_index); the vault is its index-0 vault PDA.
 const MULTISIG_STR: &str = "GuSeFfFkdKtjkubeLUEeBHW5pfHSJctGnz8AFk7xrCk5";
+/// SAT-2b fixes the second root's one leaf to this depositor; loading the
+/// wrong keypair must stop the run before any transaction is signed.
+const EXPECTED_DEPOSITOR_STR: &str = "Ah3TyjuC3agXQcsYty1VpNBWLRg4DkFWkhugsyoGLUuJ";
+/// The program stores a 32-byte fraud-proof commitment, while this exact
+/// reviewer-supplied preimage is 40 bytes. Store SHA-256(preimage), and keep
+/// the preimage itself in the public evidence document for verification.
+const CHALLENGE_EVIDENCE_PREIMAGE: &[u8] = b"reviewer-requested challenge, 2026-11-28";
+const CHALLENGE_WINDOW_SLOTS: u64 = 100;
+const WINDOW_MARGIN_SLOTS: u64 = 5;
 
 const SEED_POOL: &[u8] = b"pool";
 const SEED_VAULT: &[u8] = b"vault";
@@ -117,6 +132,7 @@ struct Ctx {
     teammate_rotated: Keypair,
     backend: Keypair,
     depositor: Keypair,
+    rogue_upgrader: Keypair,
 }
 
 async fn run() -> Result<(), Box<dyn std::error::Error>> {
@@ -142,7 +158,13 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         teammate_rotated: load_key("teammate-rotated")?,
         backend: load_key("backend")?,
         depositor: load_key("depositor")?,
+        rogue_upgrader: load_key("rogue-upgrader")?,
     };
+    assert_eq!(
+        ctx.depositor.pubkey().to_string(),
+        EXPECTED_DEPOSITOR_STR,
+        "depositor keypair does not match SAT-2b's leaf"
+    );
     let cmd = std::env::args()
         .nth(1)
         .unwrap_or_else(|| "preflight".into());
@@ -166,6 +188,47 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 .nth(2)
                 .ok_or("usage: m11_sync prepay <micro_usdc>")?;
             prepay(&ctx, arg.parse()?).await?;
+        }
+        "post_root" => {
+            let window = required_arg(
+                2,
+                "usage: m11_sync post_root <window_u64> <amount_micro_usdc>",
+            )?;
+            let amount = required_arg(
+                3,
+                "usage: m11_sync post_root <window_u64> <amount_micro_usdc>",
+            )?;
+            post_root_single(&ctx, window.parse()?, amount.parse()?).await?;
+        }
+        "challenge" => {
+            let window = required_arg(2, "usage: m11_sync challenge <window_u64>")?;
+            challenge_root(&ctx, window.parse()?).await?;
+        }
+        "claim_frozen" => {
+            let window = required_arg(
+                2,
+                "usage: m11_sync claim_frozen <window_u64> <amount_micro_usdc>",
+            )?;
+            let amount = required_arg(
+                3,
+                "usage: m11_sync claim_frozen <window_u64> <amount_micro_usdc>",
+            )?;
+            claim_frozen(&ctx, window.parse()?, amount.parse()?).await?;
+        }
+        "resolve_stands" => {
+            let window = required_arg(2, "usage: m11_sync resolve_stands <window_u64>")?;
+            resolve_stands(&ctx, window.parse()?).await?;
+        }
+        "direct_claim" => {
+            let window = required_arg(
+                2,
+                "usage: m11_sync direct_claim <window_u64> <amount_micro_usdc>",
+            )?;
+            let amount = required_arg(
+                3,
+                "usage: m11_sync direct_claim <window_u64> <amount_micro_usdc>",
+            )?;
+            direct_claim(&ctx, window.parse()?, amount.parse()?).await?;
         }
         "ata_probe" => ata_probe(&ctx).await?,
         other => return Err(format!("unknown subcommand {other}").into()),
@@ -370,7 +433,9 @@ async fn prepay(ctx: &Ctx, amount: u64) -> Result<(), Box<dyn std::error::Error>
     .await?;
     let after = token_amount(ctx, &vault_ta).await?;
     let record = prepaid_amount(ctx, &prepaid).await?;
-    println!("[m11-sync] prepay_renter {amount} micro-USDC sig={sig}");
+    let slot = signature_slot(ctx, &sig).await?;
+    println!("[m11-sync] prepay_renter {amount} micro-USDC sig={sig} slot={slot}");
+    println!("[m11-sync]     https://explorer.solana.com/tx/{sig}?cluster=devnet");
     println!("[m11-sync]   vault {before} -> {after}; renter prepaid record={record}");
     if after != before + amount {
         return Err(format!("vault mirror broken: {before} + {amount} != {after}").into());
@@ -399,21 +464,43 @@ async fn settle_verify(ctx: &Ctx, window: u64) -> Result<(), Box<dyn std::error:
     let status = r.data[88];
     let posted_at = i64::from_le_bytes(r.data[89..97].try_into().expect("posted_at"));
     let bond = u64::from_le_bytes(r.data[97..105].try_into().expect("bond"));
+    let challenger = Pubkey::new_from_array(r.data[105..137].try_into().expect("challenger"));
+    let mut evidence = [0u8; 32];
+    evidence.copy_from_slice(&r.data[137..169]);
+    let ruled_slash = u64::from_le_bytes(r.data[169..177].try_into().expect("ruled_slash"));
+    let victim = Pubkey::new_from_array(r.data[177..209].try_into().expect("victim"));
+    let stands_ruled = r.data[209] != 0;
     let paid_out = u64::from_le_bytes(r.data[210..218].try_into().expect("paid_out"));
+    let status_name = match status {
+        0 => "Active",
+        1 => "Challenged",
+        2 => "ProvenFalse",
+        3 => "Slashed",
+        _ => "UNKNOWN",
+    };
     println!(
-        "[m11-sync]   root.pool={r_pool} window={r_window} status={status} posted_at={posted_at}"
+        "[m11-sync]   root.pool={r_pool} window={r_window} status={status_name}({status}) posted_at={posted_at}"
     );
     println!("[m11-sync]   merkle_root=0x{}", hex32(&merkle));
     println!("[m11-sync]   total_payout={total} paid_out={paid_out} bond_snapshot={bond}");
+    println!(
+        "[m11-sync]   stands_ruled={stands_ruled} challenger={challenger} evidence=0x{}",
+        hex32(&evidence)
+    );
+    println!("[m11-sync]   ruled_slash={ruled_slash} victim={victim}");
     let (marker, _) = Pubkey::find_program_address(
         &[SEED_CLAIM_MARKER, root.as_ref(), &0u32.to_le_bytes()],
         &ctx.pool,
     );
     println!("[m11-sync]   claim marker (leaf 0) {marker}");
-    let m = ctx.rpc.get_account(&marker).await?;
-    let m_depositor = Pubkey::new_from_array(m.data[44..76].try_into().expect("depositor"));
-    let m_amount = u64::from_le_bytes(m.data[76..84].try_into().expect("amount"));
-    println!("[m11-sync]   marker.depositor={m_depositor} amount={m_amount}");
+    match ctx.rpc.get_account(&marker).await {
+        Ok(m) => {
+            let m_depositor = Pubkey::new_from_array(m.data[44..76].try_into().expect("depositor"));
+            let m_amount = u64::from_le_bytes(m.data[76..84].try_into().expect("amount"));
+            println!("[m11-sync]   marker.depositor={m_depositor} amount={m_amount}");
+        }
+        Err(_) => println!("[m11-sync]   marker does not exist yet (no leaf paid)"),
+    }
     let (bond_rec, _) = Pubkey::find_program_address(&[SEED_POOL, SEED_BOND], &ctx.pool);
     let (bond_vault, _) = Pubkey::find_program_address(&[SEED_POOL, SEED_BOND_VAULT], &ctx.pool);
     let bond_amt = prepaid_amount(ctx, &bond_rec).await?; // same layout: disc + u64
@@ -421,19 +508,487 @@ async fn settle_verify(ctx: &Ctx, window: u64) -> Result<(), Box<dyn std::error:
     let vault_amt = token_amount(ctx, &vault_ta).await?;
     println!("[m11-sync]   bond record {bond_rec} amount={bond_amt}; bond vault {bond_vault} balance={bond_vault_amt}");
     println!("[m11-sync]   escrow vault {vault_ta} balance={vault_amt}");
-    let ata_program = Pubkey::from_str("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL")?;
-    let dep_ata = Pubkey::find_program_address(
-        &[
-            m_depositor.as_ref(),
-            ctx.token_v3.as_ref(),
-            ctx.usdc.as_ref(),
-        ],
-        &ata_program,
-    )
-    .0;
+    let dep_ata = ata(&ctx.depositor.pubkey(), &ctx.usdc, &ctx.token_v3)?;
     let dep_amt = token_amount(ctx, &dep_ata).await?;
     println!("[m11-sync]   depositor USDC ATA {dep_ata} balance={dep_amt}");
     Ok(())
+}
+
+/// SAT-2b step 2: post the second settlement root without touching the bond.
+/// The root pays one leaf (the loaded depositor key) and snapshots the bond
+/// already standing from the SAT-2 run.
+async fn post_root_single(
+    ctx: &Ctx,
+    window: u64,
+    amount: u64,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let pool_pda = Pubkey::find_program_address(&[SEED_POOL], &ctx.pool).0;
+    let vault_ta = Pubkey::find_program_address(&[SEED_POOL, SEED_VAULT], &ctx.pool).0;
+    let bond = Pubkey::find_program_address(&[SEED_POOL, SEED_BOND], &ctx.pool).0;
+    let root = root_address(ctx, window);
+    if ctx.rpc.get_account(&root).await.is_ok() {
+        return Err(format!("root {root} already exists — roots are append-only").into());
+    }
+    let merkle_root = single_leaf_root(&ctx.depositor.pubkey(), amount);
+    let ix = pool_ix(
+        "post_root",
+        (window, merkle_root, amount),
+        vec![
+            AccountMeta::new_readonly(pool_pda, false),
+            AccountMeta::new(ctx.backend.pubkey(), true),
+            AccountMeta::new(root, false),
+            AccountMeta::new_readonly(vault_ta, false),
+            AccountMeta::new_readonly(bond, false),
+            AccountMeta::new_readonly(ctx.token_v3, false),
+            AccountMeta::new_readonly(solana_program::sysvar::clock::ID, false),
+            AccountMeta::new_readonly(solana_program::system_program::ID, false),
+        ],
+    );
+    let sig = send(ctx, &[ix], &ctx.backend.pubkey(), &[&ctx.backend]).await?;
+    print_confirmed_signature(ctx, "post_root", &sig).await?;
+    println!("[m11-sync]   root account {root} window={window} amount={amount}");
+    println!(
+        "[m11-sync]   leaf depositor {} amount={amount}",
+        ctx.depositor.pubkey()
+    );
+    println!("[m11-sync]   merkle_root=0x{}", hex32(&merkle_root));
+    settle_verify(ctx, window).await?;
+    Ok(())
+}
+
+/// SAT-2b step 4: the rogue key is not the operator and not a multisig
+/// member; it signs the permissionless challenge. The deploy key pays only
+/// the fee, so no faucet or key funding is needed.
+async fn challenge_root(ctx: &Ctx, window: u64) -> Result<(), Box<dyn std::error::Error>> {
+    let root = root_address(ctx, window);
+    let (posted_at, status) = root_posted_at_status(ctx, &root).await?;
+    if status != 0 {
+        return Err(format!("root {root} is not Active (status={status})").into());
+    }
+    let slot_now = ctx.rpc.get_slot().await?;
+    if slot_now >= posted_at + CHALLENGE_WINDOW_SLOTS {
+        return Err(format!(
+            "challenge window already closed: slot {slot_now} >= posted_at {posted_at} + {CHALLENGE_WINDOW_SLOTS}"
+        )
+        .into());
+    }
+    let evidence = sha256(CHALLENGE_EVIDENCE_PREIMAGE);
+    let pool_pda = Pubkey::find_program_address(&[SEED_POOL], &ctx.pool).0;
+    let ix = pool_ix(
+        "challenge",
+        (window, evidence),
+        vec![
+            AccountMeta::new_readonly(pool_pda, false),
+            AccountMeta::new_readonly(ctx.rogue_upgrader.pubkey(), true),
+            AccountMeta::new(root, false),
+            AccountMeta::new_readonly(solana_program::sysvar::clock::ID, false),
+        ],
+    );
+    println!(
+        "[m11-sync] challenge evidence preimage: {:?} ({} bytes)",
+        String::from_utf8_lossy(CHALLENGE_EVIDENCE_PREIMAGE),
+        CHALLENGE_EVIDENCE_PREIMAGE.len()
+    );
+    println!(
+        "[m11-sync] challenge evidence sha256=0x{}",
+        hex32(&evidence)
+    );
+    println!(
+        "[m11-sync] challenger {} is neither backend {} nor a multisig member",
+        ctx.rogue_upgrader.pubkey(),
+        ctx.backend.pubkey()
+    );
+    let sig = send(
+        ctx,
+        &[ix],
+        &ctx.deploy.pubkey(),
+        &[&ctx.deploy, &ctx.rogue_upgrader],
+    )
+    .await?;
+    print_confirmed_signature(ctx, "challenge", &sig).await?;
+    settle_verify(ctx, window).await?;
+    let (_, status) = root_posted_at_status(ctx, &root).await?;
+    if status != 1 {
+        return Err(format!("challenge did not freeze root: status={status}").into());
+    }
+    Ok(())
+}
+
+/// SAT-2b step 5: try the assisted claim against the frozen root. First the
+/// exact transaction is simulated and must read `RootFrozen`; then it is
+/// broadcast with skip_preflight so the refusal itself lands on devnet with
+/// a signature and slot. A successful claim here would be a doctrine bug and
+/// stops the run.
+async fn claim_frozen(
+    ctx: &Ctx,
+    window: u64,
+    amount: u64,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let root = root_address(ctx, window);
+    let (_, status) = root_posted_at_status(ctx, &root).await?;
+    if status != 1 {
+        return Err(format!("root {root} is not Challenged (status={status})").into());
+    }
+    let vault_ta = Pubkey::find_program_address(&[SEED_POOL, SEED_VAULT], &ctx.pool).0;
+    let destination = ata(&ctx.depositor.pubkey(), &ctx.usdc, &ctx.token_v3)?;
+    let before_vault = token_amount(ctx, &vault_ta).await?;
+    let before_destination = token_amount(ctx, &destination).await?;
+    let ixs = single_leaf_claim_ixs(ctx, window, amount, &ctx.backend.pubkey())?;
+    let blockhash = ctx.rpc.get_latest_blockhash().await?;
+    let mut tx = Transaction::new_unsigned(Message::new(&ixs, Some(&ctx.backend.pubkey())));
+    tx.sign(&[&ctx.backend], blockhash);
+    let sig = tx.signatures[0].to_string();
+    let sim = ctx.rpc.simulate_transaction(&tx).await?;
+    let sim_logs = sim.value.logs.clone().unwrap_or_default();
+    let sim_err = sim
+        .value
+        .err
+        .ok_or("frozen claim SIMULATION succeeded — STOP: the freeze did not hold")?;
+    println!("[m11-sync] frozen-claim simulation error: {sim_err:?}");
+    for line in &sim_logs {
+        println!("[m11-sync]   sim log: {line}");
+    }
+    if !root_frozen_error(&format!("{sim_err:?}"), &sim_logs) {
+        return Err("simulation failed, but not with RootFrozen/6015 — STOP".into());
+    }
+    let send_result = ctx
+        .rpc
+        .send_and_confirm_transaction_with_spinner_and_config(
+            &tx,
+            CommitmentConfig::confirmed(),
+            RpcSendTransactionConfig {
+                skip_preflight: true,
+                ..RpcSendTransactionConfig::default()
+            },
+        )
+        .await;
+    match send_result {
+        Ok(landed) => {
+            return Err(format!(
+                "frozen claim unexpectedly PAID at {landed} — STOP: doctrine violation"
+            )
+            .into())
+        }
+        Err(e) => {
+            let exact = format!("{e:?}");
+            println!("[m11-sync] frozen-claim on-chain refusal error: {exact}");
+            println!("[m11-sync] frozen-claim refusal signature {sig}");
+            if !exact.contains("6015") && !exact.contains("0x177f") {
+                return Err("landed refusal did not report RootFrozen/6015 — STOP".into());
+            }
+        }
+    }
+    let slot = failed_signature_slot(ctx, &sig).await?;
+    println!("[m11-sync] frozen-claim refusal landed in slot {slot}");
+    println!("[m11-sync]     https://explorer.solana.com/tx/{sig}?cluster=devnet");
+    let after_vault = token_amount(ctx, &vault_ta).await?;
+    let after_destination = token_amount(ctx, &destination).await?;
+    if (before_vault, before_destination) != (after_vault, after_destination) {
+        return Err("failed claim moved balances — STOP: transaction was not atomic".into());
+    }
+    settle_verify(ctx, window).await?;
+    Ok(())
+}
+
+/// SAT-2b step 6: a Squads 2-of-2 vault transaction carrying
+/// `resolve_challenge(window, RootStands)`.
+async fn resolve_stands(ctx: &Ctx, window: u64) -> Result<(), Box<dyn std::error::Error>> {
+    let root = root_address(ctx, window);
+    let (_, status) = root_posted_at_status(ctx, &root).await?;
+    if status != 1 {
+        return Err(format!("root {root} is not Challenged (status={status})").into());
+    }
+    let pool_pda = Pubkey::find_program_address(&[SEED_POOL], &ctx.pool).0;
+    let bond = Pubkey::find_program_address(&[SEED_POOL, SEED_BOND], &ctx.pool).0;
+    // Borsh enum Ruling::RootStands is the single variant byte 0.
+    let ix = pool_ix(
+        "resolve_challenge",
+        (window, 0u8),
+        vec![
+            AccountMeta::new_readonly(pool_pda, false),
+            AccountMeta::new_readonly(ctx.vault, true),
+            AccountMeta::new(root, false),
+            AccountMeta::new_readonly(bond, false),
+        ],
+    );
+    let ms_state = squads::get_multisig(&ctx.rpc, &ctx.ms).await?;
+    let idx =
+        propose_approve_execute(ctx, &ms_state, ix, "M11 RootStands ruling via 2-of-2").await?;
+    println!("[m11-sync] RootStands ruling executed via proposal index {idx}");
+    settle_verify(ctx, window).await?;
+    let acct = ctx.rpc.get_account(&root).await?;
+    if acct.data[88] != 0 || acct.data[209] == 0 {
+        return Err("ruling did not restore Active with stands_ruled=true".into());
+    }
+    Ok(())
+}
+
+/// SAT-2b step 7: the direct door. The loaded depositor key signs the claim
+/// and pays both the transaction fee and the claim marker's rent.
+async fn direct_claim(
+    ctx: &Ctx,
+    window: u64,
+    amount: u64,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let root = root_address(ctx, window);
+    let (posted_at, status) = root_posted_at_status(ctx, &root).await?;
+    if status != 0 {
+        return Err(format!("root {root} is not Active (status={status})").into());
+    }
+    let target = posted_at + CHALLENGE_WINDOW_SLOTS + WINDOW_MARGIN_SLOTS;
+    loop {
+        let now = ctx.rpc.get_slot().await?;
+        if now >= target {
+            println!("[m11-sync] challenge window passed: slot {now} >= target {target}");
+            break;
+        }
+        println!("[m11-sync] waiting for slot {target} (now {now})");
+        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+    }
+    let vault_ta = Pubkey::find_program_address(&[SEED_POOL, SEED_VAULT], &ctx.pool).0;
+    let destination = ata(&ctx.depositor.pubkey(), &ctx.usdc, &ctx.token_v3)?;
+    let before_vault = token_amount(ctx, &vault_ta).await?;
+    let before_destination = token_amount(ctx, &destination).await?;
+    let ixs = single_leaf_claim_ixs(ctx, window, amount, &ctx.depositor.pubkey())?;
+    let sig = send(ctx, &ixs, &ctx.depositor.pubkey(), &[&ctx.depositor]).await?;
+    print_confirmed_signature(ctx, "direct claim", &sig).await?;
+    settle_verify(ctx, window).await?;
+    let after_vault = token_amount(ctx, &vault_ta).await?;
+    let after_destination = token_amount(ctx, &destination).await?;
+    if after_destination != before_destination + amount {
+        return Err(format!(
+            "depositor delta broken: {before_destination} + {amount} != {after_destination}"
+        )
+        .into());
+    }
+    if after_vault != before_vault - amount {
+        return Err(
+            format!("vault delta broken: {before_vault} - {amount} != {after_vault}").into(),
+        );
+    }
+    let root_acct = ctx.rpc.get_account(&root).await?;
+    let total = u64::from_le_bytes(root_acct.data[80..88].try_into().expect("total"));
+    let paid_out = u64::from_le_bytes(root_acct.data[210..218].try_into().expect("paid_out"));
+    if paid_out != total || total != amount {
+        return Err(format!(
+            "root accounting broken: paid_out={paid_out} total={total} amount={amount}"
+        )
+        .into());
+    }
+    println!(
+        "[m11-sync] direct-claim deltas verified: depositor +{amount}, escrow -{amount}, root paid_out=total={amount}"
+    );
+    Ok(())
+}
+
+/// The exact CLI shape keeps each step explicit in shell history and logs.
+fn required_arg(index: usize, usage: &str) -> Result<String, Box<dyn std::error::Error>> {
+    std::env::args()
+        .nth(index)
+        .ok_or_else(|| usage.to_string().into())
+}
+
+/// The PDA of one settlement window.
+fn root_address(ctx: &Ctx, window: u64) -> Pubkey {
+    Pubkey::find_program_address(&[SEED_ROOT, window.to_le_bytes().as_ref()], &ctx.pool).0
+}
+
+/// Read just the two fields every SAT-2b gate needs: `posted_at` and status.
+async fn root_posted_at_status(
+    ctx: &Ctx,
+    root: &Pubkey,
+) -> Result<(u64, u8), Box<dyn std::error::Error>> {
+    let acct = ctx.rpc.get_account(root).await?;
+    let posted_at = i64::from_le_bytes(acct.data[89..97].try_into().expect("posted_at"));
+    Ok((u64::try_from(posted_at)?, acct.data[88]))
+}
+
+/// SHA-256 of one SAT-2b leaf; for a one-leaf tree this is also the root.
+fn single_leaf_root(depositor: &Pubkey, amount: u64) -> [u8; 32] {
+    let mut preimage = Vec::with_capacity(40);
+    preimage.extend_from_slice(depositor.as_ref());
+    preimage.extend_from_slice(&amount.to_le_bytes());
+    sha256(&preimage)
+}
+
+/// SHA-256, the only 32-byte commitment that can carry the 40-byte reviewer
+/// evidence preimage inside the program's `[u8; 32]` field.
+fn sha256(data: &[u8]) -> [u8; 32] {
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&Sha256::digest(data));
+    out
+}
+
+/// The canonical ATA for this devnet USDC mint and the Token v3 program.
+fn ata(
+    owner: &Pubkey,
+    mint: &Pubkey,
+    token_program: &Pubkey,
+) -> Result<Pubkey, Box<dyn std::error::Error>> {
+    let ata_program = Pubkey::from_str("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL")?;
+    Ok(Pubkey::find_program_address(
+        &[owner.as_ref(), token_program.as_ref(), mint.as_ref()],
+        &ata_program,
+    )
+    .0)
+}
+
+/// Associated-token-program `CreateIdempotent`, paid by `payer`; no-ops when
+/// the account already exists, so reruns are safe.
+fn create_ata_idempotent_ix(
+    payer: &Pubkey,
+    ata: &Pubkey,
+    owner: &Pubkey,
+    mint: &Pubkey,
+    token_program: &Pubkey,
+) -> Instruction {
+    Instruction {
+        program_id: Pubkey::from_str("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL")
+            .expect("ATA program id"),
+        accounts: vec![
+            AccountMeta::new(*payer, true),
+            AccountMeta::new(*ata, false),
+            AccountMeta::new_readonly(*owner, false),
+            AccountMeta::new_readonly(*mint, false),
+            AccountMeta::new_readonly(solana_program::system_program::ID, false),
+            AccountMeta::new_readonly(*token_program, false),
+        ],
+        data: vec![1u8],
+    }
+}
+
+/// One-leaf `claim` plus an idempotent ATA create. `authority` chooses the
+/// door (backend assisted or depositor direct); `payer` pays the marker rent.
+fn single_leaf_claim_ixs(
+    ctx: &Ctx,
+    window: u64,
+    amount: u64,
+    payer_and_authority: &Pubkey,
+) -> Result<Vec<Instruction>, Box<dyn std::error::Error>> {
+    let pool_pda = Pubkey::find_program_address(&[SEED_POOL], &ctx.pool).0;
+    let root = root_address(ctx, window);
+    let vault_ta = Pubkey::find_program_address(&[SEED_POOL, SEED_VAULT], &ctx.pool).0;
+    let marker = Pubkey::find_program_address(
+        &[SEED_CLAIM_MARKER, root.as_ref(), &0u32.to_le_bytes()],
+        &ctx.pool,
+    )
+    .0;
+    let destination = ata(&ctx.depositor.pubkey(), &ctx.usdc, &ctx.token_v3)?;
+    let claim = pool_ix(
+        "claim",
+        (
+            window,
+            0u32,
+            ctx.depositor.pubkey(),
+            amount,
+            Vec::<[u8; 32]>::new(),
+        ),
+        vec![
+            AccountMeta::new_readonly(pool_pda, false),
+            AccountMeta::new_readonly(*payer_and_authority, true),
+            AccountMeta::new(root, false),
+            AccountMeta::new(destination, false),
+            AccountMeta::new(vault_ta, false),
+            AccountMeta::new(marker, false),
+            AccountMeta::new(*payer_and_authority, true),
+            AccountMeta::new_readonly(solana_program::sysvar::clock::ID, false),
+            AccountMeta::new_readonly(ctx.token_v3, false),
+            AccountMeta::new_readonly(solana_program::system_program::ID, false),
+        ],
+    );
+    Ok(vec![
+        create_ata_idempotent_ix(
+            payer_and_authority,
+            &destination,
+            &ctx.depositor.pubkey(),
+            &ctx.usdc,
+            &ctx.token_v3,
+        ),
+        claim,
+    ])
+}
+
+/// Prints the signature, explorer link, and the slot read back from the RPC.
+async fn print_confirmed_signature(
+    ctx: &Ctx,
+    label: &str,
+    sig: &str,
+) -> Result<u64, Box<dyn std::error::Error>> {
+    let slot = signature_slot(ctx, sig).await?;
+    println!("[m11-sync] {label} sig={sig} slot={slot}");
+    println!("[m11-sync]     https://explorer.solana.com/tx/{sig}?cluster=devnet");
+    Ok(slot)
+}
+
+/// Waits until the RPC can read the transaction back, then returns its slot.
+async fn signature_slot(ctx: &Ctx, sig: &str) -> Result<u64, Box<dyn std::error::Error>> {
+    let signature = Signature::from_str(sig)?;
+    for _ in 0..40 {
+        if let Ok(tx) = ctx
+            .rpc
+            .get_transaction_with_config(&signature, transaction_config())
+            .await
+        {
+            if let Some(meta) = tx.transaction.meta {
+                if let Some(err) = meta.err {
+                    return Err(format!("transaction {sig} confirmed with error {err:?}").into());
+                }
+            }
+            return Ok(tx.slot);
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+    Err(format!("signature {sig} did not become readable").into())
+}
+
+/// The expected failed transaction: it must exist in confirmed history and
+/// its recorded error must be Anchor custom 6015 (`RootFrozen`).
+async fn failed_signature_slot(ctx: &Ctx, sig: &str) -> Result<u64, Box<dyn std::error::Error>> {
+    let signature = Signature::from_str(sig)?;
+    for _ in 0..40 {
+        if let Ok(tx) = ctx
+            .rpc
+            .get_transaction_with_config(&signature, transaction_config())
+            .await
+        {
+            let meta = tx
+                .transaction
+                .meta
+                .ok_or("failed transaction read-back had no meta")?;
+            let err = meta
+                .err
+                .ok_or("expected failed transaction succeeded — STOP")?;
+            let text = format!("{err:?}");
+            if !text.contains("6015") && !text.contains("0x177f") {
+                return Err(format!("failed transaction carried unexpected error {text}").into());
+            }
+            println!("[m11-sync] frozen-claim read-back meta.err: {text}");
+            return Ok(tx.slot);
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+    Err(format!("failed signature {sig} did not become readable").into())
+}
+
+/// All transaction read-backs use confirmed commitment and explicit v0
+/// support, which is also sufficient for the legacy transactions sent here.
+fn transaction_config() -> RpcTransactionConfig {
+    RpcTransactionConfig {
+        commitment: Some(CommitmentConfig::confirmed()),
+        max_supported_transaction_version: Some(0),
+        ..RpcTransactionConfig::default()
+    }
+}
+
+/// True when either the RPC error or program logs identify `RootFrozen`
+/// (Anchor code 6015 == 0x177f).
+fn root_frozen_error(error_text: &str, logs: &[String]) -> bool {
+    error_text.contains("RootFrozen")
+        || error_text.contains("6015")
+        || error_text.contains("0x177f")
+        || logs.iter().any(|line| {
+            line.contains("RootFrozen") || line.contains("6015") || line.contains("0x177f")
+        })
 }
 
 /// Verifies the backend's USDC ATA derivation against the LIVE ATA program
@@ -552,7 +1107,8 @@ async fn propose_approve_execute(
         &[&ctx.deploy, &ctx.founder],
     )
     .await?;
-    println!("[m11-sync]   index {tx_index} create+proposal sig={sig}");
+    let slot = signature_slot(ctx, &sig).await?;
+    println!("[m11-sync]   index {tx_index} create+proposal sig={sig} slot={slot}");
     println!("[m11-sync]     https://explorer.solana.com/tx/{sig}?cluster=devnet");
     // BOTH of today's members approve — founder AND teammate-rotated.
     for member in [&ctx.founder, &ctx.teammate_rotated] {
@@ -572,8 +1128,9 @@ async fn propose_approve_execute(
             &[&ctx.deploy, member],
         )
         .await?;
+        let slot = signature_slot(ctx, &sig).await?;
         println!(
-            "[m11-sync]   index {tx_index} APPROVED by {} sig={sig}",
+            "[m11-sync]   index {tx_index} APPROVED by {} sig={sig} slot={slot}",
             member.pubkey()
         );
         println!("[m11-sync]     https://explorer.solana.com/tx/{sig}?cluster=devnet");
@@ -598,7 +1155,8 @@ async fn propose_approve_execute(
         &[&ctx.deploy, &ctx.founder],
     )
     .await?;
-    println!("[m11-sync]   index {tx_index} EXECUTED sig={sig}");
+    let slot = signature_slot(ctx, &sig).await?;
+    println!("[m11-sync]   index {tx_index} EXECUTED sig={sig} slot={slot}");
     println!("[m11-sync]     https://explorer.solana.com/tx/{sig}?cluster=devnet");
     Ok(u32::try_from(tx_index).expect("tx index fits u32"))
 }
@@ -651,6 +1209,16 @@ async fn send(
     let blockhash = ctx.rpc.get_latest_blockhash().await?;
     let mut tx = Transaction::new_unsigned(Message::new(ixs, Some(payer)));
     tx.sign(signers, blockhash);
+    // Never broadcast a success-path transaction that the RPC has not first
+    // simulated successfully. The intentional RootFrozen refusal uses its
+    // own explicit skip-preflight path in claim_frozen.
+    let sim = ctx.rpc.simulate_transaction(&tx).await?;
+    if let Some(err) = sim.value.err {
+        for line in sim.value.logs.unwrap_or_default() {
+            eprintln!("[m11-sync] simulation log: {line}");
+        }
+        return Err(format!("transaction simulation refused broadcast: {err:?}").into());
+    }
     ctx.rpc
         .send_and_confirm_transaction(&tx)
         .await
