@@ -2,11 +2,13 @@ name: CI
 
 on:
   push:
-    # m9/doctrine-suite rides the push trigger deliberately (doctrine-suite
-    # mode, AGENTS.md step 14): Session A's suite is EXPECTED-RED on this
-    # branch, and the red run IS the GO-gate artifact. Drop the branch from
-    # this list when M9 closes on main.
-    branches: [main, m9/doctrine-suite]
+    # Doctrine-suite branches ride the push trigger deliberately
+    # (doctrine-suite mode, AGENTS.md step 14): Session A's suite is
+    # EXPECTED-RED on the branch, and the red run IS the GO-gate artifact.
+    # Drop each branch from this list when its milestone closes on main.
+    # m9/doctrine-suite: M9-A (2026-11-11). m11/doctrine-suite: M11-A
+    # (2026-11-26) — red on the Rust job ONLY because of the M11 tests.
+    branches: [main, m9/doctrine-suite, m11/doctrine-suite]
   pull_request:
 
 env:

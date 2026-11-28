@@ -1,0 +1,30 @@
+[package]
+name = "devnet-m11"
+description = "M11 devnet settlement GLUE (standalone): builds the payout Merkle tree from a payouts JSON and submits fund_bond, post_root and claim to devnet (scripts/devnet-m11/README.md)."
+version = "0.1.0"
+edition = "2021"
+license = "FSL-1.1-ALv2"
+publish = false
+
+# Standalone on purpose — same reason as devnet-soak: the main workspace's
+# unified dependency graph cannot host a Solana 1.x client (pin conflicts
+# found 2026-10-30). This empty [workspace] table keeps cargo from adopting
+# the repo root workspace; this crate has its own Cargo.lock and is built
+# on its own.
+[workspace]
+
+[dependencies]
+solana-client = "=1.18.26"
+solana-sdk = "=1.18.26"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# bs58 for the pubkey <-> base58 conversions (the same codec solana uses).
+bs58 = "0.5"
+# sha2 computes the Anchor discriminators and the Merkle tree — the SAME
+# crate and recipe the pool test harness uses, so the tree this client
+# builds agrees with the program's on-chain verifier bit for bit.
+sha2 = "0.10"
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+
+[lints.rust]
+unsafe_code = "forbid"

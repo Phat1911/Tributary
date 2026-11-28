@@ -1,0 +1,3089 @@
+{
+  "address": "9pEmyxftdRUZV2iw6ZzCNgZz9QygG53i7APNaWcEHvjX",
+  "metadata": {
+    "name": "pool_program",
+    "version": "0.1.4",
+    "spec": "0.1.0",
+    "repository": "https://github.com/Phat1911/Tributary"
+  },
+  "docs": [
+    "# Instructions",
+    "",
+    "Nine implemented instructions: initialize, record_contribution,",
+    "burn_claims, prepay_renter, refund_renter, pause, resume, and two",
+    "authority rotations — plus six M11 settlement handlers that are",
+    "DECLARED with `todo!()` bodies (M11-A stubs, at the bottom of this",
+    "module). There is intentionally no `transfer_claim`, no `close_claim`,",
+    "no instruction that takes depositor USDC as principal — the absence of",
+    "an instruction IS a security property here (rules 1, 9 and 10)."
+  ],
+  "instructions": [
+    {
+      "name": "burn_claims",
+      "docs": [
+        "Exit a depositor's record: burn `amount` claims from their claim",
+        "account. NO USDC moves (D40) — principal was never on-chain money;",
+        "depositor-bound USDC only ever flows OUT via M11 settle payouts,",
+        "which reuse this instruction's account shapes.",
+        "",
+        "Signers — THE TWO DOORS: `backend_authority` (assisted; the",
+        "operator submitting for a custodial depositor, rule 10) OR the",
+        "depositor's own key (direct; the escape hatch that keeps exit",
+        "possible when the operator is evil or offline). With neither",
+        "signature the instruction refuses. The M11 exit ceiling attaches",
+        "identically on both doors, inside `check_withdrawal_ceiling`."
+      ],
+      "discriminator": [
+        81,
+        71,
+        171,
+        174,
+        107,
+        191,
+        249,
+        4
+      ],
+      "accounts": [
+        {
+          "name": "pool",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  111,
+                  111,
+                  108
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "authority",
+          "docs": [
+            "The one signer — WHICH door it opens is decided in the handler:",
+            "backend_authority (assisted) or `depositor` (direct). No `mut`:",
+            "burning pays no rent and moves no lamports."
+          ],
+          "signer": true
+        },
+        {
+          "name": "claim_mint",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  111,
+                  111,
+                  108
+                ]
+              },
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  108,
+                  97,
+                  105,
+                  109,
+                  95,
+                  109,
+                  105,
+                  110,
+                  116
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "claim_account",
+          "docs": [
+            "The `depositor` argument is bound to the seeds here — anchor",
+            "verifies this account IS `[claim, <that pubkey>]`, so the burned",
+            "balance is provably the named depositor's registry row."
+          ],
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  108,
+                  97,
+                  105,
+                  109
+                ]
+              },
+              {
+                "kind": "arg",
+                "path": "depositor"
+              }
+            ]
+          }
+        },
+        {
+          "name": "token_2022_program",
+          "address": "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"
+        }
+      ],
+      "args": [
+        {
+          "name": "depositor",
+          "type": "pubkey"
+        },
+        {
+          "name": "amount",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "challenge",
+      "docs": [
+        "Challenge a root: freeze its payouts. Permissionless — any key may",
+        "challenge, inside the window (SPEC §10).",
+        "",
+        "Doctrine: invariant 5 — `clock.slot` must be inside",
+        "`posted_at + CHALLENGE_WINDOW_SLOTS`, or the challenge refuses with",
+        "`ChallengeWindowClosed`; the root turns `Challenged`, its claims",
+        "freeze until the multisig rules, and `stands_ruled` is cleared (a new",
+        "challenge outranks an earlier \"stands\"). Emits `RootChallenged`."
+      ],
+      "discriminator": [
+        16,
+        107,
+        14,
+        39,
+        244,
+        150,
+        81,
+        187
+      ],
+      "accounts": [
+        {
+          "name": "pool",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  111,
+                  111,
+                  108
+                ]
+              }
+            ]
+          },
+          "relations": [
+            "settlement_root"
+          ]
+        },
+        {
+          "name": "challenger",
+          "docs": [
+            "Any funded key."
+          ],
+          "signer": true
+        },
+        {
+          "name": "settlement_root",
+          "docs": [
+            "`has_one = pool`: a root can only be challenged through ITS pool."
+          ],
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  115,
+                  101,
+                  116,
+                  116,
+                  108,
+                  101,
+                  109,
+                  101,
+                  110,
+                  116,
+                  95,
+                  114,
+                  111,
+                  111,
+                  116
+                ]
+              },
+              {
+                "kind": "arg",
+                "path": "window"
+              }
+            ]
+          }
+        },
+        {
+          "name": "clock",
+          "address": "SysvarC1ock11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "window",
+          "type": "u64"
+        },
+        {
+          "name": "evidence",
+          "type": {
+            "array": [
+              "u8",
+              32
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "claim",
+      "docs": [
+        "Claim one leaf: verify the inclusion proof against the published",
+        "root, pay `amount` USDC from the vault to the leaf's named",
+        "`depositor`, write the leaf's claim marker, and add `amount` to the",
+        "root's `paid_out`.",
+        "",
+        "Doctrine: invariant 2 — a proof that does not hash up to the root",
+        "refuses with `InvalidProof`; invariant 3 — the marker is plain",
+        "`init`, so a replayed leaf dies at account creation, and the proof",
+        "is bound to its index; invariant 4 — THE TWO DOORS (the backend, or",
+        "`depositor`'s own key — anything else is `ExitAuthority`) and the",
+        "destination must be owned by `depositor`; invariant 5 — a root that",
+        "is not `Active` refuses with `RootFrozen`; invariant 11 — a root",
+        "whose challenge window is still open refuses with",
+        "`ChallengeWindowOpen`, unless the multisig ruled it stands; invariant",
+        "12 — a claim that would push `paid_out` past `total_payout` refuses",
+        "with `PayoutExceedsTotal`. Emits `ClaimPaid`.",
+        "",
+        "Session B owes the FIRST TWO of these IN THIS ORDER — the suite pins",
+        "which refusal a shape gets: (1) the status, else `RootFrozen`;",
+        "(2) the window, else `ChallengeWindowOpen`. A root challenged while",
+        "still INSIDE its window is frozen, not merely delayed. After those:",
+        "the proof, the door, the declared total, then the transfer, the",
+        "marker and `paid_out += amount`."
+      ],
+      "discriminator": [
+        62,
+        198,
+        214,
+        193,
+        213,
+        159,
+        108,
+        210
+      ],
+      "accounts": [
+        {
+          "name": "pool",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  111,
+                  111,
+                  108
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "authority",
+          "docs": [
+            "The one signer — WHICH door it opens is decided in the handler."
+          ],
+          "signer": true
+        },
+        {
+          "name": "settlement_root",
+          "docs": [
+            "The root the proof must verify against. `mut`: the handler counts the",
+            "payout on it (`paid_out`, invariant 12) — without `mut` Anchor never",
+            "serializes the update back, so the write is silently dropped."
+          ],
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  115,
+                  101,
+                  116,
+                  116,
+                  108,
+                  101,
+                  109,
+                  101,
+                  110,
+                  116,
+                  95,
+                  114,
+                  111,
+                  111,
+                  116
+                ]
+              },
+              {
+                "kind": "arg",
+                "path": "window"
+              }
+            ]
+          }
+        },
+        {
+          "name": "destination",
+          "docs": [
+            "Where the payout lands. `owner == depositor` is an ACCOUNT",
+            "CONSTRAINT: neither door can route a payout anywhere else",
+            "(invariant 4)."
+          ],
+          "writable": true
+        },
+        {
+          "name": "vault",
+          "docs": [
+            "Escrow source — pool-owned; only this instruction can draw on it."
+          ],
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  111,
+                  111,
+                  108
+                ]
+              },
+              {
+                "kind": "const",
+                "value": [
+                  118,
+                  97,
+                  117,
+                  108,
+                  116
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "claim_marker",
+          "docs": [
+            "Plain `init`: the marker can be born ONCE per leaf. A replay fails",
+            "HERE, in account creation, before any handler logic runs",
+            "(invariant 3)."
+          ],
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  108,
+                  97,
+                  105,
+                  109,
+                  95,
+                  109,
+                  97,
+                  114,
+                  107,
+                  101,
+                  114
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "settlement_root"
+              },
+              {
+                "kind": "arg",
+                "path": "leaf_index"
+              }
+            ]
+          }
+        },
+        {
+          "name": "payer",
+          "docs": [
+            "Rent payer for the marker. A SEPARATE account from `authority` so the",
+            "direct door needs nothing from the depositor but their signature: any",
+            "funded key (the transaction's fee payer, a relayer) can pay."
+          ],
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "clock",
+          "docs": [
+            "The clock, DECLARED like in `post_root` and `challenge`: the handler",
+            "reads the slot from it to apply the challenge-window rule",
+            "(invariant 11)."
+          ],
+          "address": "SysvarC1ock11111111111111111111111111111111"
+        },
+        {
+          "name": "token_program",
+          "docs": [
+            "Token v3 ONLY. No Token-2022 program and no mint account appear in",
+            "this list: a claim moves USDC and cannot mint anything",
+            "(invariant 9)."
+          ],
+          "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "window",
+          "type": "u64"
+        },
+        {
+          "name": "leaf_index",
+          "type": "u32"
+        },
+        {
+          "name": "depositor",
+          "type": "pubkey"
+        },
+        {
+          "name": "amount",
+          "type": "u64"
+        },
+        {
+          "name": "proof",
+          "type": {
+            "vec": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "fund_bond",
+      "docs": [
+        "Bond the operator: move `amount` USDC from the operator's OWN wallet",
+        "into the bond vault and grow the bond record. Backend-signed (the",
+        "operator bonds its own money); emits `BondFunded`.",
+        "",
+        "Session B owes: the transfer, the record increment, the event, and",
+        "the usual refusals (paused pool, zero amount)."
+      ],
+      "discriminator": [
+        58,
+        44,
+        212,
+        175,
+        30,
+        17,
+        68,
+        62
+      ],
+      "accounts": [
+        {
+          "name": "pool",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  111,
+                  111,
+                  108
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "backend_authority",
+          "docs": [
+            "The operator's hot key — gate AND rent payer."
+          ],
+          "writable": true,
+          "signer": true,
+          "relations": [
+            "pool"
+          ]
+        },
+        {
+          "name": "source",
+          "docs": [
+            "Where the bond comes from: a wallet the BACKEND owns, on the pool's",
+            "USDC mint (the operator bonds its own money)."
+          ],
+          "writable": true
+        },
+        {
+          "name": "usdc_mint",
+          "docs": [
+            "The pool's USDC mint, as a typed ACCOUNT: Anchor's token-account",
+            "init can only bind `token::mint` to an account field, so the mint",
+            "rides along here and is pinned to the pool's own below (a foreign",
+            "mint cannot give birth to the bond vault)."
+          ]
+        },
+        {
+          "name": "bond_vault",
+          "docs": [
+            "The bond vault: a pool-owned token account, so no key can move the",
+            "bond directly — only `slash_bond` (a satisfied instruction) can."
+          ],
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  111,
+                  111,
+                  108
+                ]
+              },
+              {
+                "kind": "const",
+                "value": [
+                  98,
+                  111,
+                  110,
+                  100,
+                  95,
+                  118,
+                  97,
+                  117,
+                  108,
+                  116
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "bond",
+          "docs": [
+            "The bond record. `init_if_needed`: first funding creates it, later",
+            "fundings top it up (every reuse re-verifies seeds and owner)."
+          ],
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  111,
+                  111,
+                  108
+                ]
+              },
+              {
+                "kind": "const",
+                "value": [
+                  98,
+                  111,
+                  110,
+                  100
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "token_program",
+          "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "amount",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "initialize",
+      "docs": [
+        "One-time pool bootstrap. Creates the config PDA, the Token-2022",
+        "`NonTransferable` claim mint, and the USDC vault. Called by the",
+        "deployer immediately after program deploy; the `admin_authority`",
+        "passed in is the Squads multisig vault PDA (computed before this",
+        "call from the multisig's create key).",
+        "",
+        "# Who may call it — the A-041 gate (deployment front-run)",
+        "",
+        "The FIRST caller no longer wins: this instruction requires the",
+        "signature of THIS DEPLOYMENT'S UPGRADE AUTHORITY — the key or PDA",
+        "the BPF loader recorded in the program's ProgramData account when",
+        "the program was deployed. On devnet that authority is the Squads",
+        "multisig vault (2-of-2), so the pool cannot come into existence",
+        "without a 2-of-2 vote executing this instruction — the vault PDA's",
+        "signature arrives exactly the way `AdminGate`'s `admin_authority`",
+        "signatures do (Squads `execute_transaction` produces them",
+        "cross-program). Between deploy and initialize the singleton cannot",
+        "be captured: an attacker landing there has no multisig signature,",
+        "their initialize refuses (atomically — nothing is created), and",
+        "the operator's identical call succeeds whenever it lands. The dev",
+        "deploy key pays rent and holds nothing. An immutable deployment",
+        "(ProgramData authority `None`) can never birth a pool — refused",
+        "with the same error."
+      ],
+      "discriminator": [
+        175,
+        175,
+        109,
+        31,
+        13,
+        152,
+        155,
+        237
+      ],
+      "accounts": [
+        {
+          "name": "pool",
+          "docs": [
+            "The singleton config PDA — `init` makes this instruction once-only",
+            "(a second call finds the account occupied and aborts)."
+          ],
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  111,
+                  111,
+                  108
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "claim_mint",
+          "docs": [
+            "The claim registry mint PDA — initialized MANUALLY in the handler",
+            "(anchor-spl 1.x has no non_transferable account constraint): the",
+            "Token-2022 NonTransferable extension is initialized before any",
+            "supply exists, making transfers of this mint reject at the TOKEN",
+            "PROGRAM level forever (rule 9 enforcement at the lowest layer).",
+            "Mint authority is the pool PDA — only `record_contribution`",
+            "mints, only `burn_claims` burns.",
+            "CREATED and initialized by the handler's CPIs in this same",
+            "transaction (allocate -> NonTransferable -> mint state), so before",
+            "the handler runs it is an empty system account. The seeds",
+            "constraint above is the address check; the CPI chain is the",
+            "ownership check (it can only land on the Token-2022 program)."
+          ],
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  111,
+                  111,
+                  108
+                ]
+              },
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  108,
+                  97,
+                  105,
+                  109,
+                  95,
+                  109,
+                  105,
+                  110,
+                  116
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "usdc_mint",
+          "docs": [
+            "Existing USDC mint (SPL Token v3 on devnet — Circle faucet USDC).",
+            "The decimals constraint pins the micro-USD seam at bootstrap: a",
+            "non-6-decimals \"USDC\" cannot be custodied by this pool."
+          ]
+        },
+        {
+          "name": "vault",
+          "docs": [
+            "The escrow vault: a PDA token account, owner = pool PDA, so ONLY",
+            "this program (deposit/withdraw handlers) can ever move custodial",
+            "USDC. No human key, including the multisig's, signs token moves."
+          ],
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  111,
+                  111,
+                  108
+                ]
+              },
+              {
+                "kind": "const",
+                "value": [
+                  118,
+                  97,
+                  117,
+                  108,
+                  116
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "authority",
+          "docs": [
+            "Deployer (payer for the PDAs and rent). On devnet this is the",
+            "session deploy key; it receives NO standing authority — the admin",
+            "and backend authorities arrive as instruction arguments."
+          ],
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "program_data",
+          "docs": [
+            "The BPF loader's ProgramData account FOR THIS PROGRAM — the",
+            "deployment-authority source the A-041 gate reads (see handler).",
+            "Checked accounts: exact loader-derived address + loader owner +",
+            "ProgramData variant, all verified there. Read-only.",
+            "loader-derived ProgramData PDA of `crate::ID`, owner = the BPF",
+            "Upgradeable Loader, bytes = ProgramData variant with a Some",
+            "authority); the required signature is enforced on",
+            "`upgrade_authority` below. UncheckedAccount (not AccountInfo)",
+            "because anchor's derive must add nothing here — the handler IS",
+            "the check."
+          ]
+        },
+        {
+          "name": "upgrade_authority",
+          "docs": [
+            "THIS deployment's upgrade authority (devnet: the Squads multisig",
+            "vault PDA, signing via a 2-of-2 `execute_transaction`). The",
+            "`Signer` type makes the runtime verify the signature; the handler",
+            "additionally requires the key to equal the ProgramData-declared",
+            "authority. This is the A-041 gate: without it, initialize is",
+            "refused and the singleton stays unborn."
+          ],
+          "signer": true
+        },
+        {
+          "name": "rent",
+          "docs": [
+            "The rent sysvar, DECLARED even though on-chain code could fetch it",
+            "via syscall: host-side test execution (program-test builtins) has no",
+            "syscalls — sysvars arrive only as accounts — so declaring it keeps",
+            "the program runnable in both worlds. Read-only, one account in the",
+            "list, zero lamports."
+          ],
+          "address": "SysvarRent111111111111111111111111111111111"
+        },
+        {
+          "name": "token_program",
+          "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+        },
+        {
+          "name": "token_2022_program",
+          "address": "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "admin_authority",
+          "type": "pubkey"
+        },
+        {
+          "name": "backend_authority",
+          "type": "pubkey"
+        }
+      ]
+    },
+    {
+      "name": "pause",
+      "docs": [
+        "Admin circuit breaker — halt deposits and withdrawals. Signed by",
+        "`admin_authority` only (the multisig vault PDA on devnet)."
+      ],
+      "discriminator": [
+        211,
+        22,
+        221,
+        251,
+        74,
+        121,
+        193,
+        47
+      ],
+      "accounts": [
+        {
+          "name": "pool",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  111,
+                  111,
+                  108
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "admin_authority",
+          "docs": [
+            "The multisig vault PDA (devnet). A Signer constraint — the runtime",
+            "verifies PDA signatures cross-program, so this accepts either a",
+            "plain key (tests) or the Squads-executed vault signature (devnet)."
+          ],
+          "signer": true,
+          "relations": [
+            "pool"
+          ]
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "post_root",
+      "docs": [
+        "Post a settlement root: record, for `window`, the Merkle root and",
+        "the total it pays, backed by the operator's current bond and stamped",
+        "with the slot (the challenge window starts here).",
+        "",
+        "Doctrine: invariant 1 — `total_payout > vault.amount` refuses with",
+        "`RootExceedsVault` and NOTHING is created or moved; invariant 7 — a",
+        "second root for the same window dies at account creation (the",
+        "`SettlementRoot` PDA is plain `init`), so roots are append-only.",
+        "A fresh root starts `Active` with `stands_ruled = false` and",
+        "`paid_out = 0` (invariants 11 and 12 read both). Emits `RootPosted`."
+      ],
+      "discriminator": [
+        154,
+        210,
+        156,
+        158,
+        199,
+        27,
+        174,
+        35
+      ],
+      "accounts": [
+        {
+          "name": "pool",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  111,
+                  111,
+                  108
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "backend_authority",
+          "docs": [
+            "The operator posts roots: a root is the operator's ATTESTATION of",
+            "what the books say the window owes (A-039's caveat, by design)."
+          ],
+          "writable": true,
+          "signer": true,
+          "relations": [
+            "pool"
+          ]
+        },
+        {
+          "name": "settlement_root",
+          "docs": [
+            "Plain `init`: the account can be born ONCE per window. A second root",
+            "for the same window fails HERE, in account creation (invariant 7)."
+          ],
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  115,
+                  101,
+                  116,
+                  116,
+                  108,
+                  101,
+                  109,
+                  101,
+                  110,
+                  116,
+                  95,
+                  114,
+                  111,
+                  111,
+                  116
+                ]
+              },
+              {
+                "kind": "arg",
+                "path": "window"
+              }
+            ]
+          }
+        },
+        {
+          "name": "vault",
+          "docs": [
+            "The escrow the root will be paid from — read for the ceiling check."
+          ],
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  111,
+                  111,
+                  108
+                ]
+              },
+              {
+                "kind": "const",
+                "value": [
+                  118,
+                  97,
+                  117,
+                  108,
+                  116
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "bond",
+          "docs": [
+            "The bond backing the root. Not `init`: a root cannot be posted",
+            "without an existing bond (SPEC §10 — BONDED operators)."
+          ],
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  111,
+                  111,
+                  108
+                ]
+              },
+              {
+                "kind": "const",
+                "value": [
+                  98,
+                  111,
+                  110,
+                  100
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "token_program",
+          "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+        },
+        {
+          "name": "clock",
+          "docs": [
+            "The clock, DECLARED like the rent sysvar in `initialize`: the suite",
+            "passes it as an account so host and SBF execution read the same",
+            "source of slots."
+          ],
+          "address": "SysvarC1ock11111111111111111111111111111111"
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "window",
+          "type": "u64"
+        },
+        {
+          "name": "merkle_root",
+          "type": {
+            "array": [
+              "u8",
+              32
+            ]
+          }
+        },
+        {
+          "name": "total_payout",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "prepay_renter",
+      "docs": [
+        "Renter prepayment: move `amount` USDC from the renter's token",
+        "account into the vault, and increment the renter's OWN prepaid",
+        "record `[prepaid, renter]`. This is the ONLY way USDC enters the",
+        "protocol (D40) — the M10 rail: metering, checkout and pro-rata",
+        "consumption live OFF-chain (M9/M10); this pair is what they plug",
+        "into.",
+        "",
+        "Signers: `backend_authority` (operator gate — uninvited money must",
+        "not create uninvited liabilities) AND `renter_key` (the source",
+        "account's owner: the renter's custodial key on devnet, or the",
+        "renter themselves in self-custody). Prepay has no direct-door",
+        "variant by design: money IN always needs the source owner's",
+        "signature anyway — the token program enforces it."
+      ],
+      "discriminator": [
+        174,
+        206,
+        69,
+        23,
+        164,
+        163,
+        112,
+        162
+      ],
+      "accounts": [
+        {
+          "name": "pool",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  111,
+                  111,
+                  108
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "backend_authority",
+          "docs": [
+            "Operator gate signer; also pays the prepaid record's rent on",
+            "first prepay (renters never pay chain costs)."
+          ],
+          "writable": true,
+          "signer": true,
+          "relations": [
+            "pool"
+          ]
+        },
+        {
+          "name": "renter_key",
+          "docs": [
+            "The renter identity key — owner of `source`. Custodial on devnet",
+            "(the backend holds it) or self-custody in the direct future; the",
+            "token program only cares that it owns the source account."
+          ],
+          "signer": true
+        },
+        {
+          "name": "source",
+          "docs": [
+            "Where the prepayment comes from: must be owned by `renter_key` on",
+            "the pool's USDC mint."
+          ],
+          "writable": true
+        },
+        {
+          "name": "vault",
+          "docs": [
+            "Escrow destination (seeds re-checked against the config)."
+          ],
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  111,
+                  111,
+                  108
+                ]
+              },
+              {
+                "kind": "const",
+                "value": [
+                  118,
+                  97,
+                  117,
+                  108,
+                  116
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "prepaid",
+          "docs": [
+            "The renter's OWN prepaid record: `[prepaid, renter]`, owned by the",
+            "program. `init_if_needed`: first prepay lazily creates it; refunds",
+            "are bounded by this record's `amount` — an on-chain fact."
+          ],
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  114,
+                  101,
+                  112,
+                  97,
+                  105,
+                  100
+                ]
+              },
+              {
+                "kind": "arg",
+                "path": "renter"
+              }
+            ]
+          }
+        },
+        {
+          "name": "token_program",
+          "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "renter",
+          "type": "pubkey"
+        },
+        {
+          "name": "amount",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "record_contribution",
+      "docs": [
+        "Record a depositor contribution: mint `amount` claims into the",
+        "depositor's program-owned claim account. NO USDC moves (D40) —",
+        "principal is Path-B credits on the operator's books (rule 1); the",
+        "claim records the micro-USD valuation of what the books say the",
+        "depositor contributed.",
+        "",
+        "Signer: `backend_authority` ONLY — this is an operator ATTESTATION",
+        "from the books, not a user action. (A self-service mint would let",
+        "anyone claim arbitrary contributions; the depositor's power is the",
+        "OTHER door — `burn_claims`.) The known limitation: on-chain code",
+        "cannot see the books, so a rogue backend could attest fake",
+        "contributions — containment is the M11 challenge window + multisig",
+        "pause/rotate (AUDIT A-039)."
+      ],
+      "discriminator": [
+        121,
+        55,
+        143,
+        174,
+        85,
+        36,
+        104,
+        228
+      ],
+      "accounts": [
+        {
+          "name": "pool",
+          "docs": [
+            "`has_one` checks `pool.backend_authority == backend_authority.key()`",
+            "— recording is an operator ATTESTATION from the books, so the",
+            "backend gate is the whole signer story (see handler docs: the",
+            "depositor's power is the OTHER door, `burn_claims`)."
+          ],
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  111,
+                  111,
+                  108
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "backend_authority",
+          "docs": [
+            "Operator backend hot key; also pays the claim account's rent on",
+            "first record (depositors never pay anything)."
+          ],
+          "writable": true,
+          "signer": true,
+          "relations": [
+            "pool"
+          ]
+        },
+        {
+          "name": "claim_mint",
+          "docs": [
+            "The registry mint (seeds re-checked; typed so decimals/authority",
+            "are constraint-verified on every record)."
+          ],
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  111,
+                  111,
+                  108
+                ]
+              },
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  108,
+                  97,
+                  105,
+                  109,
+                  95,
+                  109,
+                  105,
+                  110,
+                  116
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "claim_account",
+          "docs": [
+            "The depositor's registry row: `[claim, depositor]`, owned by the",
+            "POOL (not the depositor) — no holder key can burn or close it.",
+            "`init_if_needed`: first record lazily creates the row; later",
+            "records reuse it (the program pays rent via backend_authority)."
+          ],
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  108,
+                  97,
+                  105,
+                  109
+                ]
+              },
+              {
+                "kind": "arg",
+                "path": "depositor"
+              }
+            ]
+          }
+        },
+        {
+          "name": "token_2022_program",
+          "address": "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "depositor",
+          "type": "pubkey"
+        },
+        {
+          "name": "amount",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "refund_renter",
+      "docs": [
+        "Renter refund: move `amount` USDC from the vault to the renter's",
+        "destination account, bounded by the renter's OWN on-chain prepaid",
+        "record (`amount ≤ prepaid.amount`), and decrement that record.",
+        "With the vault holding only renter money (D40), this is the",
+        "depositor-independent refund rail M10 composes with — separability",
+        "is an on-chain fact here, not a promise.",
+        "",
+        "Signers — THE TWO DOORS (same policy as `burn_claims`):",
+        "`backend_authority` (assisted) OR the renter's own key (direct",
+        "exit without operator cooperation). Destination routing is pinned",
+        "to the renter on both doors, so the backend can never route a",
+        "refund to itself."
+      ],
+      "discriminator": [
+        44,
+        79,
+        36,
+        228,
+        135,
+        21,
+        119,
+        18
+      ],
+      "accounts": [
+        {
+          "name": "pool",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  111,
+                  111,
+                  108
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "authority",
+          "docs": [
+            "The one signer — WHICH door it opens is decided in the handler."
+          ],
+          "signer": true
+        },
+        {
+          "name": "destination",
+          "docs": [
+            "Refund destination must belong to the renter being refunded."
+          ],
+          "writable": true
+        },
+        {
+          "name": "vault",
+          "docs": [
+            "Escrow source (seeds re-checked; pool-owned, so only this",
+            "program's refund/settle logic can ever move it)."
+          ],
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  111,
+                  111,
+                  108
+                ]
+              },
+              {
+                "kind": "const",
+                "value": [
+                  118,
+                  97,
+                  117,
+                  108,
+                  116
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "prepaid",
+          "docs": [
+            "The renter's prepaid record — the refund ceiling. Its seeds bind",
+            "the `renter` argument, so one renter can never spend another's",
+            "record."
+          ],
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  114,
+                  101,
+                  112,
+                  97,
+                  105,
+                  100
+                ]
+              },
+              {
+                "kind": "arg",
+                "path": "renter"
+              }
+            ]
+          }
+        },
+        {
+          "name": "token_program",
+          "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+        }
+      ],
+      "args": [
+        {
+          "name": "renter",
+          "type": "pubkey"
+        },
+        {
+          "name": "amount",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "resolve_challenge",
+      "docs": [
+        "The multisig rules on a challenge. `Ruling::RootStands` returns the",
+        "root to `Active` and sets `stands_ruled` — the ruling waives the rest",
+        "of the challenge window (invariant 11); `Ruling::RootFalse {",
+        "slash_amount, victim }` marks it `ProvenFalse` and records the exact",
+        "slash and the victim.",
+        "",
+        "Doctrine: invariant 6 — a ruling may not exceed the bond that backs",
+        "the root (`SlashExceedsBond`); a ruling that the root stands",
+        "slashes nothing, ever. Emits `ChallengeResolved`."
+      ],
+      "discriminator": [
+        81,
+        191,
+        124,
+        119,
+        131,
+        248,
+        157,
+        109
+      ],
+      "accounts": [
+        {
+          "name": "pool",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  111,
+                  111,
+                  108
+                ]
+              }
+            ]
+          },
+          "relations": [
+            "settlement_root"
+          ]
+        },
+        {
+          "name": "admin_authority",
+          "docs": [
+            "The multisig vault PDA on devnet (a plain key in tests)."
+          ],
+          "signer": true,
+          "relations": [
+            "pool"
+          ]
+        },
+        {
+          "name": "settlement_root",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  115,
+                  101,
+                  116,
+                  116,
+                  108,
+                  101,
+                  109,
+                  101,
+                  110,
+                  116,
+                  95,
+                  114,
+                  111,
+                  111,
+                  116
+                ]
+              },
+              {
+                "kind": "arg",
+                "path": "window"
+              }
+            ]
+          }
+        },
+        {
+          "name": "bond",
+          "docs": [
+            "Read here so the handler can refuse a ruling larger than the bond."
+          ],
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  111,
+                  111,
+                  108
+                ]
+              },
+              {
+                "kind": "const",
+                "value": [
+                  98,
+                  111,
+                  110,
+                  100
+                ]
+              }
+            ]
+          }
+        }
+      ],
+      "args": [
+        {
+          "name": "window",
+          "type": "u64"
+        },
+        {
+          "name": "ruling",
+          "type": {
+            "defined": {
+              "name": "Ruling"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "resume",
+      "docs": [
+        "Admin circuit breaker release."
+      ],
+      "discriminator": [
+        1,
+        166,
+        51,
+        170,
+        127,
+        32,
+        141,
+        206
+      ],
+      "accounts": [
+        {
+          "name": "pool",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  111,
+                  111,
+                  108
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "admin_authority",
+          "docs": [
+            "The multisig vault PDA (devnet). A Signer constraint — the runtime",
+            "verifies PDA signatures cross-program, so this accepts either a",
+            "plain key (tests) or the Squads-executed vault signature (devnet)."
+          ],
+          "signer": true,
+          "relations": [
+            "pool"
+          ]
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "set_admin_authority",
+      "docs": [
+        "Rotate the admin authority itself (multisig migration). Admin-only:",
+        "changing the admin requires the CURRENT admin's signature — on",
+        "devnet that means a 2-of-2 vote."
+      ],
+      "discriminator": [
+        72,
+        49,
+        37,
+        167,
+        149,
+        98,
+        49,
+        174
+      ],
+      "accounts": [
+        {
+          "name": "pool",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  111,
+                  111,
+                  108
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "admin_authority",
+          "docs": [
+            "The multisig vault PDA (devnet). A Signer constraint — the runtime",
+            "verifies PDA signatures cross-program, so this accepts either a",
+            "plain key (tests) or the Squads-executed vault signature (devnet)."
+          ],
+          "signer": true,
+          "relations": [
+            "pool"
+          ]
+        }
+      ],
+      "args": [
+        {
+          "name": "new",
+          "type": "pubkey"
+        }
+      ]
+    },
+    {
+      "name": "set_backend_authority",
+      "docs": [
+        "Rotate the operator backend hot key (compromise response,",
+        "key rollover). Admin-only — the backend cannot re-key itself."
+      ],
+      "discriminator": [
+        243,
+        150,
+        19,
+        155,
+        40,
+        40,
+        74,
+        184
+      ],
+      "accounts": [
+        {
+          "name": "pool",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  111,
+                  111,
+                  108
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "admin_authority",
+          "docs": [
+            "The multisig vault PDA (devnet). A Signer constraint — the runtime",
+            "verifies PDA signatures cross-program, so this accepts either a",
+            "plain key (tests) or the Squads-executed vault signature (devnet)."
+          ],
+          "signer": true,
+          "relations": [
+            "pool"
+          ]
+        }
+      ],
+      "args": [
+        {
+          "name": "new",
+          "type": "pubkey"
+        }
+      ]
+    },
+    {
+      "name": "slash_bond",
+      "docs": [
+        "Execute a ruled slash: move EXACTLY the recorded `ruled_slash` from",
+        "the bond vault to the recorded victim. Permissionless to crank — the",
+        "ruling was the multisig's act, and the amount and the destination",
+        "come from the root account, never from arguments.",
+        "",
+        "Doctrine: invariant 6 — anything but a `ProvenFalse` root refuses",
+        "with `RootNotProvenFalse` (never challenged, still challenged, ruled",
+        "to stand, or already slashed); a second slash is therefore",
+        "impossible.",
+        "",
+        "Session B owes these checks IN THIS ORDER, because the suite pins",
+        "which refusal a shape gets: (1) `RootNotProvenFalse` unless the",
+        "root is `ProvenFalse`; (2) `WrongDestinationOwner` unless",
+        "`destination.owner == settlement_root.victim` (a handler check, not",
+        "an account constraint — see `SlashBond`); (3) move EXACTLY",
+        "`ruled_slash`, mark the root `Slashed`, emit `BondSlashed`."
+      ],
+      "discriminator": [
+        143,
+        246,
+        51,
+        243,
+        88,
+        198,
+        217,
+        48
+      ],
+      "accounts": [
+        {
+          "name": "pool",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  111,
+                  111,
+                  108
+                ]
+              }
+            ]
+          },
+          "relations": [
+            "settlement_root"
+          ]
+        },
+        {
+          "name": "settlement_root",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  115,
+                  101,
+                  116,
+                  116,
+                  108,
+                  101,
+                  109,
+                  101,
+                  110,
+                  116,
+                  95,
+                  114,
+                  111,
+                  111,
+                  116
+                ]
+              },
+              {
+                "kind": "arg",
+                "path": "window"
+              }
+            ]
+          }
+        },
+        {
+          "name": "bond_vault",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  111,
+                  111,
+                  108
+                ]
+              },
+              {
+                "kind": "const",
+                "value": [
+                  98,
+                  111,
+                  110,
+                  100,
+                  95,
+                  118,
+                  97,
+                  117,
+                  108,
+                  116
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "bond",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  111,
+                  111,
+                  108
+                ]
+              },
+              {
+                "kind": "const",
+                "value": [
+                  98,
+                  111,
+                  110,
+                  100
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "destination",
+          "docs": [
+            "Where the slash lands. The OWNER check lives in the handler, AFTER",
+            "the status check — on purpose: as an account constraint it would",
+            "fire first for every root with no victim on record, and a slash of",
+            "an un-ruled root would be reported as a destination error instead",
+            "of `RootNotProvenFalse`. Only the mint check stays here (nothing but",
+            "the pool's USDC is ever a payout leg)."
+          ],
+          "writable": true
+        },
+        {
+          "name": "token_program",
+          "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+        }
+      ],
+      "args": [
+        {
+          "name": "window",
+          "type": "u64"
+        }
+      ]
+    }
+  ],
+  "accounts": [
+    {
+      "name": "ClaimMarker",
+      "discriminator": [
+        112,
+        19,
+        68,
+        142,
+        48,
+        200,
+        150,
+        116
+      ]
+    },
+    {
+      "name": "OperatorBond",
+      "discriminator": [
+        209,
+        64,
+        254,
+        87,
+        228,
+        244,
+        94,
+        218
+      ]
+    },
+    {
+      "name": "Pool",
+      "discriminator": [
+        241,
+        154,
+        109,
+        4,
+        17,
+        177,
+        109,
+        188
+      ]
+    },
+    {
+      "name": "RenterPrepaid",
+      "discriminator": [
+        48,
+        148,
+        196,
+        90,
+        22,
+        85,
+        151,
+        220
+      ]
+    },
+    {
+      "name": "SettlementRoot",
+      "discriminator": [
+        65,
+        90,
+        132,
+        149,
+        175,
+        144,
+        176,
+        202
+      ]
+    }
+  ],
+  "events": [
+    {
+      "name": "AdminAuthorityRotated",
+      "discriminator": [
+        1,
+        196,
+        10,
+        255,
+        187,
+        163,
+        206,
+        145
+      ]
+    },
+    {
+      "name": "BackendAuthorityRotated",
+      "discriminator": [
+        134,
+        253,
+        61,
+        14,
+        222,
+        253,
+        150,
+        156
+      ]
+    },
+    {
+      "name": "BondFunded",
+      "discriminator": [
+        127,
+        112,
+        28,
+        221,
+        193,
+        31,
+        236,
+        237
+      ]
+    },
+    {
+      "name": "BondSlashed",
+      "discriminator": [
+        59,
+        7,
+        252,
+        195,
+        234,
+        156,
+        42,
+        54
+      ]
+    },
+    {
+      "name": "ChallengeResolved",
+      "discriminator": [
+        100,
+        153,
+        38,
+        123,
+        172,
+        250,
+        166,
+        105
+      ]
+    },
+    {
+      "name": "ClaimPaid",
+      "discriminator": [
+        212,
+        155,
+        88,
+        118,
+        128,
+        99,
+        132,
+        42
+      ]
+    },
+    {
+      "name": "ClaimsBurned",
+      "discriminator": [
+        171,
+        60,
+        255,
+        140,
+        204,
+        37,
+        72,
+        43
+      ]
+    },
+    {
+      "name": "ContributionRecorded",
+      "discriminator": [
+        203,
+        113,
+        176,
+        23,
+        205,
+        17,
+        184,
+        101
+      ]
+    },
+    {
+      "name": "PauseToggled",
+      "discriminator": [
+        105,
+        215,
+        89,
+        53,
+        198,
+        232,
+        136,
+        161
+      ]
+    },
+    {
+      "name": "PoolOpened",
+      "discriminator": [
+        44,
+        53,
+        197,
+        215,
+        31,
+        61,
+        56,
+        170
+      ]
+    },
+    {
+      "name": "PrepayRecorded",
+      "discriminator": [
+        179,
+        140,
+        168,
+        226,
+        143,
+        7,
+        122,
+        74
+      ]
+    },
+    {
+      "name": "PrepayRefunded",
+      "discriminator": [
+        115,
+        203,
+        233,
+        19,
+        231,
+        243,
+        27,
+        114
+      ]
+    },
+    {
+      "name": "RootChallenged",
+      "discriminator": [
+        139,
+        28,
+        101,
+        217,
+        9,
+        32,
+        29,
+        173
+      ]
+    },
+    {
+      "name": "RootPosted",
+      "discriminator": [
+        245,
+        251,
+        4,
+        0,
+        87,
+        227,
+        252,
+        231
+      ]
+    }
+  ],
+  "errors": [
+    {
+      "code": 6000,
+      "name": "Paused",
+      "msg": "Pool is paused: all registry and custody movements are disabled by admin"
+    },
+    {
+      "code": 6001,
+      "name": "ZeroAmount",
+      "msg": "Amount must be greater than zero"
+    },
+    {
+      "code": 6002,
+      "name": "UsdcDecimals",
+      "msg": "Escrow mint must have exactly 6 decimals (micro-USD seam)"
+    },
+    {
+      "code": 6003,
+      "name": "WrongSourceOwner",
+      "msg": "Prepay source account is not owned by the renter's key"
+    },
+    {
+      "code": 6004,
+      "name": "WrongSourceMint",
+      "msg": "Prepay source account holds a different mint than this pool custodies"
+    },
+    {
+      "code": 6005,
+      "name": "WrongDestinationOwner",
+      "msg": "Refund destination is not owned by the renter"
+    },
+    {
+      "code": 6006,
+      "name": "WrongDestinationMint",
+      "msg": "Refund destination holds a different mint than this pool custodies"
+    },
+    {
+      "code": 6007,
+      "name": "InsufficientClaims",
+      "msg": "Burn amount exceeds the depositor's claim balance"
+    },
+    {
+      "code": 6008,
+      "name": "PrepaidInsufficient",
+      "msg": "Refund amount exceeds the renter's on-chain prepaid record"
+    },
+    {
+      "code": 6009,
+      "name": "ExitAuthority",
+      "msg": "Signer is neither the backend authority nor the named identity — one of the two doors is required"
+    },
+    {
+      "code": 6010,
+      "name": "Overflow",
+      "msg": "Checked money arithmetic overflowed"
+    },
+    {
+      "code": 6011,
+      "name": "DeploymentAuthority",
+      "msg": "Initializer is not this deployment's upgrade authority"
+    },
+    {
+      "code": 6012,
+      "name": "RootExceedsVault",
+      "msg": "Root total payout exceeds the vault's USDC — refused, nothing moved"
+    },
+    {
+      "code": 6013,
+      "name": "InvalidProof",
+      "msg": "Claim inclusion proof does not verify against the published root"
+    },
+    {
+      "code": 6014,
+      "name": "WrongPayoutDestination",
+      "msg": "Payout destination is not owned by the leaf's named depositor"
+    },
+    {
+      "code": 6015,
+      "name": "RootFrozen",
+      "msg": "Root payouts are frozen — the root is not Active"
+    },
+    {
+      "code": 6016,
+      "name": "ChallengeWindowClosed",
+      "msg": "Challenge window for this root has closed"
+    },
+    {
+      "code": 6017,
+      "name": "RootNotProvenFalse",
+      "msg": "Bond slash refused — the root is not proven false"
+    },
+    {
+      "code": 6018,
+      "name": "SlashExceedsBond",
+      "msg": "Ruled slash exceeds the bond backing this root"
+    },
+    {
+      "code": 6019,
+      "name": "ChallengeWindowOpen",
+      "msg": "Challenge window still open — no payout leaves the vault yet"
+    },
+    {
+      "code": 6020,
+      "name": "PayoutExceedsTotal",
+      "msg": "Claim would pay out more than the root's declared total"
+    }
+  ],
+  "types": [
+    {
+      "name": "AdminAuthorityRotated",
+      "docs": [
+        "Admin authority rotated (multisig migration)."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "old",
+            "type": "pubkey"
+          },
+          {
+            "name": "new",
+            "type": "pubkey"
+          }
+        ]
+      }
+    },
+    {
+      "name": "BackendAuthorityRotated",
+      "docs": [
+        "Backend hot key rotated."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "old",
+            "type": "pubkey"
+          },
+          {
+            "name": "new",
+            "type": "pubkey"
+          }
+        ]
+      }
+    },
+    {
+      "name": "BondFunded",
+      "docs": [
+        "Bond grew (or was born). `bond_after` mirrors `OperatorBond.amount`."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "funder",
+            "type": "pubkey"
+          },
+          {
+            "name": "amount",
+            "type": "u64"
+          },
+          {
+            "name": "bond_after",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "BondSlashed",
+      "docs": [
+        "A ruled slash executed — `amount` is EXACTLY the ruled amount."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "window",
+            "type": "u64"
+          },
+          {
+            "name": "amount",
+            "type": "u64"
+          },
+          {
+            "name": "victim",
+            "type": "pubkey"
+          },
+          {
+            "name": "bond_after",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "ChallengeResolved",
+      "docs": [
+        "The multisig ruled: `root_stands` says which way; `slash_amount` and",
+        "`victim` are meaningful only when the root was ruled false."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "window",
+            "type": "u64"
+          },
+          {
+            "name": "root_stands",
+            "type": "bool"
+          },
+          {
+            "name": "slash_amount",
+            "type": "u64"
+          },
+          {
+            "name": "victim",
+            "type": "pubkey"
+          }
+        ]
+      }
+    },
+    {
+      "name": "ClaimMarker",
+      "docs": [
+        "Proof that leaf `leaf_index` of one root has been paid. Created by `claim`",
+        "and never updated: its EXISTENCE is the fact (invariant 3)."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "root",
+            "docs": [
+              "The root this marker belongs to."
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "leaf_index",
+            "docs": [
+              "The leaf that was paid (its index in the window's tree)."
+            ],
+            "type": "u32"
+          },
+          {
+            "name": "depositor",
+            "docs": [
+              "The leaf's named depositor — the only identity the payout may reach."
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "amount",
+            "docs": [
+              "Micro-USDC paid out for this leaf."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "bump",
+            "docs": [
+              "Bump of this PDA."
+            ],
+            "type": "u8"
+          }
+        ]
+      }
+    },
+    {
+      "name": "ClaimPaid",
+      "docs": [
+        "One leaf was paid. A subscriber counts these to rebuild the markers and",
+        "the vault."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "window",
+            "type": "u64"
+          },
+          {
+            "name": "leaf_index",
+            "type": "u32"
+          },
+          {
+            "name": "depositor",
+            "type": "pubkey"
+          },
+          {
+            "name": "amount",
+            "type": "u64"
+          },
+          {
+            "name": "vault_balance_after",
+            "docs": [
+              "Vault USDC AFTER the transfer — the `cash.escrow` mirror."
+            ],
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "ClaimsBurned",
+      "docs": [
+        "A record was exited (burn side of the registry). NO USDC moved."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "depositor",
+            "type": "pubkey"
+          },
+          {
+            "name": "amount",
+            "type": "u64"
+          },
+          {
+            "name": "supply_after",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "ContributionRecorded",
+      "docs": [
+        "A contribution was recorded (mint side of the registry). NO USDC",
+        "moved — `amount` is the micro-USD valuation the books attest."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "depositor",
+            "type": "pubkey"
+          },
+          {
+            "name": "amount",
+            "type": "u64"
+          },
+          {
+            "name": "supply_after",
+            "docs": [
+              "Claim-mint total supply after the mint — the Σ `claims.contributed`",
+              "mirror. Deliberately NOT a vault balance: the vault is untouched."
+            ],
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "OperatorBond",
+      "docs": [
+        "The operator's bond record — the on-chain twin of the bond vault's USDC",
+        "balance. One per pool: a bonded operator posts roots against it."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "amount",
+            "docs": [
+              "Micro-USDC bonded."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "bump",
+            "docs": [
+              "Bump of this PDA."
+            ],
+            "type": "u8"
+          }
+        ]
+      }
+    },
+    {
+      "name": "PauseToggled",
+      "docs": [
+        "Circuit breaker toggled by admin."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "paused",
+            "type": "bool"
+          }
+        ]
+      }
+    },
+    {
+      "name": "Pool",
+      "docs": [
+        "The singleton configuration account. Authority model:",
+        "* `admin_authority` — the Squads multisig vault PDA (devnet: 2-of-2",
+        "founder + teammate). It signs admin instructions only through a",
+        "multisig-executed transaction, so every admin action is a 2-of-2 vote.",
+        "On-chain this is just a pubkey: whoever can produce its signature",
+        "passes, and on devnet only the Squads program can (PDA signature).",
+        "* `backend_authority` — the operator's hot key. It signs",
+        "deposit/withdraw so members, renters and depositors NEVER need a",
+        "wallet (rule 10): the backend submits on their behalf, custodially."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "admin_authority",
+            "docs": [
+              "Multisig vault PDA — pause/unpause, authority rotations."
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "backend_authority",
+            "docs": [
+              "Operator backend hot key — signs deposit/withdraw (rule 10)."
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "usdc_mint",
+            "docs": [
+              "The USDC mint this pool custodies (devnet faucet USDC; SPL Token v3)."
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "claim_mint",
+            "docs": [
+              "The claim mint (Token-2022, NonTransferable — the claim registry)."
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "vault",
+            "docs": [
+              "Cached vault address for cheap reads/mirroring (derivable from",
+              "seeds; stored so external tooling reads ONE account to know everything)."
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "paused",
+            "docs": [
+              "Circuit breaker: when true, deposits and withdrawals are refused.",
+              "Admin-only toggle — an operator incident response lever, and the",
+              "same lever M11's challenge window will use during disputes."
+            ],
+            "type": "bool"
+          },
+          {
+            "name": "bump",
+            "docs": [
+              "Bump of the `Pool` PDA itself (needed to sign CPIs as the pool)."
+            ],
+            "type": "u8"
+          },
+          {
+            "name": "reserved",
+            "docs": [
+              "Reserved, zero-filled. M11-A (2026-11-26) put settlement STATE in",
+              "its own PDA family instead — `settlement.rs`: one root per window,",
+              "one marker per leaf, one bond record — because 64 bytes on the",
+              "singleton cannot hold a root per window. The challenge-window length",
+              "is a published constant",
+              "(`settlement::CHALLENGE_WINDOW_SLOTS`), not an argument. This space",
+              "stays available for parameters a multisig vote would set; the",
+              "account layout itself is unchanged and is not to be redesigned.",
+              "",
+              "Rule-8 guardrail (director-approved 2026-10-31): if the operator fee",
+              "band ever goes on-chain, it lands HERE behind a multisig vote — and",
+              "a vote alone still never satisfies rule 8: an on-chain band change",
+              "additionally requires explicit user approval + a D-log entry."
+            ],
+            "type": {
+              "array": [
+                "u8",
+                64
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "PoolOpened",
+      "docs": [
+        "Emitted once, at `initialize`."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "admin_authority",
+            "type": "pubkey"
+          },
+          {
+            "name": "backend_authority",
+            "type": "pubkey"
+          },
+          {
+            "name": "usdc_mint",
+            "type": "pubkey"
+          },
+          {
+            "name": "claim_mint",
+            "type": "pubkey"
+          },
+          {
+            "name": "vault",
+            "type": "pubkey"
+          }
+        ]
+      }
+    },
+    {
+      "name": "PrepayRecorded",
+      "docs": [
+        "Renter USDC entered escrow — the ONLY inflow (D40). Named for the",
+        "action (not `RenterPrepaid`, which is the STATE account's name)."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "renter",
+            "type": "pubkey"
+          },
+          {
+            "name": "amount",
+            "type": "u64"
+          },
+          {
+            "name": "vault_balance_after",
+            "docs": [
+              "Vault USDC after the transfer — the `cash.escrow` mirror."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "prepaid_after",
+            "docs": [
+              "The renter's own prepaid record after the increment."
+            ],
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "PrepayRefunded",
+      "docs": [
+        "Renter USDC left escrow, bounded by their own on-chain record."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "renter",
+            "type": "pubkey"
+          },
+          {
+            "name": "amount",
+            "type": "u64"
+          },
+          {
+            "name": "vault_balance_after",
+            "type": "u64"
+          },
+          {
+            "name": "prepaid_after",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "RenterPrepaid",
+      "docs": [
+        "Per-renter prepaid record — the on-chain twin of `prepaid.renter`.",
+        "",
+        "This is the ONLY USDC-denominated record besides the vault itself, and",
+        "the two must always reconcile: `vault.amount == Σ prepaid.amount`",
+        "(the journey suite asserts it after every renter movement). Renter",
+        "money is a LIABILITY (rule 7), so its record is what bounds refunds:",
+        "`refund_renter` requires `amount ≤ this.amount` — an on-chain fact,",
+        "not an operator attestation."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "amount",
+            "docs": [
+              "Micro-USDC prepaid and not yet refunded for this renter."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "bump",
+            "docs": [
+              "Bump of this PDA (stored so refunds never re-derive it)."
+            ],
+            "type": "u8"
+          }
+        ]
+      }
+    },
+    {
+      "name": "RootChallenged",
+      "docs": [
+        "The root froze."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "window",
+            "type": "u64"
+          },
+          {
+            "name": "challenger",
+            "type": "pubkey"
+          },
+          {
+            "name": "evidence",
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "RootPosted",
+      "docs": [
+        "A root was posted — every immutable field of `SettlementRoot`, plus the",
+        "bond snapshot and the slot (the window's origin)."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "window",
+            "type": "u64"
+          },
+          {
+            "name": "merkle_root",
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "total_payout",
+            "type": "u64"
+          },
+          {
+            "name": "bond",
+            "type": "u64"
+          },
+          {
+            "name": "posted_at",
+            "type": "i64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "RootStatus",
+      "docs": [
+        "`RootStatus` is borsh-encoded inside `SettlementRoot` as one byte (the",
+        "variant ordinal) — mirrors the way `Pool` stores `paused`."
+      ],
+      "type": {
+        "kind": "enum",
+        "variants": [
+          {
+            "name": "Active"
+          },
+          {
+            "name": "Challenged"
+          },
+          {
+            "name": "ProvenFalse"
+          },
+          {
+            "name": "Slashed"
+          }
+        ]
+      }
+    },
+    {
+      "name": "Ruling",
+      "docs": [
+        "`Ruling` travels as instruction data (borsh: variant byte, then fields),",
+        "so the derive below is what puts it on the wire."
+      ],
+      "type": {
+        "kind": "enum",
+        "variants": [
+          {
+            "name": "RootStands"
+          },
+          {
+            "name": "RootFalse",
+            "fields": [
+              {
+                "name": "slash_amount",
+                "type": "u64"
+              },
+              {
+                "name": "victim",
+                "type": "pubkey"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "SettlementRoot",
+      "docs": [
+        "One posted root. Created once per window by `post_root` and never",
+        "rewritten: only `status`, `stands_ruled`, `challenger`, `evidence`,",
+        "`ruled_slash`, `victim` and `paid_out` ever change after birth — every",
+        "other field is write-once (invariant 7 — roots are append-only)."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "pool",
+            "docs": [
+              "The pool this root belongs to (D42: no cross-pool drawing)."
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "window",
+            "docs": [
+              "The settlement window — the right half of this account's seeds."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "merkle_root",
+            "docs": [
+              "The SHA-256 Merkle root over the window's payout leaves."
+            ],
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "total_payout",
+            "docs": [
+              "Sum of the leaf amounts, as attested by the operator. Checked against",
+              "the vault at posting (invariant 1)."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "status",
+            "docs": [
+              "Lifecycle: Active → Challenged → Active | ProvenFalse → Slashed."
+            ],
+            "type": {
+              "defined": {
+                "name": "RootStatus"
+              }
+            }
+          },
+          {
+            "name": "posted_at",
+            "docs": [
+              "Slot the root was posted in — where the challenge window starts."
+            ],
+            "type": "i64"
+          },
+          {
+            "name": "bond",
+            "docs": [
+              "The operator bond backing THIS root, snapshotted at posting. A later",
+              "ruling may not slash more than this (invariant 6)."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "challenger",
+            "docs": [
+              "Who challenged the root (default pubkey while unchallenged)."
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "evidence",
+            "docs": [
+              "Commitment to the challenger's off-chain fraud proof — recorded, not",
+              "verified: the chain cannot read the books, the multisig reads them."
+            ],
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "ruled_slash",
+            "docs": [
+              "The exact slash the multisig ruled (0 until a `RootFalse` ruling)."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "victim",
+            "docs": [
+              "Whom the ruled slash pays (default pubkey until ruled)."
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "stands_ruled",
+            "docs": [
+              "True once the multisig has ruled the LATEST challenge (if any) to",
+              "stand: that ruling waives the rest of the challenge window for this",
+              "root (invariant 11). `challenge` clears it."
+            ],
+            "type": "bool"
+          },
+          {
+            "name": "paid_out",
+            "docs": [
+              "Micro-USDC this root has paid out so far. A claim requires",
+              "`paid_out + amount <= total_payout` (invariant 12)."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "bump",
+            "docs": [
+              "Bump of this PDA."
+            ],
+            "type": "u8"
+          }
+        ]
+      }
+    }
+  ]
+}

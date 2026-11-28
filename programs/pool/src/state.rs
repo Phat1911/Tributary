@@ -70,10 +70,14 @@ pub struct Pool {
     pub paused: bool,
     /// Bump of the `Pool` PDA itself (needed to sign CPIs as the pool).
     pub bump: u8,
-    /// Reserved, zero-filled today. M11 settlement parameters (challenge
-    /// window length, operator bond size, active Merkle root) land in this
-    /// space WITHOUT resizing the account — account layout is the part M11
-    /// must not redesign.
+    /// Reserved, zero-filled. M11-A (2026-11-26) put settlement STATE in
+    /// its own PDA family instead — `settlement.rs`: one root per window,
+    /// one marker per leaf, one bond record — because 64 bytes on the
+    /// singleton cannot hold a root per window. The challenge-window length
+    /// is a published constant
+    /// (`settlement::CHALLENGE_WINDOW_SLOTS`), not an argument. This space
+    /// stays available for parameters a multisig vote would set; the
+    /// account layout itself is unchanged and is not to be redesigned.
     ///
     /// Rule-8 guardrail (director-approved 2026-10-31): if the operator fee
     /// band ever goes on-chain, it lands HERE behind a multisig vote — and

@@ -9,8 +9,18 @@
 //! (rule 1, Path B); the claim mint merely records its micro-USD valuation.
 //! USDC enters exclusively as renter prepayment (the M10 rail, shipped
 //! here as `prepay_renter`) and leaves as refunds (`refund_renter`) or,
-//! from M11, settle payouts. It deliberately does NOT settle — Merkle
-//! batches, ceilings, challenges and bonds are M11 (SPEC §14 V2).
+//! from M11, settle payouts.
+//!
+//! # M11 settlement — implemented (M11-B, 2026-11-27)
+//!
+//! The settlement layer (Merkle roots, claims, challenges, bonds — SPEC
+//! §12) lives in `settlement.rs` and is dispatched from the six handlers at
+//! the bottom of this file: `fund_bond`, `post_root`, `claim`, `challenge`,
+//! `resolve_challenge`, `slash_bond`. Session A (doctrine-suite mode, step
+//! 14) shipped the declarations and the twelve-test suite with `todo!()`
+//! bodies; Session B implemented the handlers and the four Merkle helpers
+//! (SHA-256 by the `sol_sha256` syscall — AUDIT A-063) to green. The twelve
+//! doctrine tests in `tests/m11_doctrine.rs` all pass.
 //!
 //! # Why the vault never holds depositor principal (D40 teaching story)
 //!
@@ -115,9 +125,15 @@ use anchor_spl::token_interface::{self, Mint, TokenAccount as InterfaceTokenAcco
 declare_id!("9pEmyxftdRUZV2iw6ZzCNgZz9QygG53i7APNaWcEHvjX");
 
 pub mod errors;
+pub mod settlement;
 pub mod state;
 
 pub use errors::PoolError;
+// GLOB re-export, deliberately: `#[derive(Accounts)]` defines the
+// `__client_accounts_*` macros WHERE the struct lives, and `#[program]`
+// imports them by CRATE-ROOT path — a named re-export carries the types
+// but not the macros (the compiler says only "unresolved import `crate`").
+pub use settlement::*;
 pub use state::{
     DECIMALS, Pool, RenterPrepaid, SEED_CLAIM, SEED_CLAIM_MINT, SEED_POOL, SEED_PREPAID, SEED_VAULT,
 };
@@ -156,11 +172,13 @@ fn require_exit_authority(
 
 /// # Instructions
 ///
-/// Nine instructions, no more: initialize, record_contribution,
+/// Nine implemented instructions: initialize, record_contribution,
 /// burn_claims, prepay_renter, refund_renter, pause, resume, and two
-/// authority rotations. There is intentionally no `transfer_claim`, no
-/// `close_claim`, no instruction that moves depositor USDC — the absence
-/// of an instruction IS a security property here (rules 1, 9 and 10).
+/// authority rotations — plus six M11 settlement handlers that are
+/// DECLARED with `todo!()` bodies (M11-A stubs, at the bottom of this
+/// module). There is intentionally no `transfer_claim`, no `close_claim`,
+/// no instruction that takes depositor USDC as principal — the absence of
+/// an instruction IS a security property here (rules 1, 9 and 10).
 #[program]
 pub mod pool_program {
     use super::*;
@@ -250,7 +268,8 @@ pub mod pool_program {
         // storing it lets later instructions re-derive the PDA signer
         // without recomputing (and without trusting a passed-in bump).
         pool.bump = ctx.bumps.pool;
-        // Reserved bytes start zeroed; M11 settlement params land there.
+        // Reserved bytes start zeroed. Still unused: M11-A keeps settlement
+        // state in its own PDA family (`settlement.rs`), not in this field.
         pool.reserved = [0u8; 64];
 
         // ---- Claim mint bootstrap: Token-2022 + NonTransferable ----
@@ -582,6 +601,406 @@ pub mod pool_program {
         let old = ctx.accounts.pool.admin_authority;
         ctx.accounts.pool.admin_authority = new;
         emit!(AdminAuthorityRotated { old, new });
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // M11 SETTLEMENT — six instructions (doctrine-suite mode, Session B,
+    // 2026-11-27; workflow step 14).
+    //
+    // Session A shipped these as `todo!()` stubs; Session B implemented them
+    // to green. The account lists, constraints, events and the Merkle
+    // contract live in `settlement.rs`; the doc comment on each handler
+    // records the doctrine it enforces and the check ORDER the suite pins
+    // (only the OUTCOME each test pins is fixed — the ordering is fixed
+    // where a doc comment fixes it).
+    // -----------------------------------------------------------------------
+
+    /// Bond the operator: move `amount` USDC from the operator's OWN wallet
+    /// into the bond vault and grow the bond record. Backend-signed (the
+    /// operator bonds its own money); emits `BondFunded`.
+    ///
+    /// Session B owes: the transfer, the record increment, the event, and
+    /// the usual refusals (paused pool, zero amount).
+    pub fn fund_bond(ctx: Context<FundBond>, amount: u64) -> Result<()> {
+        require!(!ctx.accounts.pool.paused, PoolError::Paused);
+        require!(amount > 0, PoolError::ZeroAmount);
+
+        // USDC from the operator's OWN wallet into the bond vault. The
+        // source's owner is the backend key, which signed this transaction,
+        // so the token program checks the signature directly — no PDA seeds
+        // on this leg (unlike the vault/bond-vault spends, which the pool
+        // PDA signs for).
+        token::transfer(
+            CpiContext::new(
+                *ctx.accounts.token_program.key,
+                token::Transfer {
+                    from: ctx.accounts.source.to_account_info(),
+                    to: ctx.accounts.bond_vault.to_account_info(),
+                    authority: ctx.accounts.backend_authority.to_account_info(),
+                },
+            ),
+            amount,
+        )?;
+
+        // The bond record is the on-chain twin of the bond vault's balance:
+        // every funding grows it by exactly the transferred amount (checked
+        // arithmetic — money never wraps silently).
+        let bond = &mut ctx.accounts.bond;
+        bond.amount = bond.amount.checked_add(amount).ok_or(PoolError::Overflow)?;
+        bond.bump = ctx.bumps.bond;
+
+        emit!(BondFunded {
+            funder: ctx.accounts.backend_authority.key(),
+            amount,
+            bond_after: bond.amount,
+        });
+        Ok(())
+    }
+
+    /// Post a settlement root: record, for `window`, the Merkle root and
+    /// the total it pays, backed by the operator's current bond and stamped
+    /// with the slot (the challenge window starts here).
+    ///
+    /// Doctrine: invariant 1 — `total_payout > vault.amount` refuses with
+    /// `RootExceedsVault` and NOTHING is created or moved; invariant 7 — a
+    /// second root for the same window dies at account creation (the
+    /// `SettlementRoot` PDA is plain `init`), so roots are append-only.
+    /// A fresh root starts `Active` with `stands_ruled = false` and
+    /// `paid_out = 0` (invariants 11 and 12 read both). Emits `RootPosted`.
+    pub fn post_root(
+        ctx: Context<PostRoot>,
+        window: u64,
+        merkle_root: [u8; 32],
+        total_payout: u64,
+    ) -> Result<()> {
+        // Invariant 1 — fail CLOSED: the declared total may not exceed the
+        // vault's USDC, checked BEFORE any field is written. Solana
+        // instructions are atomic, so a refusal here also rolls back the
+        // `init` above: no root account is born and no balance moves.
+        // `<=` (not `<`): a root paying EXACTLY the vault's balance posts.
+        require!(
+            total_payout <= ctx.accounts.vault.amount,
+            PoolError::RootExceedsVault
+        );
+
+        // The slot is where the challenge window starts; slots never
+        // approach i64::MAX, but convert checked anyway (no silent wrap).
+        let posted_at = i64::try_from(ctx.accounts.clock.slot).map_err(|_| PoolError::Overflow)?;
+        // Snapshot the bond backing THIS root: a later ruling may not slash
+        // more than this (invariant 6), even if other roots slash it down.
+        let bond = ctx.accounts.bond.amount;
+
+        let root = &mut ctx.accounts.settlement_root;
+        root.pool = ctx.accounts.pool.key();
+        root.window = window;
+        root.merkle_root = merkle_root;
+        root.total_payout = total_payout;
+        root.status = RootStatus::Active;
+        root.posted_at = posted_at;
+        root.bond = bond;
+        root.challenger = Pubkey::default();
+        root.evidence = [0u8; 32];
+        root.ruled_slash = 0;
+        root.victim = Pubkey::default();
+        root.stands_ruled = false;
+        root.paid_out = 0;
+        root.bump = ctx.bumps.settlement_root;
+
+        emit!(RootPosted {
+            window,
+            merkle_root,
+            total_payout,
+            bond,
+            posted_at,
+        });
+        Ok(())
+    }
+
+    /// Claim one leaf: verify the inclusion proof against the published
+    /// root, pay `amount` USDC from the vault to the leaf's named
+    /// `depositor`, write the leaf's claim marker, and add `amount` to the
+    /// root's `paid_out`.
+    ///
+    /// Doctrine: invariant 2 — a proof that does not hash up to the root
+    /// refuses with `InvalidProof`; invariant 3 — the marker is plain
+    /// `init`, so a replayed leaf dies at account creation, and the proof
+    /// is bound to its index; invariant 4 — THE TWO DOORS (the backend, or
+    /// `depositor`'s own key — anything else is `ExitAuthority`) and the
+    /// destination must be owned by `depositor`; invariant 5 — a root that
+    /// is not `Active` refuses with `RootFrozen`; invariant 11 — a root
+    /// whose challenge window is still open refuses with
+    /// `ChallengeWindowOpen`, unless the multisig ruled it stands; invariant
+    /// 12 — a claim that would push `paid_out` past `total_payout` refuses
+    /// with `PayoutExceedsTotal`. Emits `ClaimPaid`.
+    ///
+    /// Session B owes the FIRST TWO of these IN THIS ORDER — the suite pins
+    /// which refusal a shape gets: (1) the status, else `RootFrozen`;
+    /// (2) the window, else `ChallengeWindowOpen`. A root challenged while
+    /// still INSIDE its window is frozen, not merely delayed. After those:
+    /// the proof, the door, the declared total, then the transfer, the
+    /// marker and `paid_out += amount`.
+    pub fn claim(
+        ctx: Context<Claim>,
+        window: u64,
+        leaf_index: u32,
+        depositor: Pubkey,
+        amount: u64,
+        proof: Vec<[u8; 32]>,
+    ) -> Result<()> {
+        // (1) Invariant 5 — the status gate FIRST: a root that is not
+        //     `Active` (challenged, proven false, slashed) is FROZEN, not
+        //     merely delayed — so this refusal precedes the window check.
+        require!(
+            ctx.accounts.settlement_root.status == RootStatus::Active,
+            PoolError::RootFrozen
+        );
+        // (2) Invariant 11 — no payout before the challenge window has
+        //     passed, unless the multisig ruled the root stands
+        //     (`stands_ruled` waives the rest of the window).
+        let window_end = ctx.accounts.settlement_root.posted_at + CHALLENGE_WINDOW_SLOTS;
+        require!(
+            ctx.accounts.settlement_root.stands_ruled
+                || ctx.accounts.clock.slot
+                    >= u64::try_from(window_end).map_err(|_| PoolError::Overflow)?,
+            PoolError::ChallengeWindowOpen
+        );
+        // Invariant 2 — the inclusion proof, bound to the leaf's INDEX: the
+        //     leaf hashes the named depositor and amount, so a tampered
+        //     amount, a foreign depositor or another leaf's proof fails.
+        require!(
+            verify_proof(
+                ctx.accounts.settlement_root.merkle_root,
+                leaf_index,
+                leaf_hash(&depositor, amount),
+                &proof,
+            ),
+            PoolError::InvalidProof
+        );
+        // Invariant 4 — THE TWO DOORS: the backend (assisted) or the leaf's
+        //     own depositor key (direct). Anything else opens neither door.
+        require_exit_authority(&ctx.accounts.pool, &ctx.accounts.authority, &depositor)?;
+        // Invariant 12 — never more than the DECLARED total, checked against
+        //     the running `paid_out` before anything moves.
+        let paid_out = ctx
+            .accounts
+            .settlement_root
+            .paid_out
+            .checked_add(amount)
+            .ok_or(PoolError::Overflow)?;
+        require!(
+            paid_out <= ctx.accounts.settlement_root.total_payout,
+            PoolError::PayoutExceedsTotal
+        );
+
+        // The payout: vault -> the leaf's depositor-owned destination (the
+        // `destination.owner == depositor` account constraint already fired
+        // above). The pool PDA is the vault's authority and signs via seeds.
+        let seeds = &[SEED_POOL, &[ctx.accounts.pool.bump]];
+        token::transfer(
+            CpiContext::new_with_signer(
+                *ctx.accounts.token_program.key,
+                token::Transfer {
+                    from: ctx.accounts.vault.to_account_info(),
+                    to: ctx.accounts.destination.to_account_info(),
+                    authority: ctx.accounts.pool.to_account_info(),
+                },
+                &[seeds],
+            ),
+            amount,
+        )?;
+
+        // The claim marker: born once, EVER (invariant 3's structural half —
+        // a replay died at this account's `init` before the handler ran).
+        let marker = &mut ctx.accounts.claim_marker;
+        marker.root = ctx.accounts.settlement_root.key();
+        marker.leaf_index = leaf_index;
+        marker.depositor = depositor;
+        marker.amount = amount;
+        marker.bump = ctx.bumps.claim_marker;
+
+        // Invariant 12's ledger: count the payout on the root.
+        ctx.accounts.settlement_root.paid_out = paid_out;
+
+        // A-042: reload the vault copy (deserialized at entry, mutated by the
+        // transfer CPI) so the event reports the POST-transfer balance.
+        ctx.accounts.vault.reload()?;
+        emit!(ClaimPaid {
+            window,
+            leaf_index,
+            depositor,
+            amount,
+            vault_balance_after: ctx.accounts.vault.amount,
+        });
+        Ok(())
+    }
+
+    /// Challenge a root: freeze its payouts. Permissionless — any key may
+    /// challenge, inside the window (SPEC §10).
+    ///
+    /// Doctrine: invariant 5 — `clock.slot` must be inside
+    /// `posted_at + CHALLENGE_WINDOW_SLOTS`, or the challenge refuses with
+    /// `ChallengeWindowClosed`; the root turns `Challenged`, its claims
+    /// freeze until the multisig rules, and `stands_ruled` is cleared (a new
+    /// challenge outranks an earlier "stands"). Emits `RootChallenged`.
+    pub fn challenge(ctx: Context<Challenge>, window: u64, evidence: [u8; 32]) -> Result<()> {
+        let root = &mut ctx.accounts.settlement_root;
+        // Only an `Active` root can be challenged: a challenged/false/slashed
+        // root is already out of the payout game, so there is nothing new to
+        // freeze. (The suite challenges only `Active` roots.)
+        require!(root.status == RootStatus::Active, PoolError::RootFrozen);
+        // Invariant 5 (complement) — inside the window ONLY. The window is
+        // `clock.slot < posted_at + CHALLENGE_WINDOW_SLOTS`; at or past it a
+        // challenge can no longer freeze the root.
+        let window_end = root.posted_at + CHALLENGE_WINDOW_SLOTS;
+        require!(
+            ctx.accounts.clock.slot < u64::try_from(window_end).map_err(|_| PoolError::Overflow)?,
+            PoolError::ChallengeWindowClosed
+        );
+
+        root.status = RootStatus::Challenged;
+        root.challenger = ctx.accounts.challenger.key();
+        root.evidence = evidence;
+        // A new challenge outranks an earlier "stands": the multisig must
+        // rule on the LATEST challenge, so the waiver is cleared.
+        root.stands_ruled = false;
+
+        emit!(RootChallenged {
+            window,
+            challenger: ctx.accounts.challenger.key(),
+            evidence,
+        });
+        Ok(())
+    }
+
+    /// The multisig rules on a challenge. `Ruling::RootStands` returns the
+    /// root to `Active` and sets `stands_ruled` — the ruling waives the rest
+    /// of the challenge window (invariant 11); `Ruling::RootFalse {
+    /// slash_amount, victim }` marks it `ProvenFalse` and records the exact
+    /// slash and the victim.
+    ///
+    /// Doctrine: invariant 6 — a ruling may not exceed the bond that backs
+    /// the root (`SlashExceedsBond`); a ruling that the root stands
+    /// slashes nothing, ever. Emits `ChallengeResolved`.
+    pub fn resolve_challenge(
+        ctx: Context<ResolveChallenge>,
+        window: u64,
+        ruling: Ruling,
+    ) -> Result<()> {
+        let root = &mut ctx.accounts.settlement_root;
+        // A ruling answers the LATEST challenge: only a challenged root is
+        // awaiting one. Anything else has nothing to resolve. (The suite
+        // resolves only challenged roots; the refusal keeps a stray ruling
+        // from rewriting an unchallenged root's history.)
+        require!(root.status == RootStatus::Challenged, PoolError::RootFrozen);
+
+        match ruling {
+            // The root STANDS: back to `Active`, and the ruling waives the
+            // rest of the challenge window (invariant 11). A stand slashes
+            // nothing and names no victim, so both are cleared — the event
+            // subscriber mirrors exactly these values.
+            Ruling::RootStands => {
+                root.status = RootStatus::Active;
+                root.stands_ruled = true;
+                root.ruled_slash = 0;
+                root.victim = Pubkey::default();
+                emit!(ChallengeResolved {
+                    window,
+                    root_stands: true,
+                    slash_amount: 0,
+                    victim: Pubkey::default(),
+                });
+            }
+            // The root is FALSE: record the EXACT slash and the victim. The
+            // ruling may not exceed the bond that backs this root (the
+            // posting-time snapshot, invariant 6) — and it only RECORDS; the
+            // USDC moves when `slash_bond` cranks it.
+            Ruling::RootFalse {
+                slash_amount,
+                victim,
+            } => {
+                require!(slash_amount <= root.bond, PoolError::SlashExceedsBond);
+                root.status = RootStatus::ProvenFalse;
+                root.ruled_slash = slash_amount;
+                root.victim = victim;
+                root.stands_ruled = false;
+                emit!(ChallengeResolved {
+                    window,
+                    root_stands: false,
+                    slash_amount,
+                    victim,
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// Execute a ruled slash: move EXACTLY the recorded `ruled_slash` from
+    /// the bond vault to the recorded victim. Permissionless to crank — the
+    /// ruling was the multisig's act, and the amount and the destination
+    /// come from the root account, never from arguments.
+    ///
+    /// Doctrine: invariant 6 — anything but a `ProvenFalse` root refuses
+    /// with `RootNotProvenFalse` (never challenged, still challenged, ruled
+    /// to stand, or already slashed); a second slash is therefore
+    /// impossible.
+    ///
+    /// Session B owes these checks IN THIS ORDER, because the suite pins
+    /// which refusal a shape gets: (1) `RootNotProvenFalse` unless the
+    /// root is `ProvenFalse`; (2) `WrongDestinationOwner` unless
+    /// `destination.owner == settlement_root.victim` (a handler check, not
+    /// an account constraint — see `SlashBond`); (3) move EXACTLY
+    /// `ruled_slash`, mark the root `Slashed`, emit `BondSlashed`.
+    pub fn slash_bond(ctx: Context<SlashBond>, window: u64) -> Result<()> {
+        let root = &mut ctx.accounts.settlement_root;
+        // (1) Only a root PROVEN FALSE may be slashed — never challenged,
+        //     still challenged, ruled to stand, or already slashed all
+        //     refuse here, so a second slash is impossible by construction.
+        require!(
+            root.status == RootStatus::ProvenFalse,
+            PoolError::RootNotProvenFalse
+        );
+        // (2) The destination must be the RECORDED victim. Checked in the
+        //     handler AFTER the status check (deliberately NOT an account
+        //     constraint): a misdirected crank on an un-ruled root must read
+        //     as `RootNotProvenFalse`, not as a destination error.
+        require!(
+            ctx.accounts.destination.owner == root.victim,
+            PoolError::WrongDestinationOwner
+        );
+        // Both the amount and the victim come from the root account — never
+        // from arguments, so no caller can redirect or resize a ruling.
+        let amount = root.ruled_slash;
+        let victim = root.victim;
+
+        // (3) Move EXACTLY the ruled amount: bond vault -> the recorded
+        //     victim, the pool PDA signing as the bond vault's authority.
+        let seeds = &[SEED_POOL, &[ctx.accounts.pool.bump]];
+        token::transfer(
+            CpiContext::new_with_signer(
+                *ctx.accounts.token_program.key,
+                token::Transfer {
+                    from: ctx.accounts.bond_vault.to_account_info(),
+                    to: ctx.accounts.destination.to_account_info(),
+                    authority: ctx.accounts.pool.to_account_info(),
+                },
+                &[seeds],
+            ),
+            amount,
+        )?;
+
+        // The bond record mirrors the vault: it falls by exactly the slash.
+        let bond = &mut ctx.accounts.bond;
+        bond.amount = bond.amount.checked_sub(amount).ok_or(PoolError::Overflow)?;
+        // Terminal state: the slash executed once (see (1)).
+        root.status = RootStatus::Slashed;
+
+        emit!(BondSlashed {
+            window,
+            amount,
+            victim,
+            bond_after: bond.amount,
+        });
         Ok(())
     }
 }
