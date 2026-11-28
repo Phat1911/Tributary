@@ -58,7 +58,7 @@ const TOKEN_2022_BYTES: [u8; 32] = [
 ];
 const ATA_PROGRAM_BYTES: [u8; 32] = [
     0x8c, 0x97, 0x25, 0x8f, 0x4e, 0x24, 0x89, 0xf1, 0xbb, 0x3d, 0x10, 0x29, 0x14, 0x8e, 0x0d, 0x83,
-    0x0b, 0x5a, 0x13, 0x99, 0xda, 0xff, 0x10, 0x84, 0x04, 0x8e, 0x7b, 0xd8, 0xdb, 0xe9, 0xf8, 0x5b,
+    0x0b, 0x5a, 0x13, 0x99, 0xda, 0xff, 0x10, 0x84, 0x04, 0x8e, 0x7b, 0xd8, 0xdb, 0xe9, 0xf8, 0x59,
 ];
 const RENT_SYSVAR_BYTES: [u8; 32] = [
     0x06, 0xa7, 0xd5, 0x17, 0x19, 0x2c, 0x5c, 0x51, 0x21, 0x8c, 0xc9, 0x4c, 0x3d, 0x4a, 0xf1, 0x7f,
@@ -69,7 +69,11 @@ const POOL_PROGRAM_STR: &str = "9pEmyxftdRUZV2iw6ZzCNgZz9QygG53i7APNaWcEHvjX";
 const USDC_DEVNET_STR: &str = "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU";
 const TOKEN_V3_STR: &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
 const TOKEN_2022_STR: &str = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb";
-const ATA_PROGRAM_STR: &str = "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knN";
+// Canonical ATA program = ...JA8knL (the old ...JA8knN deployment is gone —
+// verified on mainnet+devnet 2026-11-28). Never fired on-chain in the M8
+// soak (the renter wallet was provisioned, not derived), but fix it so a
+// future derived-ATA step cannot fail.
+const ATA_PROGRAM_STR: &str = "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL";
 const RENT_SYSVAR_STR: &str = "SysvarRent111111111111111111111111111111111";
 
 // --- program seeds (must mirror programs/pool/src/state.rs exactly) ------
