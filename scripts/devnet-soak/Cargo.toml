@@ -17,6 +17,9 @@ publish = false
 squads-multisig = "=2.1.0"
 solana-client = "=1.18.26"
 solana-sdk = "=1.18.26"
+# Cross-check ATA derivations against the recipe on-chain programs use
+# (already in the lock tree via squads-multisig; pinned to the same version).
+anchor-spl = "=0.29.0"
 serde_json = "1"
 sha2 = "0.10"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }

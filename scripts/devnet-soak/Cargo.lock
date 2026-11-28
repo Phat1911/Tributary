@@ -1271,6 +1271,7 @@ dependencies = [
 name = "devnet-soak"
 version = "0.1.3"
 dependencies = [
+ "anchor-spl",
  "serde_json",
  "sha2 0.10.9",
  "solana-client",

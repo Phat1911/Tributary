@@ -4,7 +4,8 @@
 
 ## Current state
 
-- **Date:** 2026-11-26 · **Spec:** v0.3 (decisions D1–D44)
+- **Date:** 2026-11-28 · **Spec:** v0.3 (decisions D1–D44)
+- **SAT-2 / M11 DEVNET SYNC — DONE on `m11/devnet-sync` (2026-11-28, careful-Solana-ops persona).** The devnet program `9pEmyx…` was upgraded to the M11 settlement code THROUGH the existing Squads 2-of-2 (proposal **index 11**, founder + teammate-rotated approvals, execute sig `37JFtEwY…`, deployed slot 527064271; ProgramData extended +65,536 top-level FIRST because the M11 ELF grew to 406,128 B — lesson 1). Authority is STILL the vault, admin/backend unchanged, pool ACTIVE (did not arrive paused). Then a REAL settle run: renter prepay 200,000 micro-USDC into the vault, `fund_bond` 149,040, `post_root` (window 1795831842), 100-slot challenge window waited, and **`claim` PAID 149,040 micro-USDC** to the depositor (162,000 burn − 8% fee) — vault 200,000 → 50,960, depositor ATA +149,040 exactly. Full evidence (every sig + solscan/explorer links + read-back) in `docs/devnet-m11.md`; machine record in `deploy/devnet-m11.json`. **Found LIVE and fixed (ops tooling only, zero product-code change): the ATA program moved — canonical is `…JA8knL` on both mainnet and devnet, the legacy `…JA8knN` is gone; the glue + soak client carried the stale id, which would have broken every ATA derive/create on-chain.** Log archive: `target/soak-logs/m11-*.log`.
 - **M11-B: SETTLEMENT IMPLEMENTED TO GREEN on `m11/doctrine-suite` (2026-11-27, doctrine-suite Session B).** All six handlers (`fund_bond`, `post_root`, `claim`, `challenge`, `resolve_challenge`, `slash_bond`) and all four Merkle helpers implemented; **the full pool suite is 54/54 green (9 unit + 20 adversarial + 9 audit_session_c + 4 journey + 12 m11_doctrine)**, including the demo slice (doctrine tests 1,2,3,4,7,10,11,12). SHA-256 by the `sol_sha256` syscall using the SBF static-syscalls convention (murmur3 hash → syscall fn pointer, no dependency; AUDIT A-063). Two suite construction bugs found, proven and fixed by the founder's in-session ruling (A-062 claim root writable, A-063 non-multisig resolve leg). GLUE `scripts/devnet-m11/` (payouts JSON → tree → fund_bond/post_root/claim, devnet) and the tracked Anchor IDL (`programs/pool/idl/pool.json`, built with the Anchor CLI 1.2.2) shipped. fmt + clippy clean; no new dependencies. Full entry + limitations in the log below.
 - **SCREEN-1 — DONE (2026-11-26): the settlement screen, part 1 (runbook step card; dashboard only, no gateway change).** New page `apps/dashboard/app/org/settlement/page.tsx` + a sidebar link (org_admin, like every `/org/*` page): pick a root pool → the depositor × bucket table (contributed / burned / earned — exact dollars, exact micro-USD on hover) → **Settle last hour (8%)** → the run's window, Distributable = Fee + Paid out + Undistributed, and the payouts. A new exact formatter (`formatMicroUsdExact`), because the cent-rounding one prints `$0.00` for real settlement figures. Manual journey: `docs/founder-journey-settlement-screen.md` (workflow step 12). **Found on the way and OPEN — A-061 (high, worker's assessment; residual of A-050): a later depositor whose `provider` string sorts before the incumbent's takes 100% of a family's traffic at 1% weight, receives the member prompts, and can take the family offline. PoC in AUDIT.md; needs a ruling; NOT fixed here (gateway out of scope).** Gates: lint / tsc / build / build:export clean; browser walk 46/46 through the baked path; journey dry-run 21/21. Push state and CI verdict: the close-out note in the log entry.
 - **CI-GREEN CHORE — DONE (2026-11-26): main's two reds cleared, no product code.** (1) cargo-deny RUSTSEC-2026-0592 — `url` 2.5.8 → 2.5.9 with its FORCED companion `form_urlencoded` 1.2.2 → 1.2.3 (the only two lock entries; the companion is required by `url` 2.5.9's own manifest — the kickoff's tripwire fired and the director ruled "land both"); `deny.toml` untouched; A-057. (2) The flaky `a_refused_pick_falls_back_to_sibling_capacity` pin — diagnosis CONFIRMED (the hunt drained B too: 19% per DB leg), setup fixed by depositing B AFTER the hunt, all five assertions byte-identical, 50/50 binary runs green per database. Local gates: fmt / clippy / deny clean, full workspace dual-DB 198/198, standing pins 2 green / 10 red. **CI verdict of the pushed fix head `3a29811`: GREEN — [run 45750240229](https://github.com/Phat1911/Tributary/actions/runs/45750240229), all five jobs.** Full entry in the log below.
@@ -52,6 +53,32 @@
 | M12–M14 | pending | V3 — Operator network |
 
 ## Milestone log (append per completed milestone; keep the most recent 10)
+
+### 2026-11-28 — SAT-2: M11 on devnet — 2-of-2 upgrade + a PAID claim
+
+**Scope (kickoff SAT-2).** Branch `m11/devnet-sync` from main `02cbac8`. Build M11, write a fresh buffer, hand its authority to the vault, extend ProgramData if needed, upgrade through the 2-of-2 (today's members), verify, fund devnet keys, prepay into the vault, run a real settle, write the evidence + machine record, commit/push. DEVNET ONLY; no product-code changes.
+
+**Outcome.** All steps green, live on devnet:
+
+- **Build:** M11 ELF 406,128 B (sha256 `3155eb73…`), `cargo-build-sbf --arch v3`; program id in `target/m8-keys/pool-program.json` = `9pEmyx…` ✓.
+- **Buffer** `7bmhiCZ1…` (fresh keypair in `target/m11-keys/`), authority handed to the vault (sig `4xVgtvGz…` @527060524; verified at bytes 5..37 — lesson 2).
+- **Extend FIRST:** ELF (406,128) > allocated (348,736) → `solana program extend … 65536` top-level, deploy key paid (sig `22vzNRpE…` @527060660); ProgramData now 414,317 B. Lesson 1.
+- **Upgrade via 2-of-2, proposal index 11** (live index 10 + 1; stale 7/8 skipped — lesson 3): create+proposal `5YhVWgjU…` @527064246, approve founder `5ShnAmi9…` @527064255, approve teammate-rotated `2KvuggXA…` @527064264, **execute `37JFtEwY…` @527064271**. Slots 527064235 → 527064273.
+- **Post-upgrade:** authority STILL the vault; pool admin/backend unchanged; pool ACTIVE (paused=0 — no resume needed).
+- **Money:** airdrop rate-limited (3 attempts) → founder topped backend SOL via faucet.solana.com (5 SOL); Circle faucet API confirmed still retired → founder claimed 20 USDC via browser to the backend ATA `7x8yfjE…`; renter wallet still held 20 USDC. `prepay_renter` 200,000 micro into the vault (`5jU52D22…` @527073092).
+- **Settle run (the founder's video numbers):** window 1795831842, one leaf 149,040 (162,000 burn − 8% fee 12,960). `fund_bond` 149,040 (`35EmRfxT…` @527077528) → `post_root` (`rCCt6PWn…` @527077535, root account `AyNb6DyM…`) → 100-slot window → **`claim` PAID 149,040** (`278rWKHN…` @527077652). Read back: root total_payout 149,040 == paid_out 149,040; claim marker `G2pUPk4J…` amount 149,040; escrow vault 200,000 → 50,960; depositor ATA +149,040 exactly.
+- **Evidence:** `docs/devnet-m11.md` (every sig with solscan + explorer links, slots, accounts, what to click) + `deploy/devnet-m11.json`.
+
+**Found LIVE and fixed (ops tooling only; NOT product code — rule: no product-code changes held).** The Associated-Token-Account program was REDEPLOYED: canonical `…JA8knL` on mainnet AND devnet, the legacy `…JA8knN` deployment gone. The M11 glue and the M8 soak client carried the stale `…knN` id (one byte: `0x5b`→`0x59`), which derives a non-ATA address and calls a nonexistent program — the settle run failed closed on it before the fix. Fixed in `scripts/devnet-m11/src/main.rs`, `scripts/devnet-soak/src/main.rs`, `scripts/devnet-soak/src/bin/m11_sync.rs`. Bonus correction: M8's "provisioned, not derived" renter wallet was the canonical ATA all along (the stale id made it look underivable). The Circle API retirement is re-confirmed (404 + reCAPTCHA).
+
+**Limitations (honest).**
+1. The M11 glue change is a program-ID constant correction in an ops crate (plus the same stale constant in the M8 soak client) — zero changes under `programs/`, `crates/`, `apps/`, `migrations/`. The upgraded program is byte-for-byte the M11-B code CI already tested.
+2. The claim used the assisted door (backend signs). The direct door and challenge/slash paths are pinned by the on-host doctrine suite, not exercised on devnet this run.
+3. The escrow vault intentionally retains 50,960 micro-USDC (the renter's unspent prepay remainder). The bond (149,040) stays bonded — no slash was ruled, so `slash_bond` correctly has nothing to do.
+4. The renter and the depositor are the same custodial key on devnet (M8 shape); the depositor wallet's NET movement is −50,960 across prepay+claim, while the claim leg alone is exactly +149,040.
+5. The stale approved-but-unexecuted Squads proposals 7 and 8 remain on the multisig (unexecutable by construction; clearable by a `transaction_accounts_close` vote if the founder wants them gone).
+
+**Fast jump (this session).** `scripts/devnet-soak/src/bin/m11_sync.rs` (new: preflight/upgrade/resume/prepay/ata_probe/settle_verify) · `scripts/devnet-soak/{Cargo.toml,Cargo.lock}` (anchor-spl 0.29.0 cross-check, same pinned tree) · `scripts/devnet-soak/src/main.rs` + `scripts/devnet-m11/src/main.rs` (stale ATA id fix) · `docs/devnet-m11.md` · `deploy/devnet-m11.json` · `PLAN.md` (this entry). Run inputs kept in gitignored `target/m11-keys/` (buffer.json, payouts.json) and `target/soak-logs/`.
 
 ### 2026-11-27 — M11-B: settlement implemented to green (doctrine-suite Session B) — 54/54, demo slice 8/8, GLUE + IDL shipped
 
@@ -1423,6 +1450,13 @@ exploitable FIXED, pinned red-first:
 - **limitations/notes:** crates are placeholder libs (`crate_name()` + one unit test each); crate names carry the `tributary-` prefix ahead of crates.io reservation (D19); dashboard is a TS-only placeholder page; `next build` auto-adjusted `tsconfig.json` (`jsx: react-jsx`, `.next/dev/types` include) — kept; local Rust builds on this machine run via Windows-cargo WSL interop (needs `WSLENV=CARGO_INCREMENTAL CARGO_INCREMENTAL=0`), or just use CI.
 
 ## Fast jump — most recent milestone → changed files
+
+**SAT-2 / M11 devnet sync (2026-11-28):**
+
+- Ops tooling: `scripts/devnet-soak/src/bin/m11_sync.rs` (new 2-of-2 sync client) · `scripts/devnet-soak/{Cargo.toml,Cargo.lock}` · `scripts/devnet-soak/src/main.rs` + `scripts/devnet-m11/src/main.rs` (stale ATA program id `…knN`→`…knL`)
+- Evidence: `docs/devnet-m11.md` (all sigs + links + slots) · `deploy/devnet-m11.json` (machine record)
+- Docs: `PLAN.md` (this entry)
+- Run artifacts (gitignored): `target/m11-keys/{buffer.json,payouts.json}` · `target/soak-logs/m11-*.log`
 
 **M7 — LedgerTrait + double-entry ledger (2026-10-28):**
 

@@ -1,0 +1,157 @@
+{
+  "_comment": "M11 devnet sync record (PUBKEYS + SLOTS + SIGNATURES ONLY — keypairs live in gitignored target/m8-keys and target/m11-keys, never committed). Upgrade through the existing Squads 2-of-2 plus a paid claim; human evidence in docs/devnet-m11.md. Generated 2026-11-28 on branch m11/devnet-sync.",
+  "cluster": {
+    "name": "devnet",
+    "rpc_url": "https://api.devnet.solana.com",
+    "slot_at_completion": 527078533
+  },
+  "program": {
+    "name": "pool",
+    "address": "9pEmyxftdRUZV2iw6ZzCNgZz9QygG53i7APNaWcEHvjX",
+    "program_data": "FRQmdoLx5t7JFgoyQWFpB2p3Fr5nMg9anNKUUhmYd2HP",
+    "elf_path": "target/deploy/pool.so",
+    "elf_bytes": 406128,
+    "elf_sha256": "3155eb73f6e2245bea88b9a7c3e6a30e8ec3980753f8403c10c69d177be523be",
+    "build": "cargo-build-sbf 4.1.0 --arch v3 (platform-tools v1.54)",
+    "upgrade_authority_after": "BhLQqw5rkr3otQoXvJSRjiaNHTgdcgXVkqXv8mwEhhJq",
+    "last_deployed_slot": 527064271
+  },
+  "multisig": {
+    "kind": "squads-v4",
+    "multisig": "GuSeFfFkdKtjkubeLUEeBHW5pfHSJctGnz8AFk7xrCk5",
+    "vault": "BhLQqw5rkr3otQoXvJSRjiaNHTgdcgXVkqXv8mwEhhJq",
+    "threshold": 2,
+    "members_today": [
+      "HGHF2iuEphK4zFuqFAC5dXDfk4US6AAvMVqWwfwB7gzz",
+      "2ys6xNTANVqoNar7RQHyQvtdDhCwYbsE3XEP4LAjpzbq"
+    ]
+  },
+  "preflight": {
+    "slot": 527064076,
+    "pool": "6pHRZzYZNFbAtueQx1bWUC2QJJeoTSeHvv7hwX1vtjRT",
+    "pool_admin": "BhLQqw5rkr3otQoXvJSRjiaNHTgdcgXVkqXv8mwEhhJq",
+    "pool_backend": "AJmEJPsCBT7VpZ3CkxDWpcoeuBdqp3JzrcPr43ZntJpb",
+    "pool_paused": false,
+    "program_data_space_bytes_before": 348781,
+    "multisig_transaction_index_before": 10
+  },
+  "buffer": {
+    "address": "7bmhiCZ14PnjHMg8zgjGNetVPfJUqAh2jMfvNbZ3T2Qs",
+    "keypair_path": "target/m11-keys/buffer.json",
+    "data_bytes": 406165,
+    "authority_set_to_vault_sig": "4xVgtvGzWSuXXsGFNmRUa9NbsfvKchmBfE4HSzaj31rckV27iQfDBhZ8QNSPJoBVRLvfU8htFoFJFvxmHy3vV57r",
+    "authority_set_slot": 527060524,
+    "authority_layout_note": "buffer authority key parsed at bytes 5..37 ([u32 tag=1][u8 option][32B key])"
+  },
+  "extend": {
+    "additional_bytes": 65536,
+    "sig": "22vzNRpET3zQmsdo2Z1QXXJc13yZJ2LmE5G2o9zXWDLFUUU7DzfDy2m4ikfyRxdFCWMSDnARcnyqR9NEWWzwpZsN",
+    "slot": 527060660,
+    "program_data_space_bytes_after": 414317,
+    "paid_by": "4N2nTJ8WWwDKVoULt9bymaB6XsrB7HP973y8Ebw6tQhV"
+  },
+  "upgrade": {
+    "proposal_index": 11,
+    "create_proposal": {
+      "sig": "5YhVWgjUyLRm4HjBkxebn8MpTLwGXF4nb2opAkVE5svKQ1o6FwCb6kVtoQsvGT5xoVsTpiU2GWLkBDHbx4CzSom7",
+      "slot": 527064246
+    },
+    "approval_founder": {
+      "member": "HGHF2iuEphK4zFuqFAC5dXDfk4US6AAvMVqWwfwB7gzz",
+      "sig": "5ShnAmi9gau9EUFZ8WFno6se21UPnkpJjRwKtwndFuFTJZ1LW9L8CFKKZjW1SmLzbQyWrgcDSHXAmQyqgtToxwZy",
+      "slot": 527064255
+    },
+    "approval_teammate_rotated": {
+      "member": "2ys6xNTANVqoNar7RQHyQvtdDhCwYbsE3XEP4LAjpzbq",
+      "sig": "2KvuggXAYiP8e1tKUpL4EHsHzEqNK1fTYpwVYBXxwUM4ma34RfqYgMHU1mfW5yqBB8ecgVJAyJ8dutcWCAHeQsnX",
+      "slot": 527064264
+    },
+    "execute": {
+      "sig": "37JFtEwYtSxHguzvGYjTv97vyMwR7ZSbyXddwFte6cgwjtwEcjn8r8CTsP6wTsCrZM4rm2v1mTEwZR5DvNeZ7KHN",
+      "slot": 527064271
+    },
+    "slot_before": 527064235,
+    "slot_after": 527064273
+  },
+  "post_upgrade_verify": {
+    "authority_still_vault": true,
+    "pool_admin_unchanged": true,
+    "pool_backend_unchanged": true,
+    "pool_paused": false,
+    "resume_needed": false
+  },
+  "funding": {
+    "backend_key": "AJmEJPsCBT7VpZ3CkxDWpcoeuBdqp3JzrcPr43ZntJpb",
+    "backend_sol_airdrop": "rate-limited (3 attempts); founder topped up 5 SOL via faucet.solana.com (browser)",
+    "backend_sol_after": 5.09763424,
+    "backend_usdc": "20 USDC claimed by the founder on faucet.circle.com (browser; the Circle API is retired — 404 + reCAPTCHA)",
+    "backend_usdc_ata": "7x8yfjEnGYQtWD1LCPuBRRLtJufTcb47PdbZBdm7MYzg",
+    "renter_wallet": "3GuSWoYUdyu3PHHs7M7FijfUGih4ySo2w76puJW9Y2xs",
+    "renter_usdc_before_prepay": 20000000
+  },
+  "prepay": {
+    "amount_micro_usdc": 200000,
+    "sig": "5jU52D22NyRXuUKRpsyM5rG8X5mMThFjq4v3txdqAK3iKoenkDMYafqLF9ayyeDHA686EiVkctDWWTQ8h9CYCQ6g",
+    "slot": 527073092,
+    "vault_after": 200000,
+    "renter_prepaid_record": 200000
+  },
+  "settlement": {
+    "window": 1795831842,
+    "merkle_root": "0x40b04b3c5b5737d66d4d76547a52834dffe142116e79081d3823ae64c709ea66",
+    "payouts_file": "target/m11-keys/payouts.json",
+    "leaves": [
+      {
+        "depositor": "Ah3TyjuC3agXQcsYty1VpNBWLRg4DkFWkhugsyoGLUuJ",
+        "amount_micro_usdc": 149040,
+        "note": "162,000 micro-USDC burn minus the 8% operator fee (12,960)"
+      }
+    ],
+    "fund_bond": {
+      "amount_micro_usdc": 149040,
+      "sig": "35EmRfxTXNBc4kTZ4xMmKbyeBF4tGjUMev7phkkjg6iyJdba2UHNyqhfBnUJMB1CzFS7ZsShLsygSG1TUxB4NJRz",
+      "slot": 527077528
+    },
+    "post_root": {
+      "sig": "rCCt6PWnthZxrkkHo9DgmvTishS9QfgWEa7Va6enug39wowTpwVNwXnuPoViy1qNS6e8qSneaywfNqjkfmf3TKR",
+      "slot": 527077535,
+      "root_account": "AyNb6DyMCo2j82X5adbJnAPHknt98Kr6L9iSguhzQJyQ",
+      "posted_at": 527077535
+    },
+    "claim": {
+      "sig": "278rWKHN8aSEr26Fmbwe9H4CRBXWeU3e6iWjBGVZNj3fuzseHiNiuCtANDowtyvmg1CkkwbskBRoZGNCRuywMpJR",
+      "slot": 527077652,
+      "claim_marker": "G2pUPk4JPJdfpDa3mGqZRurURxfMP5fKMeaBwP8XqA2a",
+      "amount_micro_usdc": 149040,
+      "door": "assisted (backend opens)"
+    }
+  },
+  "settlement_readback": {
+    "root_total_payout": 149040,
+    "root_paid_out": 149040,
+    "root_status": "Active",
+    "bond_record": "3NRdsizTeHbEq9cE9YZaAM3iwXzs7mTYSUZuXZnVqCWn",
+    "bond_amount": 149040,
+    "bond_vault": "DoyipWb8ZqbaAgarN2Qdhp2tu9HbUNPVM1eHDtP548cG",
+    "bond_vault_balance": 149040,
+    "escrow_vault": "Dhp3t3vL6crixL1AzmXEFFa1bfMZ4KsaxEaSyZjFYksd",
+    "escrow_vault_before_claim": 200000,
+    "escrow_vault_after_claim": 50960,
+    "depositor_usdc_ata": "3GuSWoYUdyu3PHHs7M7FijfUGih4ySo2w76puJW9Y2xs",
+    "depositor_balance_before_claim": 19800000,
+    "depositor_balance_after_claim": 19949040,
+    "depositor_delta_from_claim": 149040
+  },
+  "ata_program": {
+    "canonical": "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL",
+    "legacy_retired": "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knN",
+    "note": "canonical on mainnet AND devnet (verified 2026-11-28); the stale ...knN constant was fixed in scripts/devnet-m11/src/main.rs, scripts/devnet-soak/src/main.rs and scripts/devnet-soak/src/bin/m11_sync.rs"
+  },
+  "incidental": {
+    "noop_self_transfer_probe": {
+      "sig": "2AdtTndDeAjyh83x46hs9eia3S6G32BvBGjoEg2YsjRtLu32Y15rMFdAF8zed4QjKTKscPa8tZcDEPPt9Lx6H3bc",
+      "slot": 527073597,
+      "note": "spl-token CLI wallet->ATA lookup probe fired during diagnosis; moved nothing"
+    }
+  }
+}

@@ -59,7 +59,7 @@ const TOKEN_V3_BYTES: [u8; 32] = [
 ];
 const ATA_PROGRAM_BYTES: [u8; 32] = [
     0x8c, 0x97, 0x25, 0x8f, 0x4e, 0x24, 0x89, 0xf1, 0xbb, 0x3d, 0x10, 0x29, 0x14, 0x8e, 0x0d, 0x83,
-    0x0b, 0x5a, 0x13, 0x99, 0xda, 0xff, 0x10, 0x84, 0x04, 0x8e, 0x7b, 0xd8, 0xdb, 0xe9, 0xf8, 0x5b,
+    0x0b, 0x5a, 0x13, 0x99, 0xda, 0xff, 0x10, 0x84, 0x04, 0x8e, 0x7b, 0xd8, 0xdb, 0xe9, 0xf8, 0x59,
 ];
 const SYSTEM_PROGRAM_BYTES: [u8; 32] = [0u8; 32];
 const CLOCK_SYSVAR_BYTES: [u8; 32] = [
@@ -70,7 +70,12 @@ const CLOCK_SYSVAR_BYTES: [u8; 32] = [
 const POOL_PROGRAM_STR: &str = "9pEmyxftdRUZV2iw6ZzCNgZz9QygG53i7APNaWcEHvjX";
 const USDC_DEVNET_STR: &str = "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU";
 const TOKEN_V3_STR: &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
-const ATA_PROGRAM_STR: &str = "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knN";
+// The ATA program was REDEPLOYED: the canonical address on mainnet AND
+// devnet is ...JA8knL (the old ...JA8knN deployment no longer exists —
+// verified on both clusters 2026-11-28; spl-associated-token-account 2.3.0
+// agrees). A stale ...knN here makes every ATA derivation + create fail
+// on-chain (found live during the M11 devnet sync).
+const ATA_PROGRAM_STR: &str = "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL";
 const SYSTEM_PROGRAM_STR: &str = "11111111111111111111111111111111";
 const CLOCK_SYSVAR_STR: &str = "SysvarC1ock11111111111111111111111111111111";
 
