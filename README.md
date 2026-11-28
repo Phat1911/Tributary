@@ -12,8 +12,8 @@ since 1 November 2026. It holds a USDC escrow, takes and refunds renter
 prepayments, records deposits as claims minted on the operator's word, and,
 since 28 November, settles payouts: earnings become one Merkle root, a
 depositor claims with a proof, and nothing pays before a challenge window.
-A root, a paid claim, a stranger's challenge, the multisig's ruling and a
-depositor's own claim are on devnet, linked below. The
+A root, a paid claim, a challenge by an outside key, the multisig's ruling
+and a depositor's own claim are on devnet, linked below. The
 escrow holds devnet USDC only, and nothing in the product funds it yet. The
 rest runs on your own machine:
 Tributary is also a self-hosted gateway for teams that share AI capacity.
@@ -37,8 +37,8 @@ demo: run it locally with the Quickstart below.
   live since 1 November 2026. Since 28 November it also settles payouts:
   Merkle roots, claims with a proof, a challenge window, an operator bond.
   The upgrade that added them passed the 2-of-2 multisig; on devnet a claim
-  has paid, a stranger's challenge has frozen a root, and the multisig has
-  ruled. The program can be upgraded only by a multisig vote. See
+  has paid, an outside key's challenge has frozen a root, and the multisig
+  has ruled. The program can be upgraded only by a multisig vote. See
   [What exists today](#what-exists-today).
 - **Surplus credits can earn.** A pool of kind `root` accepts depositor
   credits. Each request's cost is metered to the micro-unit against the
@@ -78,9 +78,11 @@ people who do not trust each other.
   shape, stated plainly: the backend key alone can post a root naming any
   pubkey, up to the whole escrow, and open the assisted claim once the
   window has passed. What stands between that and a theft is the window
-  itself: anyone can challenge the root and freeze its payouts, and only the
-  2-of-2 multisig can rule. Each has run on devnet: [a stranger's
-  challenge](https://explorer.solana.com/tx/2GfqoxhMYdZkEH5q72zwWfVnDUCTvETmSHvsJFwT4PTMqREyPhVUkjrJXPx2PwNcuDywomihUWsysmu7VHELj4D6?cluster=devnet), [a claim refused while the root was
+  itself: anyone can challenge the root within 100 slots, under a minute on
+  devnet, and freeze its payouts, and only the 2-of-2 multisig can rule.
+  Each has run on devnet, with a fresh unprivileged key of ours as the
+  challenger: [a challenge by a key with
+  no role](https://explorer.solana.com/tx/2GfqoxhMYdZkEH5q72zwWfVnDUCTvETmSHvsJFwT4PTMqREyPhVUkjrJXPx2PwNcuDywomihUWsysmu7VHELj4D6?cluster=devnet), [a claim refused while the root was
   frozen](https://explorer.solana.com/tx/5VhiGct8FVddSNy76HtA1yUUTnoA2ZtBhzzrUrZ7Peg54Lcma8bbg5SaUpsebfuQtMzHADgyVVcFftkvykjszFzd?cluster=devnet), [the ruling](https://explorer.solana.com/tx/Nwg7BhMMmJ2iHSF6xjMJ4WYPyzpP2xzWh9Keqj3zUfH1ZUB57ZfVgeDX6UsE2ZhTx4W6BYT8WWocT11s4ckwEih?cluster=devnet). Its vault is also the upgrade authority; the
   upgrade that put the settlement code in place, on 28 November, is
   [on-chain](https://explorer.solana.com/tx/37JFtEwYtSxHguzvGYjTv97vyMwR7ZSbyXddwFte6cgwjtwEcjn8r8CTsP6wTsCrZM4rm2v1mTEwZR5DvNeZ7KHN?cluster=devnet).
@@ -183,7 +185,7 @@ the OpenAI-compatible API without a wallet.
    program**. A depositor claims with a proof after a challenge window, and
    a root can never pay more than it declares. Live on devnet since
    28 November: [a claim paid](https://explorer.solana.com/tx/278rWKHN8aSEr26Fmbwe9H4CRBXWeU3e6iWjBGVZNj3fuzseHiNiuCtANDowtyvmg1CkkwbskBRoZGNCRuywMpJR?cluster=devnet) 149,040 micro-USDC to a depositor; later that day, after a
-   stranger's challenge was [overruled by the multisig](https://explorer.solana.com/tx/Nwg7BhMMmJ2iHSF6xjMJ4WYPyzpP2xzWh9Keqj3zUfH1ZUB57ZfVgeDX6UsE2ZhTx4W6BYT8WWocT11s4ckwEih?cluster=devnet), [the depositor
+   challenge by a key with no role was [overruled by the multisig](https://explorer.solana.com/tx/Nwg7BhMMmJ2iHSF6xjMJ4WYPyzpP2xzWh9Keqj3zUfH1ZUB57ZfVgeDX6UsE2ZhTx4W6BYT8WWocT11s4ckwEih?cluster=devnet), [the depositor
    claimed with their own key](https://explorer.solana.com/tx/3bRK6dtnLuyaArVxDq3UMiqUsU18qCMRyjEwj6dKfKXft5Zze2TSK75HQiPQbZ98tgxJtm1LEAdXPJQdyU2ygJ8J?cluster=devnet).
 
 A reproducible run, from the no-key walkthrough
@@ -209,7 +211,7 @@ run (distributable $0.0378, fee $0.003024, paid out $0.034776):
 | Gateway, organisation pools, dashboard (V1) | Released as v0.1.4 | [Release](https://github.com/Phat1911/Tributary/releases), [CI](https://github.com/Phat1911/Tributary/actions/workflows/ci.yml), the [Quickstart](#try-it) below |
 | Depositor pools, double-entry ledger, settle API | Experimental. In v0.1.4 in a pre-audit form; the audited settle (idempotent, posting to the books) is on `main` only, not yet in the release image | `crates/gateway`, `crates/ledger`; the [settlement journey](docs/founder-journey-settlement-screen.md) walks through the public API; the audit and fix log is in [`PLAN.md`](PLAN.md) (2026-11-18 and 2026-11-19) |
 | Settlement screen | On `main` after v0.1.4; ships in the next release | Screenshot above; `apps/dashboard/app/org/settlement` |
-| Merkle-settled payouts: bond, root, claim, challenge window, payout cap | **Live on devnet since 2026-11-28**, built tests-first: twelve rules as failing tests on 26 November, implemented to 54 of 54 green on 27 November, upgraded through the 2-of-2 multisig; and, on 28 November, a claim paid, a stranger's challenge, a refused claim, a 2-of-2 ruling and a direct-door claim | [The paid claim](https://explorer.solana.com/tx/278rWKHN8aSEr26Fmbwe9H4CRBXWeU3e6iWjBGVZNj3fuzseHiNiuCtANDowtyvmg1CkkwbskBRoZGNCRuywMpJR?cluster=devnet), [the challenge](https://explorer.solana.com/tx/2GfqoxhMYdZkEH5q72zwWfVnDUCTvETmSHvsJFwT4PTMqREyPhVUkjrJXPx2PwNcuDywomihUWsysmu7VHELj4D6?cluster=devnet), [the ruling](https://explorer.solana.com/tx/Nwg7BhMMmJ2iHSF6xjMJ4WYPyzpP2xzWh9Keqj3zUfH1ZUB57ZfVgeDX6UsE2ZhTx4W6BYT8WWocT11s4ckwEih?cluster=devnet), [the direct claim](https://explorer.solana.com/tx/3bRK6dtnLuyaArVxDq3UMiqUsU18qCMRyjEwj6dKfKXft5Zze2TSK75HQiPQbZ98tgxJtm1LEAdXPJQdyU2ygJ8J?cluster=devnet), [the 2-of-2 upgrade](https://explorer.solana.com/tx/37JFtEwYtSxHguzvGYjTv97vyMwR7ZSbyXddwFte6cgwjtwEcjn8r8CTsP6wTsCrZM4rm2v1mTEwZR5DvNeZ7KHN?cluster=devnet), the [devnet report](docs/devnet-m11.md), [`programs/pool/tests/m11_doctrine.rs`](programs/pool/tests/m11_doctrine.rs) |
+| Merkle-settled payouts: bond, root, claim, challenge window, payout cap | **Live on devnet since 2026-11-28**, built tests-first: twelve rules as failing tests on 26 November, implemented to 54 of 54 green on 27 November, upgraded through the 2-of-2 multisig; and, on 28 November, a claim paid, an outside key's challenge, a refused claim, a 2-of-2 ruling and a direct-door claim | [The paid claim](https://explorer.solana.com/tx/278rWKHN8aSEr26Fmbwe9H4CRBXWeU3e6iWjBGVZNj3fuzseHiNiuCtANDowtyvmg1CkkwbskBRoZGNCRuywMpJR?cluster=devnet), [the challenge](https://explorer.solana.com/tx/2GfqoxhMYdZkEH5q72zwWfVnDUCTvETmSHvsJFwT4PTMqREyPhVUkjrJXPx2PwNcuDywomihUWsysmu7VHELj4D6?cluster=devnet), [the ruling](https://explorer.solana.com/tx/Nwg7BhMMmJ2iHSF6xjMJ4WYPyzpP2xzWh9Keqj3zUfH1ZUB57ZfVgeDX6UsE2ZhTx4W6BYT8WWocT11s4ckwEih?cluster=devnet), [the direct claim](https://explorer.solana.com/tx/3bRK6dtnLuyaArVxDq3UMiqUsU18qCMRyjEwj6dKfKXft5Zze2TSK75HQiPQbZ98tgxJtm1LEAdXPJQdyU2ygJ8J?cluster=devnet), [the 2-of-2 upgrade](https://explorer.solana.com/tx/37JFtEwYtSxHguzvGYjTv97vyMwR7ZSbyXddwFte6cgwjtwEcjn8r8CTsP6wTsCrZM4rm2v1mTEwZR5DvNeZ7KHN?cluster=devnet), the [devnet report](docs/devnet-m11.md), [`programs/pool/tests/m11_doctrine.rs`](programs/pool/tests/m11_doctrine.rs) |
 
 ![Review queue: leak signals with a severity and an action for each](docs/images/review-queue.png)
 
@@ -360,7 +362,7 @@ devnet transactions.
 - **The red run first:** [the twelve rules failing before any code
   existed](https://github.com/Phat1911/Tributary/actions/runs/45791887787), 26 November.
 - **28 November, the other half.** [A second root was posted](https://explorer.solana.com/tx/5JZUU6tdn7xdPh7XkhwrZYd7BMJYVH7tFA1KVy7hDE1YyJGk91rgY3SpvPyQH8Gcyw4BVM3i1Y2rHGRhjACZNVfS?cluster=devnet) for
-  100,000 micro-USDC; [a stranger's key challenged it](https://explorer.solana.com/tx/2GfqoxhMYdZkEH5q72zwWfVnDUCTvETmSHvsJFwT4PTMqREyPhVUkjrJXPx2PwNcuDywomihUWsysmu7VHELj4D6?cluster=devnet) inside the
+  100,000 micro-USDC; [a key with no role challenged it](https://explorer.solana.com/tx/2GfqoxhMYdZkEH5q72zwWfVnDUCTvETmSHvsJFwT4PTMqREyPhVUkjrJXPx2PwNcuDywomihUWsysmu7VHELj4D6?cluster=devnet) inside the
   window; [a claim against the frozen root was refused](https://explorer.solana.com/tx/5VhiGct8FVddSNy76HtA1yUUTnoA2ZtBhzzrUrZ7Peg54Lcma8bbg5SaUpsebfuQtMzHADgyVVcFftkvykjszFzd?cluster=devnet) with
   `RootFrozen`; the [2-of-2 multisig ruled that the root stands](https://explorer.solana.com/tx/Nwg7BhMMmJ2iHSF6xjMJ4WYPyzpP2xzWh9Keqj3zUfH1ZUB57ZfVgeDX6UsE2ZhTx4W6BYT8WWocT11s4ckwEih?cluster=devnet)
   (proposal 12); and [the depositor claimed with their own key](https://explorer.solana.com/tx/3bRK6dtnLuyaArVxDq3UMiqUsU18qCMRyjEwj6dKfKXft5Zze2TSK75HQiPQbZ98tgxJtm1LEAdXPJQdyU2ygJ8J?cluster=devnet):
@@ -412,9 +414,10 @@ Stated limits, as of this writing:
   in the November soak, and each payouts file was a single leaf written by
   hand.
 - **Three gaps the builder names, still open.** There is no instruction to
-  unbond, so an operator's bond stays locked until a slash moves it; window
-  numbers need not increase, so a later root could reuse an earlier
-  window's number; and a slash waits if the bond vault holds less than the
+  unbond, so an operator's bond stays locked until a slash moves it; a
+  root for a used window number is refused, but a later root may carry a
+  lower, unused number, and the chain cannot see that two windows' roots pay
+  the same earnings; and a slash waits if the bond vault holds less than the
   ruling.
 - **The program is on devnet only.** It has no on-chain `security.txt` and
   no verified build yet.
