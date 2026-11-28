@@ -342,9 +342,10 @@ is [`docs/founder-journey-settlement-screen.md`](docs/founder-journey-settlement
   root is Active again.
 - Open [the direct claim](https://explorer.solana.com/tx/3bRK6dtnLuyaArVxDq3UMiqUsU18qCMRyjEwj6dKfKXft5Zze2TSK75HQiPQbZ98tgxJtm1LEAdXPJQdyU2ygJ8J?cluster=devnet): the depositor's own key is the fee payer and
   the claim's authority; 100,000 micro-USDC moved from the escrow.
-- Open [the slash](https://explorer.solana.com/tx/3CzUi4dssADKACmsnk3t8uyXQZ9qgSoqubrJyw64dRbhH3whSCbauFH4p26gR2RuhKLxYqAh5WD2QXXBp2JTdhkG?cluster=devnet): `SlashBond`, no signer, moves exactly the ruled
-  50,000 micro-USDC from the bond vault to the victim; and [the claim that
-  followed on the slashed root](https://explorer.solana.com/tx/4yeTfKsDjVN8k72LmkGZVdypuuCxQX7BZ9uzY2gjZ36KKDKSZE77o3RSQDyaiDzX7MJLpSV4gPjuWEyFhe62LQwh?cluster=devnet) was refused with `RootFrozen`.
+- Open [the slash](https://explorer.solana.com/tx/3CzUi4dssADKAmsHpMnMJMhD5dcJQ6cMxCJmSvPz1tPYt2Cdzf5dFKs3pj2JTdhkG?cluster=devnet): the `slash_bond` instruction needs
+  no authority (the transaction's only signer is the fee payer) and moves
+  exactly the ruled 50,000 micro-USDC from the bond vault to the victim; and
+  [the claim that followed on the slashed root](https://explorer.solana.com/tx/4yeTfKsDjVN8QwLHDtR4UvTtbhz7cq6Q8q6cVe9VzGjKxDqzJKvSMwVzVYqWjPkSy6Dz8MfLHDmWj4tW1b6jzLjL?cluster=devnet) was refused with `RootFrozen`.
 - Run the settlement rules yourself. On `main`, with the toolchain pinned in
   CI (Agave v4.1.2; a cold build takes well over two minutes):
   `cd programs/pool && cargo-build-sbf --arch v3 && cd ../.. && cargo test -p pool`.
@@ -456,19 +457,24 @@ Stated limits, as of this writing:
   posted; any key may challenge, so one key can freeze a root's payouts
   until the multisig rules. The window is a fixed 100-slot constant,
   sized for a demo, and must become a parameter before any mainnet use.
-- **What the devnet runs were, and were not.** Every path has now run on
-  devnet: both claim doors, a challenge, a frozen claim refused, a ruling
-  that a root stands, a ruling that a root is false, and the slash that
-  follows. But these were demonstrations: one key of ours played renter and
+- **What the devnet runs were, and were not.** The main path of every
+  settlement instruction has run on devnet: both claim doors, a challenge,
+  a frozen claim refused, a ruling that a root stands, a ruling that a root
+  is false, and the slash that follows. Not yet run there: the two authority
+  rotations (both keys unchanged since 1 November) and the other refusals
+  (a root over the escrow, a bad proof, a replayed claim, a late challenge).
+  And these were demonstrations: one key of ours played renter and
   depositor, as in the November soak; each payouts file was a single leaf
-  written by hand; and the challenger was a fresh key with no role. A real
-  dispute between strangers has not happened yet.
-- **Three gaps the builder names, still open.** There is no instruction to
+  written by hand, so every Merkle proof so far was the trivial one; and the
+  challenger was a fresh key with no role. A real dispute between strangers
+  has not happened yet.
+- **Four gaps the builder names, still open.** There is no instruction to
   unbond, so an operator's bond stays locked until a slash moves it; a
   root for a used window number is refused, but a later root may carry a
   lower, unused number, and the chain cannot see that two windows' roots pay
-  the same earnings; and a slash waits if the bond vault holds less than the
-  ruling.
+  the same earnings; a slash waits if the bond vault holds less than the
+  ruling; and a ruling of false can name a victim that no slash can ever
+  pay, with nothing refusing it at ruling time (A-066).
 - **The program is on devnet only.** It has no on-chain `security.txt` and
   no verified build yet.
 - **The challenge window is a fixed 100-slot constant,** sized for a demo.
@@ -496,8 +502,9 @@ Self-hosted *and* a marketplace? The boundary: V1 is governance inside one
 trust domain, with no blockchain, and your keys and usage data stay in your
 building. The marketplace is opt-in, pool by pool: a supplier with capacity
 of its own (a team, a lab, a company with committed spend) serves builders
-and agents who prepay for it, at the pool's price, today a flat 150
-micro-USD per token. That supply is never a grant: a hackathon or education credit
+and agents who prepay for it, at a rate the pool meters against the
+supplier's credits (today a flat 150 micro-USD per token; no buyer price
+exists yet). That supply is never a grant: a hackathon or education credit
 is used by the team it was given to, through that team's own gateway, and
 never enters the market. Where strangers
 exchange value, and nowhere else, the chain carries the receipts:
