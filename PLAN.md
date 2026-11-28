@@ -78,6 +78,8 @@
 4. The renter and the depositor are the same custodial key on devnet (M8 shape); the depositor wallet's NET movement is −50,960 across prepay+claim, while the claim leg alone is exactly +149,040.
 5. The stale approved-but-unexecuted Squads proposals 7 and 8 remain on the multisig (unexecutable by construction; clearable by a `transaction_accounts_close` vote if the founder wants them gone).
 
+**Push state + CI verdict of the pushed head.** `m11/devnet-sync` **pushed**, head `6ad6a0a9c607e173e834daebf10cc8cd42fde614` → PR [#2](https://github.com/Phat1911/Tributary/pull/2) (base main). CI verdict of head `6ad6a0a`: **GREEN — [run 46099115612](https://github.com/Phat1911/Tributary/actions/runs/46099115612)**, all five jobs success (Rust fmt/clippy/test dual-DB, Dashboard lint+typecheck+build, OpenAI SDK contract J7, Playwright E2E J6/F1, cargo-deny). The branch's CI ran via the `pull_request` trigger (the push trigger covers main + the two doctrine-suite branches only). This PLAN entry rides a docs-only follow-up commit; the final head's CI is re-checked and reported at close-out.
+
 **Fast jump (this session).** `scripts/devnet-soak/src/bin/m11_sync.rs` (new: preflight/upgrade/resume/prepay/ata_probe/settle_verify) · `scripts/devnet-soak/{Cargo.toml,Cargo.lock}` (anchor-spl 0.29.0 cross-check, same pinned tree) · `scripts/devnet-soak/src/main.rs` + `scripts/devnet-m11/src/main.rs` (stale ATA id fix) · `docs/devnet-m11.md` · `deploy/devnet-m11.json` · `PLAN.md` (this entry). Run inputs kept in gitignored `target/m11-keys/` (buffer.json, payouts.json) and `target/soak-logs/`.
 
 ### 2026-11-27 — M11-B: settlement implemented to green (doctrine-suite Session B) — 54/54, demo slice 8/8, GLUE + IDL shipped
