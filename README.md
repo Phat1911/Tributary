@@ -423,6 +423,10 @@ curl -s https://api.devnet.solana.com -X POST -H 'content-type: application/json
 - **The demo, in 95 seconds:** [youtu.be/PArKVs8KR2Y](https://youtu.be/PArKVs8KR2Y).
   A request metered, a settle run, and the eight on-chain receipts above,
   with captions.
+- **The pitch video, 2:42:** [youtu.be/8hDeELA9Dbc](https://youtu.be/8hDeELA9Dbc).
+  Nine slides in order (problem, what exists today, the solution, where to
+  see the demo, go to market, why now), with captions; the demo above is
+  linked from its own slide.
 
 ## Security and known limits
 
