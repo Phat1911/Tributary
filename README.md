@@ -66,15 +66,19 @@ people who do not trust each other.
   why the money and the payout records belong in a Solana program rather
   than in the operator's database. Today the escrow, the roots and the paid
   claims are all on devnet.
-- **Nobody can move another person's funds, and no single key can upgrade
-  the program.** The escrow is a token account controlled by the program. A
-  prepayment is signed by the paying key together with the operator's backend
-  key. The paying key is normally the renter's own; an operator may also fund
-  a wallet-free renter this way (SPEC D44), a gap the audit tracks as A-043
-  until M10. A refund goes only to the renter who prepaid, up to what that
-  renter's on-chain record allows. The upgrade authority is the vault of a 2-of-2
-  multisig: two approvals are needed to change the program, and the upgrade
-  that put the settlement code in place, on 28 November, is
+- **No single key can upgrade the program; a payout is a public event with
+  a pause before it.** The escrow is a token account controlled by the
+  program. A prepayment is signed by the paying key together with the
+  operator's backend key; the paying key is normally the renter's own, and an
+  operator may also fund a wallet-free renter this way (SPEC D44), a gap the
+  audit tracks as A-043 until M10. A refund goes only to the renter who
+  prepaid, up to that renter's on-chain record. Payouts have a different
+  shape, stated plainly: the backend key alone can post a root naming any
+  pubkey, up to the whole escrow, and open the assisted claim once the
+  window has passed. What stands between that and a theft is the window
+  itself: anyone can challenge the root and freeze its payouts, and only the
+  2-of-2 multisig can rule. Its vault is also the upgrade authority; the
+  upgrade that put the settlement code in place, on 28 November, is
   [on-chain](https://explorer.solana.com/tx/37JFtEwYtSxHguzvGYjTv97vyMwR7ZSbyXddwFte6cgwjtwEcjn8r8CTsP6wTsCrZM4rm2v1mTEwZR5DvNeZ7KHN?cluster=devnet).
 - **The chain does money; servers do speed.** No AI request ever routes
   on-chain. Metering, quotas and leak detection stay off-chain, where they
@@ -325,13 +329,15 @@ devnet transactions.
   SHA-256 by the `sol_sha256` syscall in [`d611b9f`](https://github.com/Phat1911/Tributary/commit/d611b9f); two
   test-construction bugs found by the implementation session and fixed only
   on the founder's ruling in [`5420044`](https://github.com/Phat1911/Tributary/commit/5420044); the IDL tracked in
-  [`a912a7a`](https://github.com/Phat1911/Tributary/commit/a912a7a); merged to `main` in [`02cbac8`](https://github.com/Phat1911/Tributary/commit/02cbac8),
+  [`a912a7a`](https://github.com/Phat1911/Tributary/commit/a912a7a); merged to `main` in the night of 27–28 November,
+  [`02cbac8`](https://github.com/Phat1911/Tributary/commit/02cbac8),
   [CI green](https://github.com/Phat1911/Tributary/actions/runs/46091883349): 54 of 54 program tests.
 - **28 November, on devnet.** The program upgraded through the 2-of-2
   multisig: proposal 11, approved by two members, executed in
   [`37JFtEwY…`](https://explorer.solana.com/tx/37JFtEwYtSxHguzvGYjTv97vyMwR7ZSbyXddwFte6cgwjtwEcjn8r8CTsP6wTsCrZM4rm2v1mTEwZR5DvNeZ7KHN?cluster=devnet) at slot 527064271, the authority still the vault.
-  Then a real settle run with the figure from the recorded demo: a renter
-  prepaid 0.20 USDC, the operator bonded 0.14904 USDC, [a root was
+  Then a settle run driven by the recorded demo's figure (a one-leaf
+  payouts file written by hand; the glue does not yet read the gateway's
+  settle output): a renter prepaid 0.20 USDC, the operator bonded 0.14904 USDC, [a root was
   posted](https://explorer.solana.com/tx/rCCt6PWnthZxrkkHo9DgmvTishS9QfgWEa7Va6enug39wowTpwVNwXnuPoViy1qNS6e8qSneaywfNqjkfmf3TKR?cluster=devnet) for 149,040 micro-USDC, and after the 100-slot window
   [a claim paid](https://explorer.solana.com/tx/278rWKHN8aSEr26Fmbwe9H4CRBXWeU3e6iWjBGVZNj3fuzseHiNiuCtANDowtyvmg1CkkwbskBRoZGNCRuywMpJR?cluster=devnet) exactly 149,040. Every signature is in
   [`docs/devnet-m11.md`](docs/devnet-m11.md); the tooling is on `main` since
@@ -382,6 +388,11 @@ Stated limits, as of this writing:
   challenge and a slash are proven by the local suite, not re-run on devnet.
   In that run the renter and the depositor were one custodial key, as in the
   November soak.
+- **Three gaps the builder names, still open.** There is no instruction to
+  unbond, so an operator's bond stays locked until a slash moves it; window
+  numbers need not increase, so a later root could reuse an earlier
+  window's number; and a slash waits if the bond vault holds less than the
+  ruling.
 - **The program is on devnet only.** It has no on-chain `security.txt` and
   no verified build yet.
 - **The challenge window is a fixed 100-slot constant,** sized for a demo.
