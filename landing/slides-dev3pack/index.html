@@ -57,9 +57,9 @@
 </div>
 
 <div class="slide">
-  <div class="kicker">About me</div>
-  <h2>Hong Phat</h2>
-  <div class="sub">Tran Dinh Hong Phat · second-year IT student · Da Nang</div>
+  <div class="kicker">The team</div>
+  <h2>Built by <span class="accent">one engineer</span><br>and a team of AI agents.</h2>
+  <div class="sub"><b>Hong Phat</b> · Rust, Solana, ledger · second-year IT student, Da Nang<br><span style="color:#94a3b8">The agents work from a written spec and tests they must pass; everything is public.</span></div>
 </div>
 
 <div class="slide">
@@ -75,43 +75,6 @@
 <div class="slide">
   <h2 class="en">"Verifiable rules<br>instead of trust."</h2>
   <div class="sub">github.com/Phat1911/Tributary<br>tributary-landing-woad.vercel.app</div>
-</div>
-
-<div class="slide small">
-  <div class="kicker">Appendix · The metering engine</div>
-  <h2>Off the chain, the books are<br><span class="accent">exact to the micro-unit</span>.</h2>
-  <div class="bullets">
-    <div>A self-hosted gateway (released as v0.1.4) meters every request and keeps the double-entry ledger.</div>
-    <div>Settlement reads that ledger: no request ever routes on-chain.</div>
-    <div>Per-member keys, quotas and an append-only audit log come with it.</div>
-  </div>
-</div>
-
-<div class="slide small">
-  <div class="kicker">Appendix · The Web2 credit resellers</div>
-  <h2>Operator-run gateways:<br>your balance is <span class="accent">a row in their database</span>.</h2>
-  <div class="bullets">
-    <div>Open-source gateways such as New API (GitHub) let anyone run a credit-resale site: users top up a balance with the operator.</div>
-    <div>The operator holds the upstream keys and the money; the balance is mutable by the operator and cannot be verified from outside.</div>
-    <div>If the site closes, the prepaid balance is gone. Only the operator trades: users with surplus still cannot sell.</div>
-    <div>New API's own README asks operators to settle payment, licensing and upstream-authorization duties before reselling in public.</div>
-  </div>
-</div>
-
-<div class="slide small">
-  <div class="kicker">Appendix · Why Solana</div>
-  <h2>The chain is <span class="accent">plumbing</span> —<br>and it fits</h2>
-  <div class="sub">Micro-payouts need fees that don't eat them · finality in seconds ·<br>
-  PDA escrow · Token-2022 <span class="accent">NonTransferable</span> · Squads 2-of-2 —<br>
-  by standard, not by promise. No AI request ever routes on-chain.</div>
-</div>
-
-<div class="slide small">
-  <div class="kicker">Appendix · Design decision</div>
-  <h2>We evaluated x402.<br>Prepaid escrow <span class="accent">stays</span>.</h2>
-  <div class="sub">x402 <b>upto</b>: authorize a max, settle the actual — built for one paid call.<br>
-  A prepaid balance needs what it skips: funds inside <span class="accent">our escrow</span>,<br>
-  zero confirmations per request, streaming. Escrow stays; x402 may return as a second door.</div>
 </div>
 
 <div class="tiny">→ / ← to navigate · F11 fullscreen</div>
