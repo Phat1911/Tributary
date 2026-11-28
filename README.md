@@ -344,6 +344,30 @@ hackathon. The event's work is on Solana: Merkle-settled payouts for AI
 credit pools, built tests-first. Receipts are listed here as they land: commits, CI runs and
 devnet transactions.
 
+**Five minutes, as a judge.** Four transactions to open, in this order:
+
+1. [The paid claim](https://explorer.solana.com/tx/278rWKHN8aSEr26Fmbwe9H4CRBXWeU3e6iWjBGVZNj3fuzseHiNiuCtANDowtyvmg1CkkwbskBRoZGNCRuywMpJR?cluster=devnet): under *Token Balance Changes*, the escrow loses 0.14904 USDC and the depositor gains exactly that.
+2. [The claim that was refused](https://explorer.solana.com/tx/5VhiGct8FVddSNy76HtA1yUUTnoA2ZtBhzzrUrZ7Peg54Lcma8bbg5SaUpsebfuQtMzHADgyVVcFftkvykjszFzd?cluster=devnet): a transaction that failed on purpose, `RootFrozen` (6015); no balance moved.
+3. [The ruling](https://explorer.solana.com/tx/Nwg7BhMMmJ2iHSF6xjMJ4WYPyzpP2xzWh9Keqj3zUfH1ZUB57ZfVgeDX6UsE2ZhTx4W6BYT8WWocT11s4ckwEih?cluster=devnet): proposal 12 on the multisig, approved by two members, executed by the Squads program.
+4. [The direct claim](https://explorer.solana.com/tx/3bRK6dtnLuyaArVxDq3UMiqUsU18qCMRyjEwj6dKfKXft5Zze2TSK75HQiPQbZ98tgxJtm1LEAdXPJQdyU2ygJ8J?cluster=devnet): the depositor's own key is the signer; 0.1 USDC moves from the escrow.
+
+Or read the chain yourself, with `curl` and nothing else installed:
+
+```sh
+# the escrow's balance right now (0.15096 USDC at the time of writing)
+curl -s https://api.devnet.solana.com -X POST -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"getTokenAccountBalance","params":["Dhp3t3vL6crixL1AzmXEFFa1bfMZ4KsaxEaSyZjFYksd"]}'
+
+# when the program was last deployed (slot 527064271, the 2-of-2 upgrade of 28 November)
+curl -s https://api.devnet.solana.com -X POST -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"getAccountInfo","params":["FRQmdoLx5t7JFgoyQWFpB2p3Fr5nMg9anNKUUhmYd2HP",{"encoding":"base64"}]}' \
+  | python3 -c 'import sys,json,base64,struct; d=base64.b64decode(json.load(sys.stdin)["result"]["value"]["data"][0]); print(struct.unpack_from("<Q",d,4)[0])'
+
+# the paid claim: preTokenBalances and postTokenBalances carry the escrow 200000 -> 50960
+curl -s https://api.devnet.solana.com -X POST -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"getTransaction","params":["278rWKHN8aSEr26Fmbwe9H4CRBXWeU3e6iWjBGVZNj3fuzseHiNiuCtANDowtyvmg1CkkwbskBRoZGNCRuywMpJR",{"encoding":"jsonParsed","maxSupportedTransactionVersion":0}]}'
+```
+
 - **Before the event (26 November):** the settlement screen
   ([`1f12408`](https://github.com/Phat1911/Tributary/commit/1f12408)) and
   the twelve settlement rules as failing tests
