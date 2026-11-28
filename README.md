@@ -20,9 +20,8 @@ rest runs on your own machine:
 Tributary is also a self-hosted gateway for teams that share AI capacity.
 Each member gets a personal key. Every request is metered and checked
 before it reaches the provider. Every admin action that changes state lands
-in an append-only audit log. Depositors put spare keys and credits into a
-pool; what their credits earn is kept in a double-entry ledger, to the
-micro-unit. The software is free and source-available (FSL-1.1-ALv2, which
+in an append-only audit log. A supplier's capacity sits in a pool; every
+request against it is kept in a double-entry ledger, to the micro-unit. The software is free and source-available (FSL-1.1-ALv2, which
 converts to Apache-2.0 after two years) and runs in one container.
 
 **Landing page:** <https://tributary-landing-woad.vercel.app/>. There is no hosted
@@ -135,9 +134,10 @@ is paid. Addresses and evidence: [What exists today](#what-exists-today).
 
 Small teams share one AI key by pasting it into a group chat. Nobody can
 tell who spent what. One heavy user can drain the quota. A leaked key is
-discovered on the provider's invoice. The spare credit sitting on that key
-earns nothing. Hosted API routers solve the first three problems by taking
-your keys, your credits and your usage data. Tributary takes the other
+discovered on the provider's invoice. And buying capacity from anyone
+else means paying first and trusting a stranger to hold your money. Hosted
+API routers solve the first three problems by taking your keys, your
+credits and your usage data. Tributary takes the other
 road: the team keeps its own keys, on its own machine. It was built by a
 student developer who kept running into exactly this trade.
 
