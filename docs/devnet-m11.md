@@ -141,3 +141,143 @@ Run by `scripts/devnet-m11` (window **1795831842**, Merkle root
 4. **The root account** (§8) — `total_payout` 149,040 == `paid_out`.
 5. The depositor's USDC ATA `3GuSWo…` on solscan — final balance
    19,949,040 micro-USDC (19.94904 USDC).
+
+## Part 2 — challenge, ruling, direct claim (SAT-2b, 2026-11-28)
+
+Status: **RUN COMPLETE (2026-11-28), DEVNET ONLY.** This continuation ran on
+branch `m11/devnet-proof` from main `7f88988`. It used the same deployed M11
+program, the same Squads 2-of-2, and the same custodial renter/depositor key as
+Part 1. No product code changed (`programs/`, `crates/`, `apps/`, and
+`migrations/` untouched); the only code change was the devnet ops tool in
+`scripts/devnet-soak/src/bin/m11_sync.rs`.
+
+The SAT-2b sequence was executed in this order: prepay → post root → challenge
+→ assisted claim refused while frozen → 2-of-2 `RootStands` ruling → direct-door
+claim after the window. Every balance and root field below was read back from
+devnet accounts after the relevant transaction.
+
+### 11. Part-2 preflight (slot 527,097,327)
+
+- Escrow vault `Dhp3t3vL6crixL1AzmXEFFa1bfMZ4KsaxEaSyZjFYksd` held **50,960**
+  micro-USDC (Part 1's remainder).
+- Multisig `GuSeFfFkdKtjkubeLUEeBHW5pfHSJctGnz8AFk7xrCk5` was 2-of-2 with live
+  `transaction_index = 11`; the ruling proposal therefore had to be index **12**.
+- Program authority was still the vault `BhLQqw5rkr3otQoXvJSRjiaNHTgdcgXVkqXv8mwEhhJq`;
+  pool admin/backend were unchanged and the pool was active.
+- Depositor key loaded from `target/m8-keys/depositor.json` and verified by
+  pubkey only: `Ah3TyjuC3agXQcsYty1VpNBWLRg4DkFWkhugsyoGLUuJ`.
+
+### 12. Second custodial prepay — 0.20 USDC into escrow
+
+`prepay_renter(200000)` moved 200,000 micro-USDC from the custodial renter ATA
+`3GuSWoYUdyu3PHHs7M7FijfUGih4ySo2w76puJW9Y2xs` into the program escrow.
+
+| Step | Signature | Slot | Read-back |
+|---|---|---:|---|
+| `prepay_renter` | [`2AVtEgsD…`](https://explorer.solana.com/tx/2AVtEgsDuJ4HZLQq5Y3Y2hf3RZfrp9USRU4Lcy8na7cw8xYnKXPxJQjJmbEqyMK3FmAabYaMaBR2g2ZV1auQPj7g?cluster=devnet) | 527,099,584 | escrow 50,960 → **250,960**; renter prepaid record **400,000** |
+
+The depositor/renter ATA later read back as 19,749,040 immediately after the
+root was posted (19,949,040 − 200,000).
+
+### 13. Second root — window 1795831843, one leaf
+
+The tree has one leaf: depositor `Ah3TyjuC3agXQcsYty1VpNBWLRg4DkFWkhugsyoGLUuJ`
+receives **100,000 micro-USDC**. For a one-leaf tree the leaf hash is the root:
+`0xd9c5352697fa8bf82bf9725ed6fed8488fa0d4cda54168d8235a574c0feb9a3a`.
+
+| Step | Signature | Slot | Read-back |
+|---|---|---:|---|
+| `post_root` | [`5JZUU6td…`](https://explorer.solana.com/tx/5JZUU6tdn7xdPh7XkhwrZYd7BMJYVH7tFA1KVy7hDE1YyJGk91rgY3SpvPyQH8Gcyw4BVM3i1Y2rHGRhjACZNVfS?cluster=devnet) | **527,099,690** | root `HNVozXXxMsheuDSZEgSYL5J84mBAczqjGpNpPXME9VGt`; `total_payout=100000`; `paid_out=0`; `bond_snapshot=149040`; escrow **250,960** |
+
+### 14. Permissionless challenge — root frozen
+
+The program's evidence field is `[u8; 32]`. The reviewer-supplied evidence
+preimage is 40 bytes (`"reviewer-requested challenge, 2026-11-28"`), so the
+on-chain commitment is its SHA-256:
+`0x42c5e309476d8f24631d10fcbaf051de1cb3ec00230abe15f45b6ceaf1405bdb`.
+
+| Step | Signature | Slot | Read-back |
+|---|---|---:|---|
+| `challenge` | [`2GfqoxhM…`](https://explorer.solana.com/tx/2GfqoxhMYdZkEH5q72zwWfVnDUCTvETmSHvsJFwT4PTMqREyPhVUkjrJXPx2PwNcuDywomihUWsysmu7VHELj4D6?cluster=devnet) | **527,099,746** | root status `Challenged`; challenger recorded as `DtNTR9Nn9A7Ld1j3KRGoxVC18oeazSRKrD7MZydTxjgk`; evidence digest recorded; `paid_out` still 0 |
+
+The challenger key was neither the backend/operator
+(`AJmEJPsCBT7VpZ3CkxDWpcoeuBdqp3JzrcPr43ZntJpb`) nor either multisig member.
+The challenge landed 56 slots after posting, inside the 100-slot window.
+
+### 15. Assisted claim while frozen — REFUSED ON DEVNET
+
+This was an intentional failure transaction: the exact claim was first
+simulated and had to return `RootFrozen`; it was then broadcast with
+`skip_preflight` so the refusal itself has a devnet signature. No marker was
+created and no USDC moved (only the 5,000-lamport fee was charged).
+
+| Step | Signature | Slot | Exact refusal |
+|---|---|---:|---|
+| assisted `claim` against challenged root | [`5VhiGct8…`](https://explorer.solana.com/tx/5VhiGct8FVddSNy76HtA1yUUTnoA2ZtBhzzrUrZ7Peg54Lcma8bbg5SaUpsebfuQtMzHADgyVVcFftkvykjszFzd?cluster=devnet) | **527,099,823** | `InstructionError(1, Custom(6015))`; program log: `AnchorError thrown in programs/pool/src/lib.rs:754. Error Code: RootFrozen. Error Number: 6015. Error Message: Root payouts are frozen — the root is not Active.`; transaction status: `Error processing Instruction 1: custom program error: 0x177f` |
+
+Post-refusal read-back: root still `Challenged`, `paid_out=0`, marker
+`HvhdUe4fUkeWT1wRPvwcUHP4msmnKA7VhDWmbjQ5Ee7a` still absent, escrow still
+**250,960**, depositor ATA still **19,749,040**.
+
+### 16. The 2-of-2 ruling — `RootStands`, proposal index 12
+
+The Squads vault transaction carried `resolve_challenge(1795831843,
+RootStands)`. Both live members approved before execution.
+
+| Step | Member / actor | Signature | Slot |
+|---|---|---|---:|
+| create vault transaction + proposal | deploy rent payer + founder creator | [`58mFvT4f…`](https://explorer.solana.com/tx/58mFvT4fuq8vfnwMghmQedKHzP1GuSy3wn1CcWSs92xjUkQmT58UKVnk24mMu8znKe6a92DzNuHCyRQrDuFbUJRM?cluster=devnet) | 527,099,880 |
+| approve | founder `HGHF2iuEphK4zFuqFAC5dXDfk4US6AAvMVqWwfwB7gzz` | [`5ADanFEF…`](https://explorer.solana.com/tx/5ADanFEFbTXc9z42m4L7mDekeMvTdP7UEcE3fJWMQi4enfZu1bgYqXJsmznXtgQJfuQtWm7gsyHA7LLeZ8KhC21?cluster=devnet) | 527,099,889 |
+| approve | teammate-rotated `2ys6xNTANVqoNar7RQHyQvtdDhCwYbsE3XEP4LAjpzbq` | [`nG759GoZ…`](https://explorer.solana.com/tx/nG759GoZ6s7984LmEJmbeNW4QcX9GJqqhHxU9ve94p7fdhu6ZUHZ7dNm42dgNyx53xMYr85kE8a7RTw6Pyy7tBk?cluster=devnet) | 527,099,899 |
+| **execute** | founder member executes the approved vault transaction | [`Nwg7BhMM…`](https://explorer.solana.com/tx/Nwg7BhMMmJ2iHSF6xjMJ4WYPyzpP2xzWh9Keqj3zUfH1ZUB57ZfVgeDX6UsE2ZhTx4W6BYT8WWocT11s4ckwEih?cluster=devnet) | **527,099,908** |
+
+Post-ruling root read-back: status **Active**, `stands_ruled=true`, challenger
+and evidence preserved, `ruled_slash=0`, victim = system program default,
+`paid_out=0`.
+
+### 17. Direct-door claim — depositor signs and pays marker rent
+
+The direct claim was submitted only after the chain slot passed the required
+target: posted_at 527,099,690 + 100-slot window + 5-slot margin = **527,099,795**.
+The tool observed slot **527,099,987** before sending. In the transaction the
+depositor `Ah3TyjuC3agXQcsYty1VpNBWLRg4DkFWkhugsyoGLUuJ` is the fee payer, the
+claim `authority`, and the marker `payer` — the direct door, with no backend
+signature.
+
+| Step | Signature | Slot | Read-back |
+|---|---|---:|---|
+| direct `claim` leaf 0 | [`3bRK6dtn…`](https://explorer.solana.com/tx/3bRK6dtnLuyaArVxDq3UMiqUsU18qCMRyjEwj6dKfKXft5Zze2TSK75HQiPQbZ98tgxJtm1LEAdXPJQdyU2ygJ8J?cluster=devnet) | **527,099,994** | depositor ATA 19,749,040 → **19,849,040** (+100,000); escrow 250,960 → **150,960** (−100,000); root `paid_out=100000 == total_payout=100000`; marker `HvhdUe4f…` names the depositor and amount 100,000 |
+
+The transaction's `ClaimPaid` event was decoded from its on-chain program data:
+window **1795831843**, leaf index **0**, depositor
+`Ah3TyjuC3agXQcsYty1VpNBWLRg4DkFWkhugsyoGLUuJ`, amount **100,000**, and
+`vault_balance_after=150960`. The depositor paid 0.00108204 SOL of marker rent
+plus the 0.000005 SOL fee; the USDC ATA already existed, so no ATA rent was
+created in this transaction.
+
+### 18. Final Part-2 read-back (slot 527,100,548)
+
+| Fact | Final value |
+|---|---|
+| Root `HNVozXXxMsheuDSZEgSYL5J84mBAczqjGpNpPXME9VGt` | window 1795831843; Active; `stands_ruled=true`; total 100,000; paid_out 100,000 |
+| Claim marker `HvhdUe4fUkeWT1wRPvwcUHP4msmnKA7VhDWmbjQ5Ee7a` | depositor `Ah3Tyju…`; amount 100,000 |
+| Escrow vault `Dhp3t3vL6crixL1AzmXEFFa1bfMZ4KsaxEaSyZjFYksd` | **150,960** micro-USDC |
+| Bond record / bond vault | **149,040** / **149,040** micro-USDC; unchanged by the stand ruling |
+| Depositor ATA `3GuSWo…` | **19,849,040** micro-USDC |
+| Multisig live `transaction_index` | **12** |
+| Pool / program authority | active; authority still the Squads vault |
+
+### 19. What the Part-2 verifier should click
+
+1. **Prepay** — token-balance changes: renter ATA −200,000 and escrow +200,000.
+2. **Root posting** — account `HNVozXXx…`: window 1795831843, total 100,000,
+   posted_at slot 527,099,690.
+3. **Challenge** — root status becomes Challenged and challenger is
+   `DtNTR9Nn…`; evidence is the SHA-256 commitment printed in §14.
+4. **Frozen claim** — open the transaction logs: instruction 1 fails with
+   `RootFrozen` / 6015 / `0x177f`; balances and marker remain unchanged.
+5. **Ruling** — proposal index 12 shows founder approval, teammate-rotated
+   approval, then execute; root account reads Active with `stands_ruled=true`.
+6. **Direct claim** — the transaction account list shows the depositor as fee
+   payer and claim signer; token balances show depositor +100,000 and escrow
+   −100,000; the emitted `ClaimPaid` data matches the root account.

@@ -5,6 +5,7 @@
 ## Current state
 
 - **Date:** 2026-11-28 · **Spec:** v0.3 (decisions D1–D44)
+- **SAT-2b / M11 DEVNET PROOF — ON `m11/devnet-proof` (2026-11-28, careful-Solana-ops persona).** The reviewer-requested half is live on devnet: a second 100,000 micro-USDC root (window 1795831843) was challenged by a non-operator/non-member key, an assisted claim landed as a `RootFrozen` 6015 refusal, a Squads 2-of-2 `RootStands` ruling executed at proposal index 12, and the depositor's own key then paid the marker rent and claimed directly after the window. Final read-back: root Active with `stands_ruled=true`, `paid_out=total_payout=100000`, escrow 150,960, depositor ATA +100,000, bond 149,040. Evidence in `docs/devnet-m11.md` Part 2 and `deploy/devnet-m11.json` `proof`; push/CI close-out is in the milestone log below.
 - **SAT-2 / M11 DEVNET SYNC — DONE on `m11/devnet-sync` (2026-11-28, careful-Solana-ops persona).** The devnet program `9pEmyx…` was upgraded to the M11 settlement code THROUGH the existing Squads 2-of-2 (proposal **index 11**, founder + teammate-rotated approvals, execute sig `37JFtEwY…`, deployed slot 527064271; ProgramData extended +65,536 top-level FIRST because the M11 ELF grew to 406,128 B — lesson 1). Authority is STILL the vault, admin/backend unchanged, pool ACTIVE (did not arrive paused). Then a REAL settle run: renter prepay 200,000 micro-USDC into the vault, `fund_bond` 149,040, `post_root` (window 1795831842), 100-slot challenge window waited, and **`claim` PAID 149,040 micro-USDC** to the depositor (162,000 burn − 8% fee) — vault 200,000 → 50,960, depositor ATA +149,040 exactly. Full evidence (every sig + solscan/explorer links + read-back) in `docs/devnet-m11.md`; machine record in `deploy/devnet-m11.json`. **Found LIVE and fixed (ops tooling only, zero product-code change): the ATA program moved — canonical is `…JA8knL` on both mainnet and devnet, the legacy `…JA8knN` is gone; the glue + soak client carried the stale id, which would have broken every ATA derive/create on-chain.** Log archive: `target/soak-logs/m11-*.log`.
 - **M11-B: SETTLEMENT IMPLEMENTED TO GREEN on `m11/doctrine-suite` (2026-11-27, doctrine-suite Session B).** All six handlers (`fund_bond`, `post_root`, `claim`, `challenge`, `resolve_challenge`, `slash_bond`) and all four Merkle helpers implemented; **the full pool suite is 54/54 green (9 unit + 20 adversarial + 9 audit_session_c + 4 journey + 12 m11_doctrine)**, including the demo slice (doctrine tests 1,2,3,4,7,10,11,12). SHA-256 by the `sol_sha256` syscall using the SBF static-syscalls convention (murmur3 hash → syscall fn pointer, no dependency; AUDIT A-063). Two suite construction bugs found, proven and fixed by the founder's in-session ruling (A-062 claim root writable, A-063 non-multisig resolve leg). GLUE `scripts/devnet-m11/` (payouts JSON → tree → fund_bond/post_root/claim, devnet) and the tracked Anchor IDL (`programs/pool/idl/pool.json`, built with the Anchor CLI 1.2.2) shipped. fmt + clippy clean; no new dependencies. Full entry + limitations in the log below.
 - **SCREEN-1 — DONE (2026-11-26): the settlement screen, part 1 (runbook step card; dashboard only, no gateway change).** New page `apps/dashboard/app/org/settlement/page.tsx` + a sidebar link (org_admin, like every `/org/*` page): pick a root pool → the depositor × bucket table (contributed / burned / earned — exact dollars, exact micro-USD on hover) → **Settle last hour (8%)** → the run's window, Distributable = Fee + Paid out + Undistributed, and the payouts. A new exact formatter (`formatMicroUsdExact`), because the cent-rounding one prints `$0.00` for real settlement figures. Manual journey: `docs/founder-journey-settlement-screen.md` (workflow step 12). **Found on the way and OPEN — A-061 (high, worker's assessment; residual of A-050): a later depositor whose `provider` string sorts before the incumbent's takes 100% of a family's traffic at 1% weight, receives the member prompts, and can take the family offline. PoC in AUDIT.md; needs a ruling; NOT fixed here (gateway out of scope).** Gates: lint / tsc / build / build:export clean; browser walk 46/46 through the baked path; journey dry-run 21/21. Push state and CI verdict: the close-out note in the log entry.
@@ -53,6 +54,73 @@
 | M12–M14 | pending | V3 — Operator network |
 
 ## Milestone log (append per completed milestone; keep the most recent 10)
+
+### 2026-11-28 — SAT-2b: challenge, 2-of-2 ruling, and direct-door claim on devnet
+
+**Scope (kickoff SAT-2b).** Branch `m11/devnet-proof` from main `7f88988`.
+Continue the SAT-2 devnet proof with the half the reviewer asked for: prepay the
+custodial renter again, post a second root, challenge it with a key that is
+neither operator nor multisig member, land the frozen-claim refusal, rule
+`RootStands` through the 2-of-2, then claim through the depositor's own key.
+DEVNET ONLY; no product-code changes; every number read back from the chain.
+
+**Outcome.** All requested transactions are on devnet:
+
+- **Preflight** at slot 527097327: escrow 50,960; multisig live index 11;
+  program authority still the vault; pool active.
+- **Prepay 200,000 micro-USDC:** sig `2AVtEgsD…` @527099584; escrow 50,960 →
+  **250,960**; renter prepaid record **400,000**.
+- **Root 2:** window 1795831843, one leaf
+  `Ah3TyjuC3agXQcsYty1VpNBWLRg4DkFWkhugsyoGLUuJ` / **100,000**; post sig
+  `5JZUU6td…` @527099690; root `HNVozXXxMsheuDSZEgSYL5J84mBAczqjGpNpPXME9VGt`;
+  merkle root `0xd9c53526…feb9a3a`; bond snapshot 149,040.
+- **Challenge:** rogue-upgrader `DtNTR9Nn9A7Ld1j3KRGoxVC18oeazSRKrD7MZydTxjgk`
+  signed; sig `2GfqoxhM…` @527099746; root became `Challenged` inside the
+  100-slot window. The 40-byte reviewer evidence string is committed on-chain
+  as SHA-256 `0x42c5e309…1405bdb` (the program field is `[u8; 32]`).
+- **Frozen refusal:** assisted claim sig `5VhiGct8…` @527099823 landed as a
+  failure and read back `InstructionError(1, Custom(6015))`; program log:
+  `RootFrozen`, 6015, “Root payouts are frozen — the root is not Active.” No
+  marker, no balance movement, `paid_out=0`.
+- **2-of-2 ruling, proposal index 12:** create `58mFvT4f…` @527099880;
+  founder approval `5ADanFEF…` @527099889; teammate-rotated approval
+  `nG759GoZ…` @527099899; execute `Nwg7BhMM…` @527099908. Root read back
+  `Active` with `stands_ruled=true`.
+- **Direct claim:** after slot 527099987 ≥ posted_at + 100 + 5, depositor
+  `Ah3Tyju…` was fee payer, claim authority, and marker rent payer; sig
+  `3bRK6dtn…` @527099994. Read-back: depositor ATA 19,749,040 → **19,849,040**;
+  escrow 250,960 → **150,960**; marker `HvhdUe4f…` amount 100,000; root
+  `paid_out=total_payout=100000`; decoded `ClaimPaid` event matches all fields.
+- **Final read-back** at slot 527100548: escrow 150,960; bond 149,040;
+  multisig transaction_index 12; pool active; upgrade authority still the
+  Squads vault.
+- **Evidence:** `docs/devnet-m11.md` Part 2 (§§11–19) and
+  `deploy/devnet-m11.json` `proof`. Ops logs are gitignored under
+  `target/soak-logs/m11-proof-*.log`.
+
+**Limitations (honest).**
+1. The program accepts a 32-byte evidence commitment, while the reviewer text
+   is 40 bytes. The chain stores SHA-256 of the exact text; the preimage is
+   printed in the evidence doc for independent hashing.
+2. The ruling executed after the natural 100-slot window had already closed
+   (the ops sequence itself took longer than the devnet demo window). The
+   direct claim still waited for the window target as instructed, and the root
+   records the multisig's `stands_ruled=true` ruling.
+3. The devnet custodial renter and depositor are the same key/ATA, matching the
+   M8 shape. The direct-door claim nevertheless used only the depositor key as
+   authority, fee payer, and marker-rent payer; the backend did not sign it.
+4. The intentional failed claim paid only its 5,000-lamport fee; the atomic
+   refusal moved no USDC and created no marker.
+5. Ops tooling only changed under `scripts/`; `programs/`, `crates/`, `apps/`,
+   and `migrations/` are untouched.
+
+**Push state + CI verdict.** Pending first push; this line is replaced by the
+close-out commit after the pushed head's Actions verdict is known.
+
+**Fast jump (this session).** `scripts/devnet-soak/src/bin/m11_sync.rs`
+(SAT-2b subcommands: post_root, challenge, claim_frozen, resolve_stands,
+direct_claim, chain read-backs) · `docs/devnet-m11.md` (Part 2) ·
+`deploy/devnet-m11.json` (`proof`) · `PLAN.md` (this entry).
 
 ### 2026-11-28 — SAT-2: M11 on devnet — 2-of-2 upgrade + a PAID claim
 

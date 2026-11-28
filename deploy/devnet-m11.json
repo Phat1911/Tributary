@@ -1,9 +1,9 @@
 {
-  "_comment": "M11 devnet sync record (PUBKEYS + SLOTS + SIGNATURES ONLY — keypairs live in gitignored target/m8-keys and target/m11-keys, never committed). Upgrade through the existing Squads 2-of-2 plus a paid claim; human evidence in docs/devnet-m11.md. Generated 2026-11-28 on branch m11/devnet-sync.",
+  "_comment": "M11 devnet sync record (PUBKEYS + SLOTS + SIGNATURES ONLY — keypairs live in gitignored target/m8-keys and target/m11-keys, never committed). Upgrade through the existing Squads 2-of-2 plus paid claims; SAT-2b proof adds challenge/ruling/direct-door evidence. Human evidence in docs/devnet-m11.md. Generated 2026-11-28; extended on branch m11/devnet-proof.",
   "cluster": {
     "name": "devnet",
     "rpc_url": "https://api.devnet.solana.com",
-    "slot_at_completion": 527078533
+    "slot_at_completion": 527100548
   },
   "program": {
     "name": "pool",
@@ -152,6 +152,110 @@
       "sig": "2AdtTndDeAjyh83x46hs9eia3S6G32BvBGjoEg2YsjRtLu32Y15rMFdAF8zed4QjKTKscPa8tZcDEPPt9Lx6H3bc",
       "slot": 527073597,
       "note": "spl-token CLI wallet->ATA lookup probe fired during diagnosis; moved nothing"
+    }
+  },
+  "proof": {
+    "name": "SAT-2b: challenge, multisig ruling and direct-door claim",
+    "branch": "m11/devnet-proof",
+    "window": 1795831843,
+    "root_account": "HNVozXXxMsheuDSZEgSYL5J84mBAczqjGpNpPXME9VGt",
+    "merkle_root": "0xd9c5352697fa8bf82bf9725ed6fed8488fa0d4cda54168d8235a574c0feb9a3a",
+    "leaf": {
+      "leaf_index": 0,
+      "depositor": "Ah3TyjuC3agXQcsYty1VpNBWLRg4DkFWkhugsyoGLUuJ",
+      "amount_micro_usdc": 100000
+    },
+    "prepay": {
+      "amount_micro_usdc": 200000,
+      "sig": "2AVtEgsDuJ4HZLQq5Y3Y2hf3RZfrp9USRU4Lcy8na7cw8xYnKXPxJQjJmbEqyMK3FmAabYaMaBR2g2ZV1auQPj7g",
+      "slot": 527099584,
+      "escrow_before": 50960,
+      "escrow_after": 250960,
+      "renter_prepaid_record_after": 400000
+    },
+    "post_root": {
+      "sig": "5JZUU6tdn7xdPh7XkhwrZYd7BMJYVH7tFA1KVy7hDE1YyJGk91rgY3SpvPyQH8Gcyw4BVM3i1Y2rHGRhjACZNVfS",
+      "slot": 527099690,
+      "posted_at": 527099690,
+      "total_payout": 100000,
+      "bond_snapshot": 149040
+    },
+    "challenge": {
+      "sig": "2GfqoxhMYdZkEH5q72zwWfVnDUCTvETmSHvsJFwT4PTMqREyPhVUkjrJXPx2PwNcuDywomihUWsysmu7VHELj4D6",
+      "slot": 527099746,
+      "challenger": "DtNTR9Nn9A7Ld1j3KRGoxVC18oeazSRKrD7MZydTxjgk",
+      "evidence_preimage": "reviewer-requested challenge, 2026-11-28",
+      "evidence_preimage_bytes": 40,
+      "evidence_sha256": "0x42c5e309476d8f24631d10fcbaf051de1cb3ec00230abe15f45b6ceaf1405bdb",
+      "root_status_after": "Challenged"
+    },
+    "frozen_claim_refusal": {
+      "sig": "5VhiGct8FVddSNy76HtA1yUUTnoA2ZtBhzzrUrZ7Peg54Lcma8bbg5SaUpsebfuQtMzHADgyVVcFftkvykjszFzd",
+      "slot": 527099823,
+      "instruction_error": "InstructionError(1, Custom(6015))",
+      "program_error": "Error Code: RootFrozen. Error Number: 6015. Error Message: Root payouts are frozen — the root is not Active.",
+      "transaction_status": "Error processing Instruction 1: custom program error: 0x177f",
+      "escrow_unchanged": 250960,
+      "depositor_ata_unchanged": 19749040,
+      "marker_created": false,
+      "paid_out": 0
+    },
+    "ruling": {
+      "proposal_index": 12,
+      "ruling": "RootStands",
+      "create_proposal": {
+        "sig": "58mFvT4fuq8vfnwMghmQedKHzP1GuSy3wn1CcWSs92xjUkQmT58UKVnk24mMu8znKe6a92DzNuHCyRQrDuFbUJRM",
+        "slot": 527099880
+      },
+      "approval_founder": {
+        "member": "HGHF2iuEphK4zFuqFAC5dXDfk4US6AAvMVqWwfwB7gzz",
+        "sig": "5ADanFEFbTXc9z42m4L7mDekeMvTdP7UEcE3fJWMQi4enfZu1bgYqXJsmznXtgQJfuQtWm7gsyHA7LLeZ8KhC21",
+        "slot": 527099889
+      },
+      "approval_teammate_rotated": {
+        "member": "2ys6xNTANVqoNar7RQHyQvtdDhCwYbsE3XEP4LAjpzbq",
+        "sig": "nG759GoZ6s7984LmEJmbeNW4QcX9GJqqhHxU9ve94p7fdhu6ZUHZ7dNm42dgNyx53xMYr85kE8a7RTw6Pyy7tBk",
+        "slot": 527099899
+      },
+      "execute": {
+        "sig": "Nwg7BhMMmJ2iHSF6xjMJ4WYPyzpP2xzWh9Keqj3zUfH1ZUB57ZfVgeDX6UsE2ZhTx4W6BYT8WWocT11s4ckwEih",
+        "slot": 527099908
+      },
+      "root_status_after": "Active",
+      "stands_ruled": true,
+      "ruled_slash": 0
+    },
+    "direct_claim": {
+      "door": "direct (depositor authority and marker rent payer)",
+      "authority": "Ah3TyjuC3agXQcsYty1VpNBWLRg4DkFWkhugsyoGLUuJ",
+      "fee_payer": "Ah3TyjuC3agXQcsYty1VpNBWLRg4DkFWkhugsyoGLUuJ",
+      "marker_rent_payer": "Ah3TyjuC3agXQcsYty1VpNBWLRg4DkFWkhugsyoGLUuJ",
+      "sig": "3bRK6dtnLuyaArVxDq3UMiqUsU18qCMRyjEwj6dKfKXft5Zze2TSK75HQiPQbZ98tgxJtm1LEAdXPJQdyU2ygJ8J",
+      "slot": 527099994,
+      "claim_marker": "HvhdUe4fUkeWT1wRPvwcUHP4msmnKA7VhDWmbjQ5Ee7a",
+      "amount_micro_usdc": 100000,
+      "depositor_usdc_ata": "3GuSWoYUdyu3PHHs7M7FijfUGih4ySo2w76puJW9Y2xs",
+      "depositor_balance_before": 19749040,
+      "depositor_balance_after": 19849040,
+      "escrow_before": 250960,
+      "escrow_after": 150960,
+      "root_paid_out": 100000,
+      "root_total_payout": 100000,
+      "claim_paid_event": {
+        "window": 1795831843,
+        "leaf_index": 0,
+        "depositor": "Ah3TyjuC3agXQcsYty1VpNBWLRg4DkFWkhugsyoGLUuJ",
+        "amount": 100000,
+        "vault_balance_after": 150960
+      }
+    },
+    "final_readback": {
+      "slot": 527100548,
+      "escrow_balance": 150960,
+      "bond_balance": 149040,
+      "multisig_transaction_index": 12,
+      "pool_paused": false,
+      "program_upgrade_authority": "BhLQqw5rkr3otQoXvJSRjiaNHTgdcgXVkqXv8mwEhhJq"
     }
   }
 }
