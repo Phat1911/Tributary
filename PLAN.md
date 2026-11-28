@@ -5,6 +5,7 @@
 ## Current state
 
 - **Date:** 2026-11-28 · **Spec:** v0.3 (decisions D1–D44)
+- **SAT-2c / M11 DEVNET SLASH — DONE on `m11/devnet-slash` (2026-11-28, careful-Solana-ops persona).** The last unrun path of the dispute flow is live on devnet: a third root (window 1795831844, one leaf, 100,000 micro-USDC) was challenged 20 slots after posting by the non-operator/non-member rogue-upgrader key, the Squads 2-of-2 ruled it **`RootFalse`** (proposal **index 13**, slash 50,000 to the custodial renter key), the permissionless `slash_bond` crank — signed by nothing but its fee payer — moved **50,000 micro-USDC out of the bond vault to the renter's token account** (bond 149,040 → 99,040; renter 19,849,040 → 19,899,040; root `Slashed`), and a claim on the slashed root landed as a `RootFrozen` 6015 refusal. The escrow (150,960) never moved. **One kickoff wording was corrected against the program contract: the ruling's `victim` is the renter's KEY (the owner the slash destination must have), not the token account — read literally it would have stranded the root `ProvenFalse` (AUDIT A-066).** Evidence in `docs/devnet-m11.md` Part 3 and `deploy/devnet-m11.json` `slash`; push/CI close-out is in the milestone log below.
 - **SAT-2b / M11 DEVNET PROOF — DONE on `m11/devnet-proof` (2026-11-28, careful-Solana-ops persona).** The reviewer-requested half is live on devnet: a second 100,000 micro-USDC root (window 1795831843) was challenged by a non-operator/non-member key, an assisted claim landed as a `RootFrozen` 6015 refusal, a Squads 2-of-2 `RootStands` ruling executed at proposal index 12, and the depositor's own key then paid the marker rent and claimed directly after the window. Final read-back: root Active with `stands_ruled=true`, `paid_out=total_payout=100000`, escrow 150,960, depositor ATA +100,000, bond 149,040. Evidence in `docs/devnet-m11.md` Part 2 and `deploy/devnet-m11.json` `proof`; push/CI close-out is in the milestone log below.
 - **SAT-2 / M11 DEVNET SYNC — DONE on `m11/devnet-sync` (2026-11-28, careful-Solana-ops persona).** The devnet program `9pEmyx…` was upgraded to the M11 settlement code THROUGH the existing Squads 2-of-2 (proposal **index 11**, founder + teammate-rotated approvals, execute sig `37JFtEwY…`, deployed slot 527064271; ProgramData extended +65,536 top-level FIRST because the M11 ELF grew to 406,128 B — lesson 1). Authority is STILL the vault, admin/backend unchanged, pool ACTIVE (did not arrive paused). Then a REAL settle run: renter prepay 200,000 micro-USDC into the vault, `fund_bond` 149,040, `post_root` (window 1795831842), 100-slot challenge window waited, and **`claim` PAID 149,040 micro-USDC** to the depositor (162,000 burn − 8% fee) — vault 200,000 → 50,960, depositor ATA +149,040 exactly. Full evidence (every sig + solscan/explorer links + read-back) in `docs/devnet-m11.md`; machine record in `deploy/devnet-m11.json`. **Found LIVE and fixed (ops tooling only, zero product-code change): the ATA program moved — canonical is `…JA8knL` on both mainnet and devnet, the legacy `…JA8knN` is gone; the glue + soak client carried the stale id, which would have broken every ATA derive/create on-chain.** Log archive: `target/soak-logs/m11-*.log`.
 - **M11-B: SETTLEMENT IMPLEMENTED TO GREEN on `m11/doctrine-suite` (2026-11-27, doctrine-suite Session B).** All six handlers (`fund_bond`, `post_root`, `claim`, `challenge`, `resolve_challenge`, `slash_bond`) and all four Merkle helpers implemented; **the full pool suite is 54/54 green (9 unit + 20 adversarial + 9 audit_session_c + 4 journey + 12 m11_doctrine)**, including the demo slice (doctrine tests 1,2,3,4,7,10,11,12). SHA-256 by the `sol_sha256` syscall using the SBF static-syscalls convention (murmur3 hash → syscall fn pointer, no dependency; AUDIT A-063). Two suite construction bugs found, proven and fixed by the founder's in-session ruling (A-062 claim root writable, A-063 non-multisig resolve leg). GLUE `scripts/devnet-m11/` (payouts JSON → tree → fund_bond/post_root/claim, devnet) and the tracked Anchor IDL (`programs/pool/idl/pool.json`, built with the Anchor CLI 1.2.2) shipped. fmt + clippy clean; no new dependencies. Full entry + limitations in the log below.
@@ -54,6 +55,120 @@
 | M12–M14 | pending | V3 — Operator network |
 
 ## Milestone log (append per completed milestone; keep the most recent 10)
+
+### 2026-11-28 — SAT-2c: the slash on devnet — a false ruling, an executed slash, a refused claim
+
+**Scope (kickoff SAT-2c).** Branch `m11/devnet-slash` from main `1069d44`.
+Post a third root (window 1795831844), challenge it inside the window from
+the rogue-upgrader key, rule it `RootFalse { slash_amount: 50,000, victim:
+the custodial renter }` through the 2-of-2, crank `slash_bond`
+permissionlessly, prove that a claim on the slashed root is refused, write
+the evidence, push. DEVNET ONLY; no product-code changes; every number read
+back from the chain; hard 90-minute box.
+
+**Outcome.** All requested transactions are on devnet (17:04–17:05 +07:00):
+
+- **Preflight** at slot 527188963: escrow 150,960; bond vault 149,040;
+  multisig live index 12; program authority still the vault; pool active;
+  no root for window 1795831844; renter's USDC token account 19,849,040.
+- **Root 3:** window 1795831844, one leaf
+  `Ah3TyjuC3agXQcsYty1VpNBWLRg4DkFWkhugsyoGLUuJ` / **100,000**; post sig
+  `3EwF9YTe…` @527191516; root `6491XukKY4bzCr6FcPmCF5SStW5VAZGzgHRRypZH4Dr7`;
+  merkle root `0xd9c53526…feb9a3a` (the same leaf as Part 2, so the same
+  one-leaf root); bond snapshot 149,040.
+- **Challenge:** rogue-upgrader `DtNTR9Nn9A7Ld1j3KRGoxVC18oeazSRKrD7MZydTxjgk`
+  signed, 20 slots after posting; sig `5nkt9mFf…` @527191536; root became
+  `Challenged`. Evidence: a 123-byte SAT-2c statement committed on-chain as
+  SHA-256 `0x22c8492b…14d467` (recomputed independently with `sha256sum`).
+- **2-of-2 ruling, proposal index 13 — `RootFalse`:** create `5ZwPwxGK…`
+  @527191663; founder approval `5dn4BLNi…` @527191673; teammate-rotated
+  approval `4f9frHbS…` @527191683; execute `5EJEwAd8…` @527191692. The
+  executed inner instruction decodes to
+  `resolve_challenge(1795831844, RootFalse { slash_amount: 50000, victim: Ah3TyjuC… })`.
+  Root read back `ProvenFalse` with `ruled_slash=50000` and
+  `victim=Ah3TyjuC…`; the bond vault still read 149,040 — a ruling only
+  records.
+- **Slash (permissionless):** `slash_bond` sig `3CzUi4ds…` @527191774. The
+  ONLY signing key on the transaction is its fee payer (the deploy key —
+  not the backend, not a multisig member); the pool program asks for none.
+  Read-back: bond vault 149,040 → **99,040**; bond record → **99,040**;
+  renter's token account 19,849,040 → **19,899,040**; escrow unchanged
+  150,960; root **Slashed**; `BondSlashed` event `amount=50000
+  bond_after=99040`.
+- **Claim on the slashed root — REFUSED:** assisted claim sig `4yeTfKsD…`
+  @527191834 landed as a failure and read back
+  `InstructionError(1, Custom(6015))`; program log: `RootFrozen`, 6015,
+  “Root payouts are frozen — the root is not Active.”; `custom program
+  error: 0x177f`. No marker, `paid_out=0`, both token balances delta 0;
+  only the 5,000-lamport fee was charged.
+- **Final read-back** at slot 527192269: root `Slashed` (`ruled_slash`
+  50,000, victim `Ah3TyjuC…`, paid_out 0); bond 99,040 / 99,040; renter
+  token account 19,899,040; escrow 150,960; multisig `transaction_index`
+  13; pool active; upgrade authority still the Squads vault. The closing
+  balances were then re-read from raw RPC JSON with no tool code involved
+  and agree on every number.
+- **Evidence:** `docs/devnet-m11.md` Part 3 (§§20–28) and
+  `deploy/devnet-m11.json` `slash`. Ops logs are gitignored under
+  `target/soak-logs/m11-slash-*.log`.
+
+**Kickoff wording corrected against the program contract (no product
+change).** The kickoff named the ruling's `victim` as "the custodial renter
+key's USDC token account". The program compares `slash_bond`'s destination
+OWNER with the recorded victim (`WrongDestinationOwner`), so `victim` had
+to be the renter KEY `Ah3TyjuC…`; its USDC token account `3GuSWoYU…` is the
+slash destination. Read literally, the ruling would have executed with a
+slash that can never run — the root `ProvenFalse` for good. The ops tool
+now checks the victim's token account BEFORE a proposal index is spent.
+Recorded as AUDIT A-066 (low, ops observation; the next free id is A-067).
+
+**Limitations (honest).**
+1. The refused claim used the ASSISTED door only. The direct door was not
+   separately exercised against the slashed root; the status gate that
+   refuses is the same line for both doors, and the on-host suite pins both.
+2. The ruling executed 176 slots after posting — after the natural 100-slot
+   window had already closed (the same timing as Part 2). A root stays
+   frozen while it is `Challenged`, so the timing does not change the
+   outcome.
+3. A second `slash_bond` on the slashed root was NOT attempted on devnet
+   (outside the kickoff's list). Exactly-once (`RootNotProvenFalse`) is
+   pinned by the on-host doctrine suite only.
+4. On devnet the custodial renter and the depositor are one key, so the
+   slash's victim is the same token account Part 2's direct claim paid. The
+   slash leg itself is exactly +50,000 to that account from the BOND vault;
+   the escrow never moved.
+5. Ops tooling only changed under `scripts/`; `programs/`, `crates/`,
+   `apps/`, and `migrations/` are untouched. No dependency was added or
+   changed: two small inline decoders (base64, base58) keep the standalone
+   soak crate's `Cargo.toml` and `Cargo.lock` byte-identical.
+
+**Push state + CI verdict of the pushed heads.** `m11/devnet-slash`
+**pushed**: evidence head `81ba51562ad6f4082652b659b2a08f2d01c9ba17` → PR
+[#4](https://github.com/Phat1911/Tributary/pull/4) (base main; not merged —
+the founder's call). CI verdict of `81ba515`: **GREEN —
+[run 46134374852](https://github.com/Phat1911/Tributary/actions/runs/46134374852)**,
+all five jobs success (Rust fmt/clippy/test dual-DB, Dashboard
+lint+typecheck+build, OpenAI SDK contract J7, Playwright E2E J6/F1,
+cargo-deny). The first docs-only close-out head
+`47ce8a98b222b3a62914b735b8f601e2c2a29f32`: **GREEN —
+[run 46134870248](https://github.com/Phat1911/Tributary/actions/runs/46134870248)**,
+all five jobs success. The branch CI ran via the `pull_request` trigger
+(the push trigger covers main + the two doctrine-suite branches only).
+**`main`: this session pushed NOTHING to it.** The branch was cut from
+`1069d44`; while the session ran, the founder pushed two README-only
+commits from elsewhere, so `origin/main` is now `0163f5c` — no file overlap
+with this branch, and PR #4 reports `MERGEABLE` (a trial merge is clean).
+This work reaches `main` only when PR #4 is merged. (An earlier wording of
+this paragraph said remote `main` was still `1069d44`; that was written
+without a fresh fetch and is corrected here.) This correction rides a
+second docs-only commit, whose own head's CI is reported in the session
+close-out.
+
+**Fast jump (this session).** `scripts/devnet-soak/src/bin/m11_sync.rs`
+(SAT-2c subcommands `resolve_false`, `slash_bond`, `claim_slashed`,
+`tx_readback`; an optional evidence argument on `challenge`; the Part-2
+refusal procedure now shared by both refused claims) · `docs/devnet-m11.md`
+(Part 3) · `deploy/devnet-m11.json` (`slash`) · `AUDIT.md` (A-066) ·
+`PLAN.md` (this entry).
 
 ### 2026-11-28 — SAT-2b: challenge, 2-of-2 ruling, and direct-door claim on devnet
 
