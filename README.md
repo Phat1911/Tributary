@@ -420,6 +420,9 @@ curl -s https://api.devnet.solana.com -X POST -H 'content-type: application/json
   [`docs/devnet-m11.md`](docs/devnet-m11.md).
 - **Next:** an adversarial audit of the settlement code. Its findings, if
   any, go to [`AUDIT.md`](AUDIT.md) as they arrive.
+- **The demo, in 95 seconds:** [youtu.be/PArKVs8KR2Y](https://youtu.be/PArKVs8KR2Y).
+  A request metered, a settle run, and the eight on-chain receipts above,
+  with captions.
 
 ## Security and known limits
 
