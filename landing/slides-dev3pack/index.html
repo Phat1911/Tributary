@@ -5,90 +5,128 @@
 <title>Tributary — Dev3pack</title>
 <style>
   html,body{margin:0;height:100%;background:#0b1020;color:#e8eef7;
-    font-family:'Segoe UI',system-ui,sans-serif;overflow:hidden}
+    font-family:'Segoe UI',system-ui,'Noto Sans','Liberation Sans','DejaVu Sans',sans-serif;overflow:hidden}
   .slide{display:none;height:100%;flex-direction:column;justify-content:center;
-    align-items:center;text-align:center;padding:0 8vw;gap:2.5vh}
+    align-items:center;text-align:center;padding:0 7vw;gap:2.4vh}
   .slide.active{display:flex}
-  .kicker{color:#14b8a6;font-size:clamp(14px,2vw,22px);letter-spacing:.35em;
-    text-transform:uppercase;font-weight:600}
+  .kicker{color:#14b8a6;font-size:clamp(14px,2vw,22px);letter-spacing:.35em;text-transform:uppercase;font-weight:600}
   h1{font-size:clamp(40px,7vw,96px);margin:0;font-weight:800}
-  h2{font-size:clamp(30px,5vw,64px);margin:0;font-weight:700;line-height:1.25}
+  h2{font-size:clamp(40px,6.4vw,88px);margin:0;font-weight:700;line-height:1.2}
   .sub{color:#94a3b8;font-size:clamp(18px,2.6vw,32px);line-height:1.5}
   .accent{color:#14b8a6}
   .en{font-style:italic;color:#cbd5e1}
-  .tiny{position:fixed;bottom:3vh;left:0;right:0;text-align:center;
-    color:#475569;font-size:14px}
+  .bullets{display:flex;flex-direction:column;gap:1.5vh;align-items:flex-start;text-align:left;
+    font-size:clamp(17px,2.1vw,30px);line-height:1.4;color:#cbd5e1;max-width:76vw}
+  .bullets div::before{content:"▸";color:#14b8a6;margin-right:.7em}
+  table{border-collapse:collapse;font-size:clamp(12px,1.3vw,22px);color:#cbd5e1;margin-top:1vh}
+  th,td{padding:0.9vh 1.2vw;border-bottom:1px solid #1e293b;text-align:center}
+  th:first-child,td:first-child{text-align:left;color:#e8eef7}
+  th{color:#94a3b8;font-weight:600;border-bottom:1px solid #334155}
+  th.trib,td.trib{color:#e8eef7;font-weight:700}
+  .no{color:#64748b}
+  .small h2{font-size:clamp(34px,5vw,70px)}
+  .tiny{position:fixed;bottom:3vh;left:0;right:0;text-align:center;color:#475569;font-size:14px}
 </style>
 </head>
 <body>
 
 <div class="slide active">
-  <div class="kicker">Solana University Hackathon · Nov 27–29</div>
+  <div class="kicker">Solana University Hackathon · Nov 27–29 · Da Nang</div>
   <h1>TRIBUTARY</h1>
-  <div class="sub">Governed AI capacity —<br><span class="accent">settled on Solana</span>.</div>
+  <div class="sub">AI credit pools,<br><span class="accent">settled on Solana</span>.</div>
 </div>
 
 <div class="slide">
-  <h2>Teams share one AI key.<br><span class="accent">Nobody knows who burned the tokens.</span></h2>
-  <div class="sub">And the credits problem: granted credits expire unused.<br>Agents hit rate limits before they hit cost.</div>
+  <div class="kicker">Problem</div>
+  <h2>AI capacity is expensive.<br>And spare credits <span class="accent">go to waste</span>.</h2>
 </div>
 
 <div class="slide">
-  <div class="kicker">V1 · shipped &amp; self-hosted</div>
-  <h2>Every member gets<br>their <span class="accent">own key</span></h2>
-  <div class="sub">Quotas · leak detection · append-only audit.<br>One container, source-available.</div>
+  <div class="kicker">What exists today</div>
+  <h2>Web2 credit markets:<br>the operator holds <span class="accent">your money and your ledger</span>.</h2>
 </div>
 
 <div class="slide">
-  <div class="kicker">The marketplace economics</div>
-  <h2>Sellers discount because<br>their <span class="accent">basis is zero</span></h2>
-  <div class="sub">Grants, prizes, expiring credits — salvage, not price war.<br>
-  A pool of N keys = <span class="accent">N× rate limits</span> — speed, not just price.</div>
+  <div class="kicker">Our solution · 1 of 2</div>
+  <h2>A pool for surplus credits,<br><span class="accent">metered to the micro-unit</span>.</h2>
 </div>
 
 <div class="slide">
-  <div class="kicker">V2 · live on Solana devnet</div>
-  <h2>Escrow <span class="accent">no one person can move</span></h2>
-  <div class="sub">Claims that can never trade · 2-of-2 multisig ·<br>every money moment a public receipt.</div>
+  <div class="kicker">Our solution · 2 of 2</div>
+  <h2>Paid out on Solana,<br><span class="accent">by rules, not by trust</span>.</h2>
 </div>
 
 <div class="slide">
-  <div class="kicker">Built here, this weekend</div>
-  <h2>Merkle-batched <span class="accent">settlement</span></h2>
-  <div class="sub">Claims with proofs · challenge window · operator bond —<br>turning metered burns into provable payouts.</div>
+  <div class="kicker">About me</div>
+  <h2>Hong Phat</h2>
+  <div class="sub">Tran Dinh Hong Phat · second-year IT student · Da Nang</div>
 </div>
 
 <div class="slide">
-  <div class="kicker">Why Solana</div>
+  <div class="kicker">Go to market</div>
+  <h2>Where the <span class="accent">first dollar</span> starts.</h2>
+</div>
+
+<div class="slide">
+  <div class="kicker">Why now</div>
+  <h2>Built now, because<br><span class="accent">AI capacity is piling up</span>.</h2>
+</div>
+
+<div class="slide">
+  <h2 class="en">"Verifiable rules<br>instead of trust."</h2>
+  <div class="sub">github.com/Phat1911/Tributary<br>tributary-landing-woad.vercel.app</div>
+</div>
+
+<div class="slide small">
+  <div class="kicker">Appendix · The metering engine</div>
+  <h2>Off the chain, the books are<br><span class="accent">exact to the micro-unit</span>.</h2>
+  <div class="bullets">
+    <div>A self-hosted gateway (released as v0.1.4) meters every request and keeps the double-entry ledger.</div>
+    <div>Settlement reads that ledger: no request ever routes on-chain.</div>
+    <div>Per-member keys, quotas and an append-only audit log come with it.</div>
+  </div>
+</div>
+
+<div class="slide small">
+  <div class="kicker">Appendix · The Web2 credit resellers</div>
+  <h2>Operator-run gateways:<br>your balance is <span class="accent">a row in their database</span>.</h2>
+  <div class="bullets">
+    <div>Open-source gateways such as New API (GitHub) let anyone run a credit-resale site: users top up a balance with the operator.</div>
+    <div>The operator holds the upstream keys and the money; the balance is mutable by the operator and cannot be verified from outside.</div>
+    <div>If the site closes, the prepaid balance is gone. Only the operator trades: users with surplus still cannot sell.</div>
+    <div>New API's own README asks operators to settle payment, licensing and upstream-authorization duties before reselling in public.</div>
+  </div>
+</div>
+
+<div class="slide small">
+  <div class="kicker">Appendix · Why Solana</div>
   <h2>The chain is <span class="accent">plumbing</span> —<br>and it fits</h2>
   <div class="sub">Micro-payouts need fees that don't eat them · finality in seconds ·<br>
   PDA escrow · Token-2022 <span class="accent">NonTransferable</span> · Squads 2-of-2 —<br>
-  by standard, not by promise. Users never need a wallet.</div>
+  by standard, not by promise. No AI request ever routes on-chain.</div>
 </div>
 
-<div class="slide">
-  <div class="kicker">Design decision</div>
+<div class="slide small">
+  <div class="kicker">Appendix · Design decision</div>
   <h2>We evaluated x402.<br>Prepaid escrow <span class="accent">stays</span>.</h2>
   <div class="sub">x402 <b>upto</b>: authorize a max, settle the actual — built for one paid call.<br>
   A prepaid balance needs what it skips: funds inside <span class="accent">our escrow</span>,<br>
   zero confirmations per request, streaming. Escrow stays; x402 may return as a second door.</div>
 </div>
 
-<div class="slide">
-  <h2 class="en">"Verifiable rules<br>instead of trust."</h2>
-  <div class="sub">github.com/Phat1911/Tributary<br>My teammates are agents. 🤖</div>
-</div>
-
 <div class="tiny">→ / ← to navigate · F11 fullscreen</div>
 
 <script>
-const s=[...document.querySelectorAll('.slide')];let i=0;
-function go(n){i=Math.max(0,Math.min(s.length-1,n));
-  s.forEach((x,k)=>x.classList.toggle('active',k===i));}
-addEventListener('keydown',e=>{
-  if(e.key==='ArrowRight'||e.key===' '||e.key==='PageDown')go(i+1);
-  if(e.key==='ArrowLeft'||e.key==='PageUp')go(i-1);});
-addEventListener('click',()=>go(i+1));
+  const s=[...document.querySelectorAll('.slide')];let i=0;
+  function go(n){i=Math.max(0,Math.min(s.length-1,n));
+    s.forEach((x,k)=>x.classList.toggle('active',k===i));
+    if(location.hash!=='#/'+(i+1)) history.replaceState(null,'','#/'+(i+1));}
+  addEventListener('keydown',e=>{
+    if(e.key==='ArrowRight'||e.key===' '||e.key==='PageDown')go(i+1);
+    if(e.key==='ArrowLeft'||e.key==='PageUp')go(i-1);});
+  addEventListener('click',()=>go(i+1));
+  const m=location.hash.match(/^#\/?(\d+)/); go(m ? +m[1]-1 : 0);
+  if(location.search.includes('clean')) document.querySelector('.tiny').style.display='none';
 </script>
 </body>
 </html>
