@@ -281,3 +281,230 @@ created in this transaction.
 6. **Direct claim** — the transaction account list shows the depositor as fee
    payer and claim signer; token balances show depositor +100,000 and escrow
    −100,000; the emitted `ClaimPaid` data matches the root account.
+
+## Part 3 — the slash (SAT-2c, 2026-11-28)
+
+Status: **RUN COMPLETE (2026-11-28), DEVNET ONLY.** This continuation ran on
+branch `m11/devnet-slash` from main `1069d44`. Same deployed M11 program
+(last deployed slot 527,064,271), same Squads 2-of-2, same custodial
+renter/depositor key. No product code changed (`programs/`, `crates/`,
+`apps/`, and `migrations/` untouched); the only code change is the devnet
+ops tool `scripts/devnet-soak/src/bin/m11_sync.rs`.
+
+This is the one path of the dispute flow that had never run on devnet: a
+root ruled FALSE, and its slash executed. The sequence: post a third root →
+challenge it inside the window → 2-of-2 `RootFalse` ruling → the
+permissionless `slash_bond` crank → a claim on the slashed root, refused.
+Every number below was read back from devnet accounts and transactions
+after the relevant step; the closing balances were then read a second time
+from raw RPC JSON with no ops-tool code involved.
+
+All eight transactions, in order (block times are UTC+7, read from the
+transactions):
+
+| # | Step | Signature | Slot | Block time |
+|---|---|---|---:|---|
+| 1 | `post_root` window 1795831844 | [`3EwF9YTe…`](https://explorer.solana.com/tx/3EwF9YTejhA9ceGqTqqqnAGmcn2xdTzNHHZuHmUJ1FfKa148c2rTvnhZxqoNiuWNwLVvBhDbGx9txxgKrXaoSkxX?cluster=devnet) | 527,191,516 | 17:04:07 |
+| 2 | `challenge` (rogue-upgrader) | [`5nkt9mFf…`](https://explorer.solana.com/tx/5nkt9mFfe7WfvN9uvD3YdpfdoZKHi9ZHNE4pp9HUUCv8h38Z1vpESqtfD2oQZnqqW7jTSbpFC36o7NHHPDdLQgFM?cluster=devnet) | 527,191,536 | 17:04:12 |
+| 3 | proposal 13: create vault transaction + proposal | [`5ZwPwxGK…`](https://explorer.solana.com/tx/5ZwPwxGKkeRqmmXhwzLvquNHoiJfW1AyNmmdSwCs3zazDxVquzSbkzdiwnNUvpdBi7a6VL5QpjcxdWzHZN5PRhj9?cluster=devnet) | 527,191,663 | 17:04:42 |
+| 4 | proposal 13: approve — founder | [`5dn4BLNi…`](https://explorer.solana.com/tx/5dn4BLNif17zDya2dkb17LYeNuLdLocXSVhSKhW8vp7CfuL4BCSiN5qe3vg4mb2fX4517TLfv34KK3NyWwVBmymq?cluster=devnet) | 527,191,673 | 17:04:45 |
+| 5 | proposal 13: approve — teammate-rotated | [`4f9frHbS…`](https://explorer.solana.com/tx/4f9frHbSNV53VBLNANxykShZseXZv1Ju17zQpXXXqMGZG4E6oMWSoK8LS4aNm5mwQRLdPFG4F2Ns4iyGABHxxCiq?cluster=devnet) | 527,191,683 | 17:04:47 |
+| 6 | proposal 13: **execute** the `RootFalse` ruling | [`5EJEwAd8…`](https://explorer.solana.com/tx/5EJEwAd8TF3j8yDBZfwW2CbmpXpUhhWpMP3JcquYP6DEk9cFhajWD8akiaEtuNKC7rLu5GLyQfGNBzKyh5Dpkkg3?cluster=devnet) | 527,191,692 | 17:04:49 |
+| 7 | `slash_bond` — permissionless | [`3CzUi4ds…`](https://explorer.solana.com/tx/3CzUi4dssADKACmsnk3t8uyXQZ9qgSoqubrJyw64dRbhH3whSCbauFH4p26gR2RuhKLxYqAh5WD2QXXBp2JTdhkG?cluster=devnet) | 527,191,774 | 17:05:09 |
+| 8 | assisted `claim` on the slashed root — **REFUSED** | [`4yeTfKsD…`](https://explorer.solana.com/tx/4yeTfKsDjVN8k72LmkGZVdypuuCxQX7BZ9uzY2gjZ36KKDKSZE77o3RSQDyaiDzX7MJLpSV4gPjuWEyFhe62LQwh?cluster=devnet) | 527,191,834 | 17:05:23 |
+
+### 20. Part-3 preflight (slot 527,188,963, read-only)
+
+- Escrow vault `Dhp3t3vL6crixL1AzmXEFFa1bfMZ4KsaxEaSyZjFYksd` held
+  **150,960** micro-USDC; bond vault
+  `DoyipWb8ZqbaAgarN2Qdhp2tu9HbUNPVM1eHDtP548cG` held **149,040** (bond
+  record 149,040) — the state the kickoff named, confirmed on-chain.
+- Multisig `GuSeFfFkdKtjkubeLUEeBHW5pfHSJctGnz8AFk7xrCk5` was 2-of-2 with
+  live `transaction_index = 12`; the ruling proposal would therefore be
+  index **13**.
+- Program authority was still the vault `BhLQqw5rkr3otQoXvJSRjiaNHTgdcgXVkqXv8mwEhhJq`;
+  pool admin/backend unchanged; pool active; last deployed slot 527,064,271.
+- No root existed for window 1795831844: its PDA
+  `6491XukKY4bzCr6FcPmCF5SStW5VAZGzgHRRypZH4Dr7` read `AccountNotFound`.
+- The custodial renter's USDC token account
+  `3GuSWoYUdyu3PHHs7M7FijfUGih4ySo2w76puJW9Y2xs` (owner
+  `Ah3TyjuC3agXQcsYty1VpNBWLRg4DkFWkhugsyoGLUuJ`) held **19,849,040**.
+
+### 21. Third root — window 1795831844, one leaf
+
+The tree has one leaf: depositor `Ah3TyjuC3agXQcsYty1VpNBWLRg4DkFWkhugsyoGLUuJ`
+receives **100,000 micro-USDC**. The leaf is identical to Part 2's, so the
+one-leaf root hash is too: `0xd9c5352697fa8bf82bf9725ed6fed8488fa0d4cda54168d8235a574c0feb9a3a`.
+
+| Step | Signature | Slot | Read-back |
+|---|---|---:|---|
+| `post_root` | [`3EwF9YTe…`](https://explorer.solana.com/tx/3EwF9YTejhA9ceGqTqqqnAGmcn2xdTzNHHZuHmUJ1FfKa148c2rTvnhZxqoNiuWNwLVvBhDbGx9txxgKrXaoSkxX?cluster=devnet) | **527,191,516** | root `6491XukK…` born `Active`; `total_payout=100000`; `paid_out=0`; `bond_snapshot=149040`; `posted_at=527,191,516`; escrow unchanged **150,960** |
+
+The transaction was signed by the backend alone (fee payer and signer). Its
+`RootPosted` event, decoded from the on-chain program data:
+`RootPosted window=1795831844 merkle_root=0xd9c5352697fa8bf82bf9725ed6fed8488fa0d4cda54168d8235a574c0feb9a3a total_payout=100000 bond=149040 posted_at=527191516`.
+
+### 22. Challenge — inside the window, root frozen
+
+The challenger is `target/m8-keys/rogue-upgrader.json`
+(`DtNTR9Nn9A7Ld1j3KRGoxVC18oeazSRKrD7MZydTxjgk`) — neither the backend
+(`AJmEJPsCBT7VpZ3CkxDWpcoeuBdqp3JzrcPr43ZntJpb`) nor either multisig
+member. The deploy key paid only the fee; the transaction's signing keys
+read back as exactly those two. The evidence preimage (123 bytes) is:
+
+> SAT-2c deliberately false root 1795831844: its leaf is owed nothing, a payout would spend the renter's prepaid USDC wrongly
+
+committed on-chain as SHA-256 `0x22c8492b49407dfd077ce1492637fb97497ace2d98db374c29494805dd14d467`
+(recomputed independently with `sha256sum`; it matches the on-chain digest).
+
+| Step | Signature | Slot | Read-back |
+|---|---|---:|---|
+| `challenge` | [`5nkt9mFf…`](https://explorer.solana.com/tx/5nkt9mFfe7WfvN9uvD3YdpfdoZKHi9ZHNE4pp9HUUCv8h38Z1vpESqtfD2oQZnqqW7jTSbpFC36o7NHHPDdLQgFM?cluster=devnet) | **527,191,536** | root status `Challenged`; challenger and evidence digest recorded; `paid_out=0` |
+
+The challenge landed **20 slots** after posting, inside the
+100-slot window. Its `RootChallenged` event, decoded from program data:
+`RootChallenged window=1795831844 challenger=DtNTR9Nn9A7Ld1j3KRGoxVC18oeazSRKrD7MZydTxjgk evidence=0x22c8492b49407dfd077ce1492637fb97497ace2d98db374c29494805dd14d467`.
+
+### 23. The 2-of-2 ruling — `RootFalse`, proposal index 13
+
+The Squads vault transaction carried
+`resolve_challenge(1795831844, RootFalse { slash_amount: 50,000, victim: Ah3TyjuC3agXQcsYty1VpNBWLRg4DkFWkhugsyoGLUuJ })`.
+Both live members approved before execution.
+
+**What `victim` names.** The kickoff words it as "the custodial renter key's
+USDC token account". The program's contract is that `victim` is the KEY that
+owns the slash destination: `slash_bond` requires
+`destination.owner == settlement_root.victim` (the `WrongDestinationOwner`
+check in `programs/pool/src/lib.rs`), and the doctrine suite's test 6
+passes the victim's key as `victim` and the victim's token account as the
+destination. So the ruling names the custodial renter KEY
+`Ah3TyjuC…` — the party whose prepayment a false root would have paid out
+wrongly — and the crank's destination (§24) is that key's USDC token
+account `3GuSWoYU…`. Read literally, the kickoff's wording would have
+recorded a token-account address as `victim`; no USDC token account can
+exist whose owner is that address (creating one needs that address's
+signature, and an ATA address cannot sign), so the slash could never have
+executed and the root would have stayed `ProvenFalse` for good. The ops tool therefore now
+refuses to propose a ruling whose victim holds no USDC token account —
+before any proposal index is spent (AUDIT.md A-066).
+
+| Step | Member / actor | Signature | Slot |
+|---|---|---|---:|
+| create vault transaction + proposal (index 13) | deploy rent payer + founder creator | [`5ZwPwxGK…`](https://explorer.solana.com/tx/5ZwPwxGKkeRqmmXhwzLvquNHoiJfW1AyNmmdSwCs3zazDxVquzSbkzdiwnNUvpdBi7a6VL5QpjcxdWzHZN5PRhj9?cluster=devnet) | 527,191,663 |
+| approve | founder `HGHF2iuEphK4zFuqFAC5dXDfk4US6AAvMVqWwfwB7gzz` | [`5dn4BLNi…`](https://explorer.solana.com/tx/5dn4BLNif17zDya2dkb17LYeNuLdLocXSVhSKhW8vp7CfuL4BCSiN5qe3vg4mb2fX4517TLfv34KK3NyWwVBmymq?cluster=devnet) | 527,191,673 |
+| approve | teammate-rotated `2ys6xNTANVqoNar7RQHyQvtdDhCwYbsE3XEP4LAjpzbq` | [`4f9frHbS…`](https://explorer.solana.com/tx/4f9frHbSNV53VBLNANxykShZseXZv1Ju17zQpXXXqMGZG4E6oMWSoK8LS4aNm5mwQRLdPFG4F2Ns4iyGABHxxCiq?cluster=devnet) | 527,191,683 |
+| **execute** | founder member executes the approved vault transaction | [`5EJEwAd8…`](https://explorer.solana.com/tx/5EJEwAd8TF3j8yDBZfwW2CbmpXpUhhWpMP3JcquYP6DEk9cFhajWD8akiaEtuNKC7rLu5GLyQfGNBzKyh5Dpkkg3?cluster=devnet) | **527,191,692** |
+
+Each approval's signing keys were read back from the transaction itself:
+the deploy key (fee payer) plus the approving member, and no one else. The
+vault transaction PDA is `GmqBzbsWrpwJFxr59eRPbnv4efN21EpU4mKoAB9VSb5q` and the proposal
+PDA `GMwtNnYfiJnbB5Q2QE4hrAjjJossjLPRm5czWe8hjCLC`.
+
+The execute transaction's inner instruction — the call the multisig made
+into the pool program, decoded from its base58 data — is
+`resolve_challenge(window=1795831844, RootFalse { slash_amount: 50000, victim: Ah3TyjuC3agXQcsYty1VpNBWLRg4DkFWkhugsyoGLUuJ })`,
+with accounts pool / vault (the signing admin authority) / root / bond
+record. Its `ChallengeResolved` event, decoded from program data:
+`ChallengeResolved window=1795831844 root_stands=false slash_amount=50000 victim=Ah3TyjuC3agXQcsYty1VpNBWLRg4DkFWkhugsyoGLUuJ`.
+
+Post-ruling root read-back: status **ProvenFalse**,
+`ruled_slash=50000`, `victim=Ah3TyjuC3agXQcsYty1VpNBWLRg4DkFWkhugsyoGLUuJ`,
+`stands_ruled=false`, `paid_out=0`; challenger and evidence preserved. The
+ruling only RECORDS: the bond vault still read **149,040** and
+the victim's token account **19,849,040** — nothing had moved.
+
+The ruling executed 176 slots after posting, i.e. after the
+natural 100-slot window had already closed — the same timing as Part 2's
+ruling. A root stays frozen while it is `Challenged`, so the closed window
+changes nothing.
+
+### 24. The slash — `slash_bond`, permissionless
+
+`slash_bond(1795831844)` was cranked with the victim's token account
+`3GuSWoYUdyu3PHHs7M7FijfUGih4ySo2w76puJW9Y2xs` as the
+destination. The pool program asks for NO signer on this instruction: the
+transaction's only signing key is its fee payer, the deploy key
+`4N2nTJ8WWwDKVoULt9bymaB6XsrB7HP973y8Ebw6tQhV` — not the backend, not a
+multisig member. The amount and the destination come from the root account,
+never from arguments.
+
+| Step | Signature | Slot | Read-back |
+|---|---|---:|---|
+| `slash_bond` | [`3CzUi4ds…`](https://explorer.solana.com/tx/3CzUi4dssADKACmsnk3t8uyXQZ9qgSoqubrJyw64dRbhH3whSCbauFH4p26gR2RuhKLxYqAh5WD2QXXBp2JTdhkG?cluster=devnet) | **527,191,774** | bond vault 149,040 → **99,040** (−50,000); victim token account 19,849,040 → **19,899,040** (+50,000); bond record 149,040 → **99,040**; root **Slashed** |
+
+The token movement appears in the transaction as a CPI to the Token
+program — bond vault → victim token account, authority = the pool PDA — and
+in its token balances (`DoyipWb8Zq…` −50,000, `3GuSWoYU…` +50,000). Its
+`BondSlashed` event, decoded from program data:
+`BondSlashed window=1795831844 amount=50000 victim=Ah3TyjuC3agXQcsYty1VpNBWLRg4DkFWkhugsyoGLUuJ bond_after=99040`.
+The escrow vault is not part of a slash and still read **150,960**.
+
+### 25. Claim on the slashed root — REFUSED ON DEVNET
+
+The exact claim of §21's leaf (assisted door: the backend signs and pays
+the fee) was first simulated and had to return `RootFrozen`; it was then
+broadcast with `skip_preflight` so the refusal itself has a devnet
+signature. The root is `Slashed`, not `Active`, so the status gate refuses
+before the challenge-window check is ever reached.
+
+| Step | Signature | Slot | Exact refusal |
+|---|---|---:|---|
+| assisted `claim` against the slashed root | [`4yeTfKsD…`](https://explorer.solana.com/tx/4yeTfKsDjVN8k72LmkGZVdypuuCxQX7BZ9uzY2gjZ36KKDKSZE77o3RSQDyaiDzX7MJLpSV4gPjuWEyFhe62LQwh?cluster=devnet) | **527,191,834** | `Err(InstructionError(1, Custom(6015)))`; program log: `AnchorError thrown in programs/pool/src/lib.rs:754. Error Code: RootFrozen. Error Number: 6015. Error Message: Root payouts are frozen — the root is not Active.`; transaction status: `Error processing Instruction 1: custom program error: 0x177f` |
+
+Post-refusal read-back: root still `Slashed`, `paid_out=0`, marker
+`FptyfRWHQ1puAi6TPp94FARQwKPQAtJSZxjmKosnJoWP` still absent, escrow
+still **150,960**, victim token account still **19,899,040**. The failed
+transaction's own token balances read `19,899,040 → 19,899,040` and
+`150,960 → 150,960` (delta 0 each); only the 5,000-lamport fee was
+charged.
+
+### 26. Final Part-3 read-back (slot 527,192,269)
+
+| Fact | Final value |
+|---|---|
+| Root `6491XukKY4bzCr6FcPmCF5SStW5VAZGzgHRRypZH4Dr7` | window 1795831844; **Slashed**; total 100,000; paid_out 0; `ruled_slash` **50,000**; victim `Ah3TyjuC…` |
+| Bond record `3NRdsizTeHbEq9cE9YZaAM3iwXzs7mTYSUZuXZnVqCWn` / bond vault `DoyipWb8ZqbaAgarN2Qdhp2tu9HbUNPVM1eHDtP548cG` | **99,040** / **99,040** micro-USDC (149,040 − 50,000) |
+| Victim USDC token account `3GuSWoYU…` | **19,899,040** micro-USDC (19,849,040 + 50,000) |
+| Escrow vault `Dhp3t3vL6…` | **150,960** micro-USDC — untouched by the ruling, the slash and the refused claim |
+| Claim marker (leaf 0) `FptyfRWHQ1puAi6TPp94FARQwKPQAtJSZxjmKosnJoWP` | does not exist — the false root paid nothing |
+| Multisig live `transaction_index` | **13** |
+| Pool / program authority | active; authority still the Squads vault; last deployed slot 527,064,271 |
+
+The same values were read a second time from raw `getAccountInfo` /
+`getTokenAccountBalance` JSON — base64 account data parsed field by field,
+no ops-tool code — and agreed on every number.
+
+### 27. What the Part-3 verifier should click
+
+1. **Root posting** — transaction [`3EwF9YTe…`](https://explorer.solana.com/tx/3EwF9YTejhA9ceGqTqqqnAGmcn2xdTzNHHZuHmUJ1FfKa148c2rTvnhZxqoNiuWNwLVvBhDbGx9txxgKrXaoSkxX?cluster=devnet): the backend is the only
+   signing key; account `6491XukK…` is born with `total_payout=100000` at
+   slot 527,191,516. (Today the account reads `Slashed`, §26.)
+2. **Challenge** — transaction [`5nkt9mFf…`](https://explorer.solana.com/tx/5nkt9mFfe7WfvN9uvD3YdpfdoZKHi9ZHNE4pp9HUUCv8h38Z1vpESqtfD2oQZnqqW7jTSbpFC36o7NHHPDdLQgFM?cluster=devnet): the signing keys are the
+   deploy key and `DtNTR9Nn…` (the challenger); the `RootChallenged` event
+   carries the evidence digest `0x22c8492b…14d467`.
+3. **Ruling** — proposal index 13: `5dn4BLNi…` is signed by
+   `HGHF2iu…`, `4f9frHbS…` by `2ys6xNTA…`, then `5EJEwAd8…` executes. In the
+   execute transaction, the inner instruction to the pool program decodes
+   to `RootFalse` (variant byte 1, 50,000, `Ah3TyjuC…`), and its
+   `ChallengeResolved` event says `root_stands=false`.
+4. **Slash** — transaction [`3CzUi4ds…`](https://explorer.solana.com/tx/3CzUi4dssADKACmsnk3t8uyXQZ9qgSoqubrJyw64dRbhH3whSCbauFH4p26gR2RuhKLxYqAh5WD2QXXBp2JTdhkG?cluster=devnet): the ONLY signing key is the deploy
+   key `4N2nTJ8W…`; token-balance changes are the bond vault −50,000 and
+   `3GuSWoYU…` +50,000; `BondSlashed` reports `bond_after=99040`.
+5. **Refused claim** — transaction [`4yeTfKsD…`](https://explorer.solana.com/tx/4yeTfKsDjVN8k72LmkGZVdypuuCxQX7BZ9uzY2gjZ36KKDKSZE77o3RSQDyaiDzX7MJLpSV4gPjuWEyFhe62LQwh?cluster=devnet): instruction 1 fails with
+   `RootFrozen` / 6015 / `0x177f`; both token balances are unchanged.
+6. **Bond vault** `DoyipWb8ZqbaAgarN2Qdhp2tu9HbUNPVM1eHDtP548cG` on
+   solscan — 99,040 micro-USDC (0.09904 USDC).
+
+### 28. Notes for the next run
+
+1. **`victim` is an owner key, not a token account.** Word it that way in
+   the next kickoff; `m11_sync resolve_false` now checks the victim's USDC
+   token account before it spends a proposal index (A-066).
+2. `challenge <window> [evidence_preimage]` takes an optional evidence
+   string (omitted, it keeps Part 2's reviewer text, so that command is
+   unchanged). `tx_readback <signature>` re-reads any landed transaction —
+   signing keys, token deltas, CPI, decoded events — and every read-back in
+   this part comes from it. `resolve_false`, `slash_bond` and
+   `claim_slashed` are the three new step commands.
+3. The stale approved-but-unexecuted proposals 7 and 8 remain on the
+   multisig, unchanged (lesson 3 still holds: the live index skips them).

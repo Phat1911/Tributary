@@ -1,5 +1,5 @@
 {
-  "_comment": "M11 devnet sync record (PUBKEYS + SLOTS + SIGNATURES ONLY — keypairs live in gitignored target/m8-keys and target/m11-keys, never committed). Upgrade through the existing Squads 2-of-2 plus paid claims; SAT-2b proof adds challenge/ruling/direct-door evidence. Human evidence in docs/devnet-m11.md. Generated 2026-11-28; extended on branch m11/devnet-proof.",
+  "_comment": "M11 devnet sync record (PUBKEYS + SLOTS + SIGNATURES ONLY — keypairs live in gitignored target/m8-keys and target/m11-keys, never committed). Upgrade through the existing Squads 2-of-2 plus paid claims; SAT-2b proof adds challenge/ruling/direct-door evidence. Human evidence in docs/devnet-m11.md. Generated 2026-11-28; extended on branch m11/devnet-proof; the SAT-2c `slash` section adds the false ruling, the executed slash and the refused claim. Extended again on branch m11/devnet-slash.",
   "cluster": {
     "name": "devnet",
     "rpc_url": "https://api.devnet.solana.com",
@@ -256,6 +256,178 @@
       "multisig_transaction_index": 12,
       "pool_paused": false,
       "program_upgrade_authority": "BhLQqw5rkr3otQoXvJSRjiaNHTgdcgXVkqXv8mwEhhJq"
+    }
+  },
+  "slash": {
+    "name": "SAT-2c: a root ruled false and its slash executed, on devnet",
+    "branch": "m11/devnet-slash",
+    "cut_from_main": "1069d44",
+    "window": 1795831844,
+    "root_account": "6491XukKY4bzCr6FcPmCF5SStW5VAZGzgHRRypZH4Dr7",
+    "merkle_root": "0xd9c5352697fa8bf82bf9725ed6fed8488fa0d4cda54168d8235a574c0feb9a3a",
+    "leaf": {
+      "leaf_index": 0,
+      "depositor": "Ah3TyjuC3agXQcsYty1VpNBWLRg4DkFWkhugsyoGLUuJ",
+      "amount_micro_usdc": 100000,
+      "same_leaf_as_part_2": true
+    },
+    "preflight": {
+      "slot": 527188963,
+      "escrow_balance": 150960,
+      "bond_vault_balance": 149040,
+      "bond_record": 149040,
+      "multisig_transaction_index": 12,
+      "root_existed": false,
+      "victim_usdc_balance": 19849040
+    },
+    "post_root": {
+      "sig": "3EwF9YTejhA9ceGqTqqqnAGmcn2xdTzNHHZuHmUJ1FfKa148c2rTvnhZxqoNiuWNwLVvBhDbGx9txxgKrXaoSkxX",
+      "slot": 527191516,
+      "block_time": 1795860247,
+      "signed_by": "backend only",
+      "posted_at": 527191516,
+      "total_payout": 100000,
+      "bond_snapshot": 149040,
+      "root_status_after": "Active",
+      "escrow_unchanged": 150960,
+      "root_posted_event": "RootPosted window=1795831844 merkle_root=0xd9c5352697fa8bf82bf9725ed6fed8488fa0d4cda54168d8235a574c0feb9a3a total_payout=100000 bond=149040 posted_at=527191516"
+    },
+    "challenge": {
+      "sig": "5nkt9mFfe7WfvN9uvD3YdpfdoZKHi9ZHNE4pp9HUUCv8h38Z1vpESqtfD2oQZnqqW7jTSbpFC36o7NHHPDdLQgFM",
+      "slot": 527191536,
+      "block_time": 1795860252,
+      "slots_after_posting": 20,
+      "challenge_window_slots": 100,
+      "challenger": "DtNTR9Nn9A7Ld1j3KRGoxVC18oeazSRKrD7MZydTxjgk",
+      "challenger_key_file": "target/m8-keys/rogue-upgrader.json",
+      "challenger_is_backend_or_member": false,
+      "fee_payer": "4N2nTJ8WWwDKVoULt9bymaB6XsrB7HP973y8Ebw6tQhV",
+      "evidence_preimage": "SAT-2c deliberately false root 1795831844: its leaf is owed nothing, a payout would spend the renter's prepaid USDC wrongly",
+      "evidence_preimage_bytes": 123,
+      "evidence_sha256": "0x22c8492b49407dfd077ce1492637fb97497ace2d98db374c29494805dd14d467",
+      "evidence_sha256_recomputed_with": "sha256sum",
+      "root_status_after": "Challenged",
+      "root_challenged_event": "RootChallenged window=1795831844 challenger=DtNTR9Nn9A7Ld1j3KRGoxVC18oeazSRKrD7MZydTxjgk evidence=0x22c8492b49407dfd077ce1492637fb97497ace2d98db374c29494805dd14d467"
+    },
+    "ruling": {
+      "proposal_index": 13,
+      "ruling": "RootFalse",
+      "slash_amount_micro_usdc": 50000,
+      "victim_key": "Ah3TyjuC3agXQcsYty1VpNBWLRg4DkFWkhugsyoGLUuJ",
+      "victim_usdc_token_account": "3GuSWoYUdyu3PHHs7M7FijfUGih4ySo2w76puJW9Y2xs",
+      "victim_wording_note": "The kickoff said 'the custodial renter key's USDC token account'. The program compares slash_bond's destination OWNER with the recorded victim, so victim must be the KEY (Ah3TyjuC...) and the token account (3GuSWoYU...) is the slash destination. A literal reading would have left the root ProvenFalse with an unreachable victim (AUDIT.md A-066).",
+      "vault_transaction_pda": "GmqBzbsWrpwJFxr59eRPbnv4efN21EpU4mKoAB9VSb5q",
+      "proposal_pda": "GMwtNnYfiJnbB5Q2QE4hrAjjJossjLPRm5czWe8hjCLC",
+      "create_proposal": {
+        "sig": "5ZwPwxGKkeRqmmXhwzLvquNHoiJfW1AyNmmdSwCs3zazDxVquzSbkzdiwnNUvpdBi7a6VL5QpjcxdWzHZN5PRhj9",
+        "slot": 527191663,
+        "block_time": 1795860282,
+        "signed_by": [
+          "4N2nTJ8WWwDKVoULt9bymaB6XsrB7HP973y8Ebw6tQhV",
+          "HGHF2iuEphK4zFuqFAC5dXDfk4US6AAvMVqWwfwB7gzz"
+        ]
+      },
+      "approval_founder": {
+        "member": "HGHF2iuEphK4zFuqFAC5dXDfk4US6AAvMVqWwfwB7gzz",
+        "sig": "5dn4BLNif17zDya2dkb17LYeNuLdLocXSVhSKhW8vp7CfuL4BCSiN5qe3vg4mb2fX4517TLfv34KK3NyWwVBmymq",
+        "slot": 527191673,
+        "block_time": 1795860285,
+        "signed_by": [
+          "4N2nTJ8WWwDKVoULt9bymaB6XsrB7HP973y8Ebw6tQhV",
+          "HGHF2iuEphK4zFuqFAC5dXDfk4US6AAvMVqWwfwB7gzz"
+        ]
+      },
+      "approval_teammate_rotated": {
+        "member": "2ys6xNTANVqoNar7RQHyQvtdDhCwYbsE3XEP4LAjpzbq",
+        "sig": "4f9frHbSNV53VBLNANxykShZseXZv1Ju17zQpXXXqMGZG4E6oMWSoK8LS4aNm5mwQRLdPFG4F2Ns4iyGABHxxCiq",
+        "slot": 527191683,
+        "block_time": 1795860287,
+        "signed_by": [
+          "4N2nTJ8WWwDKVoULt9bymaB6XsrB7HP973y8Ebw6tQhV",
+          "2ys6xNTANVqoNar7RQHyQvtdDhCwYbsE3XEP4LAjpzbq"
+        ]
+      },
+      "execute": {
+        "sig": "5EJEwAd8TF3j8yDBZfwW2CbmpXpUhhWpMP3JcquYP6DEk9cFhajWD8akiaEtuNKC7rLu5GLyQfGNBzKyh5Dpkkg3",
+        "slot": 527191692,
+        "block_time": 1795860289,
+        "signed_by": [
+          "4N2nTJ8WWwDKVoULt9bymaB6XsrB7HP973y8Ebw6tQhV",
+          "HGHF2iuEphK4zFuqFAC5dXDfk4US6AAvMVqWwfwB7gzz"
+        ],
+        "slots_after_posting": 176
+      },
+      "inner_instruction_decoded": "resolve_challenge(window=1795831844, RootFalse { slash_amount: 50000, victim: Ah3TyjuC3agXQcsYty1VpNBWLRg4DkFWkhugsyoGLUuJ })",
+      "challenge_resolved_event": "ChallengeResolved window=1795831844 root_stands=false slash_amount=50000 victim=Ah3TyjuC3agXQcsYty1VpNBWLRg4DkFWkhugsyoGLUuJ",
+      "root_status_after": "ProvenFalse",
+      "root_ruled_slash": 50000,
+      "root_victim": "Ah3TyjuC3agXQcsYty1VpNBWLRg4DkFWkhugsyoGLUuJ",
+      "stands_ruled": false,
+      "paid_out": 0,
+      "bond_vault_after_ruling": 149040,
+      "victim_balance_after_ruling": 19849040,
+      "ruling_moved_usdc": false
+    },
+    "slash": {
+      "sig": "3CzUi4dssADKACmsnk3t8uyXQZ9qgSoqubrJyw64dRbhH3whSCbauFH4p26gR2RuhKLxYqAh5WD2QXXBp2JTdhkG",
+      "slot": 527191774,
+      "block_time": 1795860309,
+      "instruction": "slash_bond(1795831844)",
+      "destination": "3GuSWoYUdyu3PHHs7M7FijfUGih4ySo2w76puJW9Y2xs",
+      "permissionless": true,
+      "pool_program_signers_required": 0,
+      "fee_payer_and_only_signing_key": "4N2nTJ8WWwDKVoULt9bymaB6XsrB7HP973y8Ebw6tQhV",
+      "payer_is_backend_or_multisig_member": false,
+      "bond_vault": "DoyipWb8ZqbaAgarN2Qdhp2tu9HbUNPVM1eHDtP548cG",
+      "bond_record": "3NRdsizTeHbEq9cE9YZaAM3iwXzs7mTYSUZuXZnVqCWn",
+      "bond_vault_before": 149040,
+      "bond_vault_after": 99040,
+      "bond_record_before": 149040,
+      "bond_record_after": 99040,
+      "victim_balance_before": 19849040,
+      "victim_balance_after": 19899040,
+      "amount_micro_usdc": 50000,
+      "escrow_before": 150960,
+      "escrow_after": 150960,
+      "root_status_after": "Slashed",
+      "bond_slashed_event": "BondSlashed window=1795831844 amount=50000 victim=Ah3TyjuC3agXQcsYty1VpNBWLRg4DkFWkhugsyoGLUuJ bond_after=99040"
+    },
+    "slashed_claim_refusal": {
+      "door": "assisted (backend signs and pays the fee)",
+      "amount_micro_usdc": 100000,
+      "simulated_first": true,
+      "simulation_error": "Err(InstructionError(1, Custom(6015)))",
+      "sig": "4yeTfKsDjVN8k72LmkGZVdypuuCxQX7BZ9uzY2gjZ36KKDKSZE77o3RSQDyaiDzX7MJLpSV4gPjuWEyFhe62LQwh",
+      "slot": 527191834,
+      "block_time": 1795860323,
+      "instruction_error": "InstructionError(1, Custom(6015))",
+      "program_error": "Error Code: RootFrozen. Error Number: 6015. Error Message: Root payouts are frozen — the root is not Active.",
+      "transaction_status": "Error processing Instruction 1: custom program error: 0x177f",
+      "fee_lamports": 5000,
+      "escrow_unchanged": 150960,
+      "victim_ata_unchanged": 19899040,
+      "marker": "FptyfRWHQ1puAi6TPp94FARQwKPQAtJSZxjmKosnJoWP",
+      "marker_created": false,
+      "paid_out": 0,
+      "root_status": "Slashed"
+    },
+    "final_readback": {
+      "slot": 527192269,
+      "root_status": "Slashed",
+      "root_ruled_slash": 50000,
+      "root_victim": "Ah3TyjuC3agXQcsYty1VpNBWLRg4DkFWkhugsyoGLUuJ",
+      "root_total_payout": 100000,
+      "root_paid_out": 0,
+      "escrow_balance": 150960,
+      "bond_balance": 99040,
+      "bond_record_balance": 99040,
+      "victim_usdc_balance": 19899040,
+      "claim_marker_exists": false,
+      "multisig_transaction_index": 13,
+      "pool_paused": false,
+      "program_upgrade_authority": "BhLQqw5rkr3otQoXvJSRjiaNHTgdcgXVkqXv8mwEhhJq",
+      "last_deployed_slot": 527064271,
+      "cross_checked_with_raw_rpc_json": true
     }
   }
 }
