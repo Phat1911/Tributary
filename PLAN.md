@@ -141,19 +141,27 @@ Recorded as AUDIT A-066 (low, ops observation; the next free id is A-067).
    changed: two small inline decoders (base64, base58) keep the standalone
    soak crate's `Cargo.toml` and `Cargo.lock` byte-identical.
 
-**Push state + CI verdict of the pushed head.** `m11/devnet-slash`
-**pushed**, evidence head `81ba51562ad6f4082652b659b2a08f2d01c9ba17` → PR
+**Push state + CI verdict of the pushed heads.** `m11/devnet-slash`
+**pushed**: evidence head `81ba51562ad6f4082652b659b2a08f2d01c9ba17` → PR
 [#4](https://github.com/Phat1911/Tributary/pull/4) (base main; not merged —
 the founder's call). CI verdict of `81ba515`: **GREEN —
 [run 46134374852](https://github.com/Phat1911/Tributary/actions/runs/46134374852)**,
 all five jobs success (Rust fmt/clippy/test dual-DB, Dashboard
 lint+typecheck+build, OpenAI SDK contract J7, Playwright E2E J6/F1,
-cargo-deny). The branch CI ran via the `pull_request` trigger (the push
-trigger covers main + the two doctrine-suite branches only). `main` itself
-is untouched by this session — local and remote `main` are both `1069d44`
-— so this work reaches `main` only when PR #4 is merged. This verdict rides
-a docs-only close-out commit, whose own head's CI is re-checked and
-reported in the session close-out.
+cargo-deny). The first docs-only close-out head
+`47ce8a98b222b3a62914b735b8f601e2c2a29f32`: **GREEN —
+[run 46134870248](https://github.com/Phat1911/Tributary/actions/runs/46134870248)**,
+all five jobs success. The branch CI ran via the `pull_request` trigger
+(the push trigger covers main + the two doctrine-suite branches only).
+**`main`: this session pushed NOTHING to it.** The branch was cut from
+`1069d44`; while the session ran, the founder pushed two README-only
+commits from elsewhere, so `origin/main` is now `0163f5c` — no file overlap
+with this branch, and PR #4 reports `MERGEABLE` (a trial merge is clean).
+This work reaches `main` only when PR #4 is merged. (An earlier wording of
+this paragraph said remote `main` was still `1069d44`; that was written
+without a fresh fetch and is corrected here.) This correction rides a
+second docs-only commit, whose own head's CI is reported in the session
+close-out.
 
 **Fast jump (this session).** `scripts/devnet-soak/src/bin/m11_sync.rs`
 (SAT-2c subcommands `resolve_false`, `slash_bond`, `claim_slashed`,
