@@ -345,7 +345,7 @@ is [`docs/founder-journey-settlement-screen.md`](docs/founder-journey-settlement
 - Open [the slash](https://explorer.solana.com/tx/3CzUi4dssADKAmsHpMnMJMhD5dcJQ6cMxCJmSvPz1tPYt2Cdzf5dFKs3pj2JTdhkG?cluster=devnet): the `slash_bond` instruction needs
   no authority (the transaction's only signer is the fee payer) and moves
   exactly the ruled 50,000 micro-USDC from the bond vault to the victim; and
-  [the claim that followed on the slashed root](https://explorer.solana.com/tx/4yeTfKsDjVN8QwLHDtR4UvTtbhz7cq6Q8q6cVe9VzGjKxDqzJKvSMwVzVYqWjPkSy6Dz8MfLHDmWj4tW1b6jzLjL?cluster=devnet) was refused with `RootFrozen`.
+  [the claim that followed on the slashed root](https://explorer.solana.com/tx/4yeTfKsDjVN8k72LmkGZVdypuuCxQX7BZ9uzY2gjZ36KKDKSZE77o3RSQDyaiDzX7MJLpSV4gPjuWEyFhe62LQwh?cluster=devnet) was refused with `RootFrozen`.
 - Run the settlement rules yourself. On `main`, with the toolchain pinned in
   CI (Agave v4.1.2; a cold build takes well over two minutes):
   `cd programs/pool && cargo-build-sbf --arch v3 && cd ../.. && cargo test -p pool`.
