@@ -342,7 +342,7 @@ is [`docs/founder-journey-settlement-screen.md`](docs/founder-journey-settlement
   root is Active again.
 - Open [the direct claim](https://explorer.solana.com/tx/3bRK6dtnLuyaArVxDq3UMiqUsU18qCMRyjEwj6dKfKXft5Zze2TSK75HQiPQbZ98tgxJtm1LEAdXPJQdyU2ygJ8J?cluster=devnet): the depositor's own key is the fee payer and
   the claim's authority; 100,000 micro-USDC moved from the escrow.
-- Open [the slash](https://explorer.solana.com/tx/3CzUi4dssADKAmsHpMnMJMhD5dcJQ6cMxCJmSvPz1tPYt2Cdzf5dFKs3pj2JTdhkG?cluster=devnet): the `slash_bond` instruction needs
+- Open [the slash](https://explorer.solana.com/tx/3CzUi4dssADKACmsnk3t8uyXQZ9qgSoqubrJyw64dRbhH3whSCbauFH4p26gR2RuhKLxYqAh5WD2QXXBp2JTdhkG?cluster=devnet): the `slash_bond` instruction needs
   no authority (the transaction's only signer is the fee payer) and moves
   exactly the ruled 50,000 micro-USDC from the bond vault to the victim; and
   [the claim that followed on the slashed root](https://explorer.solana.com/tx/4yeTfKsDjVN8k72LmkGZVdypuuCxQX7BZ9uzY2gjZ36KKDKSZE77o3RSQDyaiDzX7MJLpSV4gPjuWEyFhe62LQwh?cluster=devnet) was refused with `RootFrozen`.
@@ -421,8 +421,8 @@ curl -s https://api.devnet.solana.com -X POST -H 'content-type: application/json
 - **Next:** an adversarial audit of the settlement code. Its findings, if
   any, go to [`AUDIT.md`](AUDIT.md) as they arrive.
 - **The demo, in 95 seconds:** [youtu.be/PArKVs8KR2Y](https://youtu.be/PArKVs8KR2Y).
-  A request metered, a settle run, and the eight on-chain receipts above,
-  with captions.
+  A request metered, a settle run, and the on-chain receipts above,
+  with captions baked in.
 - **The pitch video, 2:42:** [youtu.be/CbxVw1Rc3hY](https://youtu.be/CbxVw1Rc3hY).
   Nine slides in order (problem, what exists today, the solution, where to
   see the demo, go to market, why now), with captions; the demo above is
