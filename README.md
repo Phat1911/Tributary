@@ -5,15 +5,16 @@
 [![License: FSL-1.1-ALv2](https://img.shields.io/badge/license-FSL--1.1--ALv2-blue)](LICENSE)
 
 **Governed AI capacity: your team shares one AI key, everyone gets their
-own, and surplus credits can earn, with the money side being built on a Solana
-program.**
+own, and surplus credits can earn, paid out by a Solana program.**
 
 Solana is where the money side goes. A program has been live on devnet
 since 1 November 2026. It holds a USDC escrow, takes and refunds renter
-prepayments, and records deposits as claims minted on the operator's word.
-It holds no funds today, and nothing draws on it yet. Its payout
-instructions (Merkle roots, claims with a proof, a challenge window) are
-this weekend's build, tests first. The rest runs on your own machine:
+prepayments, records deposits as claims minted on the operator's word, and,
+since 28 November, settles payouts: earnings become one Merkle root, a
+depositor claims with a proof, and nothing pays before a challenge window.
+The first root and the first paid claim are on devnet, linked below. The
+escrow holds devnet USDC only, and nothing in the product funds it yet. The
+rest runs on your own machine:
 Tributary is also a self-hosted gateway for teams that share AI capacity.
 Each member gets a personal key. Every request is metered and checked
 before it reaches the provider. Every admin action that changes state lands
@@ -32,9 +33,11 @@ demo: run it locally with the Quickstart below.
 - **A Solana program on devnet, governed by a 2-of-2 multisig** (2-of-3 is
   the planned production posture). A USDC escrow controlled by the program,
   renter prepayments and refunds, and deposits recorded as claims have been
-  live since 1 November 2026. The program can be upgraded only by a 2-of-2
-  multisig vote. Merkle-settled payouts are this event's build, tests first:
-  see [What exists today](#what-exists-today).
+  live since 1 November 2026. Since 28 November it also settles payouts:
+  Merkle roots, claims with a proof, a challenge window, an operator bond.
+  The upgrade that added them passed the 2-of-2 multisig, and a claim has
+  paid on devnet. The program can be upgraded only by a multisig vote. See
+  [What exists today](#what-exists-today).
 - **Surplus credits can earn.** A pool of kind `root` accepts depositor
   credits. Each request's cost is metered to the micro-unit against the
   depositor whose credits burned, and posted to the books when the window
@@ -60,9 +63,9 @@ people who do not trust each other.
 
 - **Neither side should hold the books or the money.** An operator who runs
   the gateway controls its database, so it could alter what it owes. That is
-  why the money, and with this weekend's build the payout records, belong in
-  a Solana program rather than in the operator's database. Today the escrow
-  is there; the payout records are not yet.
+  why the money and the payout records belong in a Solana program rather
+  than in the operator's database. Today the escrow, the roots and the paid
+  claims are all on devnet.
 - **Nobody can move another person's funds, and no single key can upgrade
   the program.** The escrow is a token account controlled by the program. A
   prepayment is signed by the paying key together with the operator's backend
@@ -71,8 +74,8 @@ people who do not trust each other.
   until M10. A refund goes only to the renter who prepaid, up to what that
   renter's on-chain record allows. The upgrade authority is the vault of a 2-of-2
   multisig: two approvals are needed to change the program, and the upgrade
-  that put today's code in place is
-  [on-chain](https://explorer.solana.com/tx/576QrbHPxvDB3P63nHedFA5hDqVBXJchzkauEvrpAJzHUyyDCnfd6KhXaRw2gePS7RF2NQh2eM5qsgj6wwCdeaP5?cluster=devnet).
+  that put the settlement code in place, on 28 November, is
+  [on-chain](https://explorer.solana.com/tx/37JFtEwYtSxHguzvGYjTv97vyMwR7ZSbyXddwFte6cgwjtwEcjn8r8CTsP6wTsCrZM4rm2v1mTEwZR5DvNeZ7KHN?cluster=devnet).
 - **The chain does money; servers do speed.** No AI request ever routes
   on-chain. Metering, quotas and leak detection stay off-chain, where they
   are fast and keep usage data private; Solana carries only the money and
@@ -80,12 +83,14 @@ people who do not trust each other.
 - **Payouts are settled, not negotiated.** Earnings are merkleized into one
   root; a depositor claims with a proof; payouts wait for a challenge
   window; a root can never pay more than it declares (SPEC D45). These rules
-  exist today as twelve failing tests, written before the code.
+  were written as twelve failing tests before any code existed. Since
+  28 November the code is live on devnet and the tests are green.
 
 ### The program, precisely
 
-Nine instructions, in `programs/pool/src/lib.rs`, each with its own tests in
-`programs/pool/tests`:
+Fifteen instructions, in `programs/pool/src/lib.rs` (the interface is
+tracked as [`programs/pool/idl/pool.json`](programs/pool/idl/pool.json)),
+each with its own tests in `programs/pool/tests`:
 
 | Instruction | Who signs | What it does |
 |---|---|---|
@@ -96,15 +101,21 @@ Nine instructions, in `programs/pool/src/lib.rs`, each with its own tests in
 | `refund_renter` | the renter, or the backend key; the program signs the transfer | USDC back to that renter only, capped by the renter's record |
 | `pause`, `resume` | the admin authority, the multisig's vault | halt or restore every movement of funds |
 | `set_backend_authority`, `set_admin_authority` | the admin authority | rotates the operator and admin keys |
+| `fund_bond` | the backend key (the operator), which also pays | USDC from the operator's own wallet into a bond vault; the bond backs every root the operator posts |
+| `post_root` | the backend key | records a window's Merkle root and its total, stamped with the slot; refuses a total above the escrow's balance, and a second root for the same window |
+| `claim` | the depositor, or the backend key; a payer covers the claim marker's rent | checks the proof against the root, waits for the challenge window, pays the leaf's depositor from the escrow and adds the amount to the root's `paid_out` |
+| `challenge` | any key | freezes a root's payouts until the multisig rules; only inside the challenge window |
+| `resolve_challenge` | the admin authority, the multisig's vault | rules a challenged root: it stands (the rest of the window is waived), or it is false, with an exact slash and its victim recorded |
+| `slash_bond` | no signer | executes a ruled slash from the bond vault to the recorded victim |
 
-Two facts a reader should not have to dig for. The escrow currently holds
-**0 USDC**, and nothing yet draws on it: wiring prepaid escrow funds to
-served requests is an open earlier milestone, M10. And a deposit on-chain is a
-claim record the operator attests to; the chain verifies who signed, not
-what the deposit is worth. What this weekend's build gives a depositor is a
-check on it: a payout root that can be checked against the published payouts,
-and a challenge window before anything is paid. Addresses and evidence:
-[What exists today](#what-exists-today).
+Three facts a reader should not have to dig for. The escrow holds **devnet
+USDC only**; after the first paid claim it holds 0.050960, a renter's
+unspent prepayment, and nothing in the product funds it for payouts yet
+(the open earlier milestone, M10). A deposit on-chain is a claim record the
+operator attests to: the chain verifies who signed, not what the deposit is
+worth. And what a depositor has is a check on it: a payout root that can be
+checked against the published payouts, and a challenge window before anything
+is paid. Addresses and evidence: [What exists today](#what-exists-today).
 
 ## The problem it solves
 
@@ -139,7 +150,7 @@ the OpenAI-compatible API without a wallet.
 
 ## How it works
 
-![Architecture: governance on your machine, settlement on Solana devnet; the dashed Merkle payout path is tests only](docs/images/architecture.png)
+![Architecture: governance on your machine, settlement on Solana devnet; the Merkle payout path is live on devnet](docs/images/architecture.png)
 
 ### Off the chain
 
@@ -160,9 +171,9 @@ the OpenAI-compatible API without a wallet.
 ### On the chain
 
 1. The payouts are merkleized and the **root is posted to the Solana
-   program**. A depositor claims with a proof after a challenge window.
-   *This step is being built now: its twelve rules already exist as failing
-   tests (see [What exists today](#what-exists-today)).*
+   program**. A depositor claims with a proof after a challenge window, and
+   a root can never pay more than it declares. Live on devnet since
+   28 November: [a claim paid](https://explorer.solana.com/tx/278rWKHN8aSEr26Fmbwe9H4CRBXWeU3e6iWjBGVZNj3fuzseHiNiuCtANDowtyvmg1CkkwbskBRoZGNCRuywMpJR?cluster=devnet) 149,040 micro-USDC to a depositor.
 
 A reproducible run, from the no-key walkthrough
 ([`docs/founder-journey-settlement-screen.md`](docs/founder-journey-settlement-screen.md),
@@ -187,7 +198,7 @@ run (distributable $0.0378, fee $0.003024, paid out $0.034776):
 | Gateway, organisation pools, dashboard (V1) | Released as v0.1.4 | [Release](https://github.com/Phat1911/Tributary/releases), [CI](https://github.com/Phat1911/Tributary/actions/workflows/ci.yml), the [Quickstart](#try-it) below |
 | Depositor pools, double-entry ledger, settle API | Experimental. In v0.1.4 in a pre-audit form; the audited settle (idempotent, posting to the books) is on `main` only, not yet in the release image | `crates/gateway`, `crates/ledger`; the [settlement journey](docs/founder-journey-settlement-screen.md) walks through the public API; the audit and fix log is in [`PLAN.md`](PLAN.md) (2026-11-18 and 2026-11-19) |
 | Settlement screen | On `main` after v0.1.4; ships in the next release | Screenshot above; `apps/dashboard/app/org/settlement` |
-| Merkle-settled payouts: root, claim, challenge window, payout cap | In progress: twelve rules written as failing tests, implementation next | [The tests](https://github.com/Phat1911/Tributary/blob/m11/doctrine-suite/programs/pool/tests/m11_doctrine.rs) on branch `m11/doctrine-suite`, and [their CI run, red by design](https://github.com/Phat1911/Tributary/actions/runs/45791887787) |
+| Merkle-settled payouts: bond, root, claim, challenge window, payout cap | **Live on devnet since 2026-11-28**, built tests-first: twelve rules as failing tests on 26 November, implemented to 54 of 54 green on 27 November, upgraded through the 2-of-2 multisig, and a claim paid on 28 November | [The paid claim](https://explorer.solana.com/tx/278rWKHN8aSEr26Fmbwe9H4CRBXWeU3e6iWjBGVZNj3fuzseHiNiuCtANDowtyvmg1CkkwbskBRoZGNCRuywMpJR?cluster=devnet), [the 2-of-2 upgrade](https://explorer.solana.com/tx/37JFtEwYtSxHguzvGYjTv97vyMwR7ZSbyXddwFte6cgwjtwEcjn8r8CTsP6wTsCrZM4rm2v1mTEwZR5DvNeZ7KHN?cluster=devnet), the [devnet report](docs/devnet-m11.md), [`programs/pool/tests/m11_doctrine.rs`](programs/pool/tests/m11_doctrine.rs) |
 
 ![Review queue: leak signals with a severity and an action for each](docs/images/review-queue.png)
 
@@ -288,13 +299,16 @@ is [`docs/founder-journey-settlement-screen.md`](docs/founder-journey-settlement
 
 - Open the [program account on devnet](https://explorer.solana.com/address/9pEmyxftdRUZV2iw6ZzCNgZz9QygG53i7APNaWcEHvjX?cluster=devnet):
   *Upgradeable: yes*, and *Upgrade authority* `BhLQqw…`, the multisig's vault.
-- Open the [upgrade transaction](https://explorer.solana.com/tx/576QrbHPxvDB3P63nHedFA5hDqVBXJchzkauEvrpAJzHUyyDCnfd6KhXaRw2gePS7RF2NQh2eM5qsgj6wwCdeaP5?cluster=devnet):
-  the Squads program executes it, and the vault signs the inner *Upgrade*.
-- Run the settlement rules yourself. On branch `m11/doctrine-suite`, with
-  the toolchain pinned in CI (Agave v4.1.2; a cold build takes well over two
-  minutes):
+- Open [the paid claim](https://explorer.solana.com/tx/278rWKHN8aSEr26Fmbwe9H4CRBXWeU3e6iWjBGVZNj3fuzseHiNiuCtANDowtyvmg1CkkwbskBRoZGNCRuywMpJR?cluster=devnet): under *Token Balance Changes*, the
+  escrow `Dhp3t3…` loses 0.14904 USDC and the depositor's token account gains
+  exactly that.
+- Open [the upgrade that added settlements](https://explorer.solana.com/tx/37JFtEwYtSxHguzvGYjTv97vyMwR7ZSbyXddwFte6cgwjtwEcjn8r8CTsP6wTsCrZM4rm2v1mTEwZR5DvNeZ7KHN?cluster=devnet): proposal 11 on the
+  [multisig](https://explorer.solana.com/address/GuSeFfFkdKtjkubeLUEeBHW5pfHSJctGnz8AFk7xrCk5?cluster=devnet), approved by two members and executed by the Squads
+  program, with the vault signing the inner *Upgrade*.
+- Run the settlement rules yourself. On `main`, with the toolchain pinned in
+  CI (Agave v4.1.2; a cold build takes well over two minutes):
   `cd programs/pool && cargo-build-sbf --arch v3 && cd ../.. && cargo test -p pool`.
-  Until the implementation lands, the twelve rule-named tests fail.
+  All 54 program tests pass, the twelve rule-named tests among them.
 
 ## Built at Dev3pack × DSUC (Da Nang, 27–29 November 2026)
 
@@ -307,9 +321,25 @@ devnet transactions.
   ([`1f12408`](https://github.com/Phat1911/Tributary/commit/1f12408)) and
   the twelve settlement rules as failing tests
   ([`2bcd448`](https://github.com/Phat1911/Tributary/commit/2bcd448)).
-- **During the event (27–29 November):** in progress. No Merkle root has
-  been posted on devnet yet; receipts (commits, CI runs, transactions) will
-  be listed here as each part lands.
+- **27 November, tests to green.** The six settlement instructions and
+  SHA-256 by the `sol_sha256` syscall in [`d611b9f`](https://github.com/Phat1911/Tributary/commit/d611b9f); two
+  test-construction bugs found by the implementation session and fixed only
+  on the founder's ruling in [`5420044`](https://github.com/Phat1911/Tributary/commit/5420044); the IDL tracked in
+  [`a912a7a`](https://github.com/Phat1911/Tributary/commit/a912a7a); merged to `main` in [`02cbac8`](https://github.com/Phat1911/Tributary/commit/02cbac8),
+  [CI green](https://github.com/Phat1911/Tributary/actions/runs/46091883349): 54 of 54 program tests.
+- **28 November, on devnet.** The program upgraded through the 2-of-2
+  multisig: proposal 11, approved by two members, executed in
+  [`37JFtEwY…`](https://explorer.solana.com/tx/37JFtEwYtSxHguzvGYjTv97vyMwR7ZSbyXddwFte6cgwjtwEcjn8r8CTsP6wTsCrZM4rm2v1mTEwZR5DvNeZ7KHN?cluster=devnet) at slot 527064271, the authority still the vault.
+  Then a real settle run with the figure from the recorded demo: a renter
+  prepaid 0.20 USDC, the operator bonded 0.14904 USDC, [a root was
+  posted](https://explorer.solana.com/tx/rCCt6PWnthZxrkkHo9DgmvTishS9QfgWEa7Va6enug39wowTpwVNwXnuPoViy1qNS6e8qSneaywfNqjkfmf3TKR?cluster=devnet) for 149,040 micro-USDC, and after the 100-slot window
+  [a claim paid](https://explorer.solana.com/tx/278rWKHN8aSEr26Fmbwe9H4CRBXWeU3e6iWjBGVZNj3fuzseHiNiuCtANDowtyvmg1CkkwbskBRoZGNCRuywMpJR?cluster=devnet) exactly 149,040. Every signature is in
+  [`docs/devnet-m11.md`](docs/devnet-m11.md); the tooling is on `main` since
+  [`c161463`](https://github.com/Phat1911/Tributary/commit/c161463), [CI green](https://github.com/Phat1911/Tributary/actions/runs/46101579399).
+- **The red run first:** [the twelve rules failing before any code
+  existed](https://github.com/Phat1911/Tributary/actions/runs/45791887787), 26 November.
+- **Next:** an adversarial audit of the settlement code. Its findings, if
+  any, go to [`AUDIT.md`](AUDIT.md) as they arrive.
 
 ## Security and known limits
 
@@ -333,17 +363,25 @@ Stated limits, as of this writing:
   reserve estimate** (A-062). The founder has ruled that an HTTP-error
   answer must not burn the depositor's credits; the floor stays for
   successful answers that report no usage. The fix is scheduled with A-061.
-- **Money today is off-chain.** Deposits and earnings are micro-USD book
-  entries. On devnet a deposit is a claim record (SPEC D40) and the vault
-  holds renter prepayments only; nothing yet funds it for payouts. The
-  program fixes the unit, one micro-USD is one USDC base unit, with no
-  conversion.
-- **The challenge design is settled, but it is tests only.** SPEC D45: a
-  challenge freezes a root's payouts until the multisig rules, and a root
-  can never pay more than it declares. The window length is still a
-  constant that must become a parameter before any mainnet use.
-- **The Merkle payout rules are tests, not code,** until the implementation
-  lands on `main`.
+- **On-chain money is devnet money.** Deposits and earnings are micro-USD
+  book entries. On devnet a deposit is a claim record (SPEC D40); the escrow
+  holds renter prepayments only, and nothing in the product funds it for
+  payouts yet (M10). The program fixes the unit, one micro-USD is one USDC
+  base unit, with no conversion.
+- **The settlement code is one day old: proven by its tests, not yet by an
+  adversary.** Its twelve rules are green and a claim has paid on devnet;
+  the adversarial audit is the next step and its findings will be public in
+  `AUDIT.md`. Gaps its own builder states: only `fund_bond` respects the
+  pause switch; `resolve_challenge` refuses an unchallenged root, which no
+  test pins; a slash is capped by the bond as it stood when the root was
+  posted; any key may challenge, so one key can freeze a root's payouts
+  until the multisig rules. The window is a fixed 100-slot constant,
+  sized for a demo, and must become a parameter before any mainnet use.
+- **What the devnet run did not exercise.** The paid claim used the assisted
+  door (the backend opened it for the depositor); the direct door, a
+  challenge and a slash are proven by the local suite, not re-run on devnet.
+  In that run the renter and the depositor were one custodial key, as in the
+  November soak.
 - **The program is on devnet only.** It has no on-chain `security.txt` and
   no verified build yet.
 - **The challenge window is a fixed 100-slot constant,** sized for a demo.
@@ -391,6 +429,7 @@ official provider is the right answer for those.
 | [`docs/pilot-support.md`](docs/pilot-support.md) | "It broke" diagnostics: healthz → logs → audit → review queue |
 | [`docs/founder-journey-settlement-screen.md`](docs/founder-journey-settlement-screen.md) | Depositor pools, the settle API and the settlement screen, end to end |
 | [`docs/devnet-soak-m8.md`](docs/devnet-soak-m8.md) | The live devnet rehearsal: deploy, multisig hand-over, refused single-key upgrade, upgrade by 2-of-2 vote |
+| [`docs/devnet-m11.md`](docs/devnet-m11.md) | Settlements on devnet: the 2-of-2 upgrade, a root posted, a claim paid, every signature linked |
 | [`SPEC.md`](SPEC.md) · [`PLAN.md`](PLAN.md) · [`AUDIT.md`](AUDIT.md) | Rules and roadmap · status log · every finding |
 | [`SECURITY.md`](SECURITY.md) · [`CONTRIBUTING.md`](CONTRIBUTING.md) | Private disclosure · conventions and dev setup |
 | [Pilot feedback](https://github.com/Phat1911/Tributary/issues/new?template=pilot-feedback.yml) | Running a pilot? Tell us what worked and what broke |
