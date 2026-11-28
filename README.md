@@ -165,6 +165,289 @@ lawful, which do not exist today. AI agents feel the problem most: an
 agent is simply a member, with its own key and quota, calling the
 OpenAI-compatible API without a wallet.
 
+## How it works
+
+![Architecture: governance on your machine, settlement on Solana devnet; the Merkle payout path is live on devnet](docs/images/architecture.png)
+
+### Off the chain
+
+1. A member or an agent calls the gateway with **their own pool key**, using
+   the OpenAI-compatible API.
+2. The gateway **meters the request, checks quotas and watches for leaks**
+   before any upstream call. It then forwards to the provider with a
+   depositor's key.
+3. The cost of the request is **metered to the micro-unit** against the
+   depositor whose credits burned.
+4. At **settle**, the consumed capacity is posted to the **double-entry
+   ledger**, and the books say exactly what each depositor earned: the burn
+   minus an 8% operator fee. A window is settled once and cannot be paid
+   twice.
+5. Every admin action that changes state is written to the **append-only
+   audit log**.
+
+### On the chain
+
+1. The payouts are merkleized and the **root is posted to the Solana
+   program**. A depositor claims with a proof after a challenge window, and
+   a root can never pay more than it declares. Live on devnet since
+   28 November: [a claim paid](https://explorer.solana.com/tx/278rWKHN8aSEr26Fmbwe9H4CRBXWeU3e6iWjBGVZNj3fuzseHiNiuCtANDowtyvmg1CkkwbskBRoZGNCRuywMpJR?cluster=devnet) 149,040 micro-USDC to a depositor; later that day, after a
+   challenge by a key with no role was [overruled by the multisig](https://explorer.solana.com/tx/Nwg7BhMMmJ2iHSF6xjMJ4WYPyzpP2xzWh9Keqj3zUfH1ZUB57ZfVgeDX6UsE2ZhTx4W6BYT8WWocT11s4ckwEih?cluster=devnet), [the depositor
+   claimed with their own key](https://explorer.solana.com/tx/3bRK6dtnLuyaArVxDq3UMiqUsU18qCMRyjEwj6dKfKXft5Zze2TSK75HQiPQbZ98tgxJtm1LEAdXPJQdyU2ygJ8J?cluster=devnet).
+
+A reproducible run, from the no-key walkthrough
+([`docs/founder-journey-settlement-screen.md`](docs/founder-journey-settlement-screen.md),
+Part B): two requests against the repository's mock upstream burn **2,700
+micro-USD** each, **5,400** in total. The settle run returns an operator fee
+of **432** and pays out **4,968**, and the same two figures appear on the
+settlement screen and in the ledger rows. (This version prices every token
+at a flat 150 micro-USD; the provider's real price table is not wired in
+yet.)
+
+The settlement screen, with a five-depositor root pool after one 8% settle
+run (distributable $0.0378, fee $0.003024, paid out $0.034776):
+
+![The settlement screen: each depositor's contributed, burned and earned, and the result of a settle run](docs/images/settlement-screen.png)
+
+## What exists today
+
+| Part | State | Evidence |
+|---|---|---|
+| Solana program: escrow vault, deposits, renter prepayment | Live on devnet since 2026-11-01 | [Program account](https://explorer.solana.com/address/9pEmyxftdRUZV2iw6ZzCNgZz9QygG53i7APNaWcEHvjX?cluster=devnet), [2-of-2 upgrade transaction](https://explorer.solana.com/tx/576QrbHPxvDB3P63nHedFA5hDqVBXJchzkauEvrpAJzHUyyDCnfd6KhXaRw2gePS7RF2NQh2eM5qsgj6wwCdeaP5?cluster=devnet), [soak report](docs/devnet-soak-m8.md) |
+| Adversarial audits | The escrow program was audited on 2026-11-02 and depositor mode on 2026-11-18 (eight findings); their findings were fixed or formally accepted (2026-11-02 and 2026-11-19); one residual raised since is open (A-061) | [`AUDIT.md`](AUDIT.md), [threat model](docs/threat-model.md) |
+| Gateway, organisation pools, dashboard (V1) | Released as v0.1.4 | [Release](https://github.com/Phat1911/Tributary/releases), [CI](https://github.com/Phat1911/Tributary/actions/workflows/ci.yml), the [Quickstart](#try-it) below |
+| Depositor pools, double-entry ledger, settle API | Experimental. In v0.1.4 in a pre-audit form; the audited settle (idempotent, posting to the books) is on `main` only, not yet in the release image | `crates/gateway`, `crates/ledger`; the [settlement journey](docs/founder-journey-settlement-screen.md) walks through the public API; the audit and fix log is in [`PLAN.md`](PLAN.md) (2026-11-18 and 2026-11-19) |
+| Settlement screen | On `main` after v0.1.4; ships in the next release | Screenshot above; `apps/dashboard/app/org/settlement` |
+| Merkle-settled payouts: bond, root, claim, challenge window, payout cap | **Live on devnet since 2026-11-28**, built tests-first: twelve rules as failing tests on 26 November, implemented to 54 of 54 green on 27 November, upgraded through the 2-of-2 multisig; and, on 28 November, a claim paid, an outside key's challenge, a refused claim, a 2-of-2 ruling and a direct-door claim | [The paid claim](https://explorer.solana.com/tx/278rWKHN8aSEr26Fmbwe9H4CRBXWeU3e6iWjBGVZNj3fuzseHiNiuCtANDowtyvmg1CkkwbskBRoZGNCRuywMpJR?cluster=devnet), [the challenge](https://explorer.solana.com/tx/2GfqoxhMYdZkEH5q72zwWfVnDUCTvETmSHvsJFwT4PTMqREyPhVUkjrJXPx2PwNcuDywomihUWsysmu7VHELj4D6?cluster=devnet), [the ruling](https://explorer.solana.com/tx/Nwg7BhMMmJ2iHSF6xjMJ4WYPyzpP2xzWh9Keqj3zUfH1ZUB57ZfVgeDX6UsE2ZhTx4W6BYT8WWocT11s4ckwEih?cluster=devnet), [the direct claim](https://explorer.solana.com/tx/3bRK6dtnLuyaArVxDq3UMiqUsU18qCMRyjEwj6dKfKXft5Zze2TSK75HQiPQbZ98tgxJtm1LEAdXPJQdyU2ygJ8J?cluster=devnet), [the 2-of-2 upgrade](https://explorer.solana.com/tx/37JFtEwYtSxHguzvGYjTv97vyMwR7ZSbyXddwFte6cgwjtwEcjn8r8CTsP6wTsCrZM4rm2v1mTEwZR5DvNeZ7KHN?cluster=devnet), the [devnet report](docs/devnet-m11.md), [`programs/pool/tests/m11_doctrine.rs`](programs/pool/tests/m11_doctrine.rs) |
+
+![Review queue: leak signals with a severity and an action for each](docs/images/review-queue.png)
+
+![The program on Solana devnet: upgradeable only through the multisig's vault](docs/images/onchain-devnet.png)
+
+The program's upgrade authority is `BhLQqw5rkr3otQoXvJSRjiaNHTgdcgXVkqXv8mwEhhJq`,
+the first vault of a [2-of-2 Squads multisig](https://explorer.solana.com/address/GuSeFfFkdKtjkubeLUEeBHW5pfHSJctGnz8AFk7xrCk5?cluster=devnet).
+No single key can upgrade it.
+
+## Try it
+
+> **Which terminal?** Run these in a **POSIX shell**: Linux, macOS, or WSL on
+> Windows (enable Docker Desktop's WSL integration, check with `docker ps`),
+> and paste the block as-is. **Windows PowerShell** works line by line
+> instead: split the first line at `&&`, use `Copy-Item deploy\.env.example
+> .env`, drop the trailing `\` continuations, and generate the key in WSL or
+> Git Bash (`openssl rand -hex 32`). CMD is not supported.
+
+```sh
+git clone https://github.com/Phat1911/Tributary.git && cd Tributary
+cp deploy/.env.example .env
+echo "TRIBUTARY_MASTER_KEY=$(openssl rand -hex 32)" >> .env   # REQUIRED — your vault key; keep it secret
+docker compose up -d          # prefers the prebuilt image; builds from source only as fallback
+docker exec -it \
+  -e TRIBUTARY_DATABASE_URL=sqlite:///data/tributary.db \
+  -e TRIBUTARY_ADMIN_PASSWORD="$(openssl rand -base64 18)" \
+  tributary tributary create-admin --email you@example.com
+# (--password '<secret>' on the command line also works, but it lands in
+#  your shell history; the env var is the documented path)
+```
+
+```sh
+# compose-free equivalent (same container, same volume, shipped image):
+docker run -d --name tributary -p 8111:8080 --env-file .env \
+  -v tributary-data:/data --restart unless-stopped ghcr.io/phat1911/tributary:latest
+```
+
+**Sign in at http://localhost:8111.** Time to first login is about **2
+minutes with the prebuilt image** (the first `up` pulls about 40 MB), or
+**10–15 minutes if it builds from source** (a cold Rust and dashboard
+compile).
+
+**The `:latest` image is release v0.1.4.** It contains depositor pools in
+their pre-audit form, but not the audited settle or the settlement screen;
+those are on `main` and need an image built from it.
+
+> **If `docker compose up -d` says `unknown shorthand flag: 'd'`:** the
+> compose plugin is missing. Fix: Docker Desktop → Settings → Resources →
+> **WSL Integration** on, or `apt install docker-compose-plugin`; or use the
+> compose-free command above.
+
+> **If you see `permission denied ... /var/run/docker.sock`:** your user is
+> not in the docker group. Fix: `sudo usermod -aG docker $USER && newgrp
+> docker` (or restart WSL), then check that `docker ps` runs without sudo.
+> WSL-native Docker also needs `sudo service docker start`.
+
+> **Behind a reverse proxy:** set `TRIBUTARY_TRUSTED_PROXIES` to that
+> proxy's CIDR. IP-derived controls (allowlists, sharing detection) are only
+> sound then; without it, X-Forwarded-For is ignored and the socket address
+> is used. Details: [`deploy/README.md`](deploy/README.md).
+
+> **Provider keys (OpenAI and Gemini):** pools accept keys from any
+> OpenAI-compatible endpoint. A Google AI Studio (Gemini) key goes in with
+> provider *Gemini* and base URL
+> `https://generativelanguage.googleapis.com/v1beta/openai`. Member traffic
+> is then metered, quota-checked and leak-watched exactly like
+> OpenAI-routed traffic. Tributary speaks the OpenAI-compatible wire format
+> on all pools; it is not a format converter, and the native Gemini API
+> shape is not translated. The free tier of AI Studio is rate-limited: fine
+> for demos and pilots, but expect upstream 429s under load.
+
+### See the settlement
+
+Sign in with any admin account, including the one `create-admin` made
+(`POST /api/v1/auth/login`), keep the returned token in `TOKEN`, create an
+organisation (`POST /api/v1/orgs` with `{"name":"…","slug":"…"}`) and use
+its `id` below:
+
+```sh
+API=http://localhost:8111/api/v1
+# 1. a root pool, then a deposit (any OpenAI-compatible endpoint and its key)
+curl -s -X POST $API/pools -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
+  -d '{"org_id":"<org id>","name":"credit-pool","kind":"root","model_allowlist":["gpt-4o-mini"]}'
+curl -s -X POST $API/pools/<pool id>/deposits -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
+  -d '{"provider":"openai","key":"<a provider key>","base_url":"https://api.openai.com/v1","model_families":["gpt-4o-mini"],"contributed_micros":5000000}'
+# 2. send a request with a member key (the dashboard issues one), then read the books
+curl -s $API/pools/<pool id>/bucket-positions -H "Authorization: Bearer $TOKEN"
+# 3. settle a window (here: the last hour) with an 8% fee
+curl -s -X POST $API/pools/<pool id>/settle -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
+  -d "{\"from_ms\":$(( ($(date +%s) - 3600) * 1000 )),\"to_ms\":$(date +%s)000,\"fee_bps\":800}"
+```
+
+On an image built from `main`, the dashboard shows the same books under
+**Settlement**. A complete walkthrough that needs no real key (it uses the repository's mock upstream)
+is [`docs/founder-journey-settlement-screen.md`](docs/founder-journey-settlement-screen.md).
+
+### Verify the on-chain part yourself
+
+- Open the [program account on devnet](https://explorer.solana.com/address/9pEmyxftdRUZV2iw6ZzCNgZz9QygG53i7APNaWcEHvjX?cluster=devnet):
+  *Upgradeable: yes*, and *Upgrade authority* `BhLQqw…`, the multisig's vault.
+- Open [the paid claim](https://explorer.solana.com/tx/278rWKHN8aSEr26Fmbwe9H4CRBXWeU3e6iWjBGVZNj3fuzseHiNiuCtANDowtyvmg1CkkwbskBRoZGNCRuywMpJR?cluster=devnet): under *Token Balance Changes*, the
+  escrow `Dhp3t3…` loses 0.14904 USDC and the depositor's token account gains
+  exactly that.
+- Open [the upgrade that added settlements](https://explorer.solana.com/tx/37JFtEwYtSxHguzvGYjTv97vyMwR7ZSbyXddwFte6cgwjtwEcjn8r8CTsP6wTsCrZM4rm2v1mTEwZR5DvNeZ7KHN?cluster=devnet): proposal 11 on the
+  [multisig](https://explorer.solana.com/address/GuSeFfFkdKtjkubeLUEeBHW5pfHSJctGnz8AFk7xrCk5?cluster=devnet), approved by two members and executed by the Squads
+  program, with the vault signing the inner *Upgrade*.
+- Open [the challenge](https://explorer.solana.com/tx/2GfqoxhMYdZkEH5q72zwWfVnDUCTvETmSHvsJFwT4PTMqREyPhVUkjrJXPx2PwNcuDywomihUWsysmu7VHELj4D6?cluster=devnet): a key that is neither the operator nor a
+  multisig member froze the second root, inside its window.
+- Open [the claim that was refused](https://explorer.solana.com/tx/5VhiGct8FVddSNy76HtA1yUUTnoA2ZtBhzzrUrZ7Peg54Lcma8bbg5SaUpsebfuQtMzHADgyVVcFftkvykjszFzd?cluster=devnet): the transaction failed on purpose
+  with `RootFrozen` (6015), and no token balance moved.
+- Open [the ruling](https://explorer.solana.com/tx/Nwg7BhMMmJ2iHSF6xjMJ4WYPyzpP2xzWh9Keqj3zUfH1ZUB57ZfVgeDX6UsE2ZhTx4W6BYT8WWocT11s4ckwEih?cluster=devnet): proposal 12, approved by two members, executed; the
+  root is Active again.
+- Open [the direct claim](https://explorer.solana.com/tx/3bRK6dtnLuyaArVxDq3UMiqUsU18qCMRyjEwj6dKfKXft5Zze2TSK75HQiPQbZ98tgxJtm1LEAdXPJQdyU2ygJ8J?cluster=devnet): the depositor's own key is the fee payer and
+  the claim's authority; 100,000 micro-USDC moved from the escrow.
+- Run the settlement rules yourself. On `main`, with the toolchain pinned in
+  CI (Agave v4.1.2; a cold build takes well over two minutes):
+  `cd programs/pool && cargo-build-sbf --arch v3 && cd ../.. && cargo test -p pool`.
+  All 54 program tests pass, the twelve rule-named tests among them.
+
+## Built at Dev3pack × DSUC (Da Nang, 27–29 November 2026)
+
+Tributary is a submitted project at the Dev3pack × DSUC Build Station
+hackathon. The event's work is on Solana: Merkle-settled payouts for AI
+credit pools, built tests-first. Receipts are listed here as they land: commits, CI runs and
+devnet transactions.
+
+- **Before the event (26 November):** the settlement screen
+  ([`1f12408`](https://github.com/Phat1911/Tributary/commit/1f12408)) and
+  the twelve settlement rules as failing tests
+  ([`2bcd448`](https://github.com/Phat1911/Tributary/commit/2bcd448)).
+- **27 November, tests to green.** The six settlement instructions and
+  SHA-256 by the `sol_sha256` syscall in [`d611b9f`](https://github.com/Phat1911/Tributary/commit/d611b9f); two
+  test-construction bugs found by the implementation session and fixed only
+  on the founder's ruling in [`5420044`](https://github.com/Phat1911/Tributary/commit/5420044); the IDL tracked in
+  [`a912a7a`](https://github.com/Phat1911/Tributary/commit/a912a7a); merged to `main` in the night of 27–28 November,
+  [`02cbac8`](https://github.com/Phat1911/Tributary/commit/02cbac8),
+  [CI green](https://github.com/Phat1911/Tributary/actions/runs/46091883349): 54 of 54 program tests.
+- **28 November, on devnet.** The program upgraded through the 2-of-2
+  multisig: proposal 11, approved by two members, executed in
+  [`37JFtEwY…`](https://explorer.solana.com/tx/37JFtEwYtSxHguzvGYjTv97vyMwR7ZSbyXddwFte6cgwjtwEcjn8r8CTsP6wTsCrZM4rm2v1mTEwZR5DvNeZ7KHN?cluster=devnet) at slot 527064271, the authority still the vault.
+  Then a settle run driven by the recorded demo's figure (a one-leaf
+  payouts file written by hand; the glue does not yet read the gateway's
+  settle output): a renter prepaid 0.20 USDC, the operator bonded 0.14904 USDC, [a root was
+  posted](https://explorer.solana.com/tx/rCCt6PWnthZxrkkHo9DgmvTishS9QfgWEa7Va6enug39wowTpwVNwXnuPoViy1qNS6e8qSneaywfNqjkfmf3TKR?cluster=devnet) for 149,040 micro-USDC, and after the 100-slot window
+  [a claim paid](https://explorer.solana.com/tx/278rWKHN8aSEr26Fmbwe9H4CRBXWeU3e6iWjBGVZNj3fuzseHiNiuCtANDowtyvmg1CkkwbskBRoZGNCRuywMpJR?cluster=devnet) exactly 149,040. Every signature is in
+  [`docs/devnet-m11.md`](docs/devnet-m11.md); the tooling is on `main` since
+  [`c161463`](https://github.com/Phat1911/Tributary/commit/c161463), [CI green](https://github.com/Phat1911/Tributary/actions/runs/46101579399).
+- **The red run first:** [the twelve rules failing before any code
+  existed](https://github.com/Phat1911/Tributary/actions/runs/45791887787), 26 November.
+- **28 November, the other half.** [A second root was posted](https://explorer.solana.com/tx/5JZUU6tdn7xdPh7XkhwrZYd7BMJYVH7tFA1KVy7hDE1YyJGk91rgY3SpvPyQH8Gcyw4BVM3i1Y2rHGRhjACZNVfS?cluster=devnet) for
+  100,000 micro-USDC; [a key with no role challenged it](https://explorer.solana.com/tx/2GfqoxhMYdZkEH5q72zwWfVnDUCTvETmSHvsJFwT4PTMqREyPhVUkjrJXPx2PwNcuDywomihUWsysmu7VHELj4D6?cluster=devnet) inside the
+  window; [a claim against the frozen root was refused](https://explorer.solana.com/tx/5VhiGct8FVddSNy76HtA1yUUTnoA2ZtBhzzrUrZ7Peg54Lcma8bbg5SaUpsebfuQtMzHADgyVVcFftkvykjszFzd?cluster=devnet) with
+  `RootFrozen`; the [2-of-2 multisig ruled that the root stands](https://explorer.solana.com/tx/Nwg7BhMMmJ2iHSF6xjMJ4WYPyzpP2xzWh9Keqj3zUfH1ZUB57ZfVgeDX6UsE2ZhTx4W6BYT8WWocT11s4ckwEih?cluster=devnet)
+  (proposal 12); and [the depositor claimed with their own key](https://explorer.solana.com/tx/3bRK6dtnLuyaArVxDq3UMiqUsU18qCMRyjEwj6dKfKXft5Zze2TSK75HQiPQbZ98tgxJtm1LEAdXPJQdyU2ygJ8J?cluster=devnet):
+  exactly 100,000. Part 2 of [`docs/devnet-m11.md`](docs/devnet-m11.md);
+  the tooling is on `main` since [`c882ae1`](https://github.com/Phat1911/Tributary/commit/c882ae1).
+- **Next:** an adversarial audit of the settlement code. Its findings, if
+  any, go to [`AUDIT.md`](AUDIT.md) as they arrive.
+
+## Security and known limits
+
+Read first: the [threat model](docs/threat-model.md) (what is audited, what
+is not independently reviewed yet), [`SECURITY.md`](SECURITY.md) (private
+disclosure by email) and [`AUDIT.md`](AUDIT.md) (every finding, with
+evidence, in public).
+
+Stated limits, as of this writing:
+
+- **Depositor mode is experimental.** It was adversarially audited on
+  2026-11-18; its eight findings were fixed or formally accepted on
+  2026-11-19. One high-severity finding has been raised since and is open,
+  **A-061**: the order in which depositors serve a model family can be
+  steered by a depositor-supplied provider name. It is present in the
+  v0.1.4 image; it cannot fire while every deposit in a pool uses the same
+  `provider` string, as the walkthrough does. It has been
+  ruled (the order will depend on contributed weight and deposit age,
+  never on a supplied string) and is scheduled for the next fix session.
+- **Failed upstream calls that answer with an HTTP error still burn the
+  reserve estimate** (A-062). The founder has ruled that an HTTP-error
+  answer must not burn the depositor's credits; the floor stays for
+  successful answers that report no usage. The fix is scheduled with A-061.
+- **On-chain money is devnet money.** Deposits and earnings are micro-USD
+  book entries. On devnet a deposit is a claim record (SPEC D40); the escrow
+  holds renter prepayments only, and nothing in the product funds it for
+  payouts yet (M10). The program fixes the unit, one micro-USD is one USDC
+  base unit, with no conversion.
+- **The settlement code is one day old: proven by its tests, not yet by an
+  adversary.** Its twelve rules are green and a claim has paid on devnet;
+  the adversarial audit is the next step and its findings will be public in
+  `AUDIT.md`. Gaps its own builder states: only `fund_bond` respects the
+  pause switch; `resolve_challenge` refuses an unchallenged root, which no
+  test pins; a slash is capped by the bond as it stood when the root was
+  posted; any key may challenge, so one key can freeze a root's payouts
+  until the multisig rules. The window is a fixed 100-slot constant,
+  sized for a demo, and must become a parameter before any mainnet use.
+- **What the devnet runs did not exercise: a slash.** Both claim doors, a
+  challenge, the freeze and a multisig ruling have each run on devnet; a
+  slash (a root ruled false and the bond cut) is proven by the local suite
+  only. In both runs the renter and the depositor were one custodial key, as
+  in the November soak, and each payouts file was a single leaf written by
+  hand.
+- **Three gaps the builder names, still open.** There is no instruction to
+  unbond, so an operator's bond stays locked until a slash moves it; a
+  root for a used window number is refused, but a later root may carry a
+  lower, unused number, and the chain cannot see that two windows' roots pay
+  the same earnings; and a slash waits if the bond vault holds less than the
+  ruling.
+- **The program is on devnet only.** It has no on-chain `security.txt` and
+  no verified build yet.
+- **The challenge window is a fixed 100-slot constant,** sized for a demo.
+
+Non-negotiables, from [`SPEC.md`](SPEC.md): deposits are keys and credits
+only, never subscription logins or browser automation of consumer plans;
+provider keys are envelope-encrypted at rest, with the master key never in
+the database; the ledger is append-only, enforced at the database; quota and
+rate-limit checks always run at the gateway before any upstream call.
+
+## Business model, plainly
+
+V1 is free forever, by strategy: adoption first, zero recurring cost. The
+first dollar Tributary plans to earn is an operator's settlement fee (a
+fixed 5–10% band) on marketplace volume, paid by operators, never by
+members. In V1 the operator is the team that runs the instance; the 8%
+is a parameter of the settle run and today it moves no money, it only
+splits two ledger accounts. That marketplace opens only behind provider and
+reseller agreements for credit transfer; no such agreement exists today.
+Until that gate opens, Tributary is exactly what you see: a free,
+self-hosted governance tool with its settlement layer on devnet. No dollar
+is planned from terms-of-service-gray flows.
+
 Self-hosted *and* a marketplace? The boundary: V1 is governance inside one
 trust domain, with no blockchain, and your keys and usage data stay in your
 building. The marketplace is opt-in, pool by pool: a supplier with capacity
